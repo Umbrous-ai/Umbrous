@@ -14,6 +14,7 @@ from tests.fake_ollama import FakeOllama, demo_models
 from tests.helpers import RunningRuntime
 
 SCRIPT = Path(__file__).parent / "browser" / "m1_check.js"
+RECOVERY = Path(__file__).parent / "browser" / "m1_recovery.js"
 
 
 def node_env():
@@ -59,6 +60,28 @@ class BrowserTests(unittest.TestCase):
         self.assertTrue(any("qwen2.5:3b" in m and "Tool calls verified" in m for m in r["menu"]))
         self.assertTrue(any("tiny-chat:1b" in m and "Plain chat only" in m for m in r["menu"]))
         self.assertIn("Exposure | Loopback only", r["runtime"])
+
+    def test_no_automatic_switching_and_recovery_after_an_outage(self):
+        found = node_env()
+        if not found:
+            self.skipTest("Node.js with Playwright is not installed")
+        node, env = found
+        fake = FakeOllama(models=demo_models()).start()
+        try:
+            with RunningRuntime(ollama_url=fake.url) as rt:
+                url = f"{rt.origin}/#launch={rt.policy.launch_code}"
+                out = subprocess.run([node, str(RECOVERY), url, fake.url], env=env, capture_output=True,
+                                     text=True, timeout=120)
+                self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+                r = json.loads(out.stdout.strip().splitlines()[-1])
+        finally:
+            fake.stop()
+        self.assertEqual(r["pillAfterDisappear"], "Pick a model")   # no substitute model
+        self.assertTrue(r["sendDisabledAfterDisappear"])
+        self.assertTrue(r["metaWhenDown"].startswith("Not answered"))
+        self.assertEqual(r["pillWhenDown"], "Ollama not running")
+        self.assertEqual(r["pillAfterRetry"], "qwen2.5:3b")          # same model as before the outage
+        self.assertEqual(r["replyAfterRetry"], "You said: back again")
 
 
 if __name__ == "__main__":

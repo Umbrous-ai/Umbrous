@@ -145,6 +145,16 @@ class AdapterTests(unittest.TestCase):
             list(self.a.chat_stream("drip:1b", self.msgs(), deadlines=Deadlines(total=0.5)))
         self.assertIn("limit", err.exception.message)
 
+    def test_total_deadline_interrupts_a_blocked_read(self):
+        # Codex repro: a 0.2 s total limit took 1.5 s because it was only checked between lines.
+        for model in ("slow:1b", "stall:1b"):
+            with self.subTest(model=model):
+                t0 = time.monotonic()
+                with self.assertRaises(ModelTimeout) as err:
+                    list(self.a.chat_stream(model, self.msgs(), deadlines=Deadlines(first_token=30, idle=30, total=0.2)))
+                self.assertLess(time.monotonic() - t0, 0.6)
+                self.assertIn("limit", err.exception.message)
+
     def test_cancel_interrupts_a_blocked_read_quickly(self):
         token = CancelToken()
         threading.Timer(0.3, token.cancel).start()
@@ -204,6 +214,13 @@ class ProbeAndRouterTests(unittest.TestCase):
         self.assertIsNone(by_name["texty:1b"]["probe"])
         self.assertFalse(by_name["notools:1b"]["advertises_tools"])
         self.assertEqual(by_name["good:3b"]["context_length"], 32768)
+
+    def test_names_sharing_a_digest_keep_their_own_identity(self):
+        # Codex repro: "b:latest" resolved to "a:latest" because details were cached as a whole ModelInfo.
+        self.fake.models = [FakeModel("a:latest", digest="d" * 64), FakeModel("b:latest", digest="d" * 64)]
+        self.assertEqual(self.router.resolve("a:latest").name, "a:latest")
+        self.assertEqual(self.router.resolve("b:latest").name, "b:latest")
+        self.assertEqual([m["name"] for m in self.router.status()["models"]], ["a:latest", "b:latest"])
 
     def test_no_fallback_when_the_chosen_model_is_missing(self):
         with self.assertRaises(ModelNotInstalled) as err:

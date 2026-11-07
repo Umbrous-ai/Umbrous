@@ -41,6 +41,8 @@ class FakeOllama:
     port: int = 0
     stall_seconds: float = 3.0
     requests: List[dict] = field(default_factory=list)
+    down: bool = False                      # hang up on every request, like a stopped Ollama
+    hidden: List[str] = field(default_factory=list)  # installed-model names to hide from /api/tags
 
     def model(self, name: str) -> Optional[FakeModel]:
         return next((m for m in self.models if m.name == name), None)
@@ -62,20 +64,37 @@ class FakeOllama:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _hang_up(self):
+                self.close_connection = True
+                try:
+                    self.connection.shutdown(2)
+                except OSError:
+                    pass
+
             def do_GET(self):
+                if fake.down:
+                    return self._hang_up()
                 if self.path == "/api/version":
                     return self._json(200, {"version": "0.0.0-fake"})
                 if self.path == "/api/tags":
                     return self._json(200, {"models": [
                         {"name": m.name, "model": m.name, "digest": m.digest, "size": 1_900_000_000,
                          "details": {"family": "fake", "parameter_size": "3B", "quantization_level": "Q4_K_M"}}
-                        for m in fake.models]})
+                        for m in fake.models if m.name not in fake.hidden]})
                 self._json(404, {"error": "not found"})
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                if self.path == "/_control":  # test hook: {"down": bool, "hidden": [names]}
+                    fake.down = bool(body.get("down", fake.down))
+                    fake.hidden = list(body.get("hidden", fake.hidden))
+                    return self._json(200, {"down": fake.down, "hidden": fake.hidden})
+                if fake.down:
+                    return self._hang_up()
                 fake.requests.append({"path": self.path, "body": body})
                 m = fake.model(body.get("model", ""))
+                if m is not None and m.name in fake.hidden:
+                    m = None
                 if m is None or m.behavior == "not_found":
                     return self._json(404, {"error": f"model '{body.get('model')}' not found"})
                 if self.path == "/api/show":

@@ -20,12 +20,14 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import threading
 import time
+from dataclasses import replace
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
 from umbrous.model.base import (
-    CancelToken, Cancelled, ChatDelta, ChatDone, Deadlines, ModelInfo, ModelNotInstalled,
+    CancelToken, Cancelled, ChatDelta, ChatDone, Deadlines, ModelError, ModelInfo, ModelNotInstalled,
     ModelTimeout, ProviderError, ProviderUnavailable, StreamInterrupted, ToolsUnsupported,
 )
 
@@ -57,7 +59,10 @@ class OllamaAdapter:
         self.port = parts.port or 11434
         self.base_url = f"http://{self.host}:{self.port}"
         self.deadlines = deadlines
-        self._show_cache: Dict[str, ModelInfo] = {}
+        # digest -> (context_length, capabilities). Only the details are cached,
+        # never a whole ModelInfo: two names can share a digest (ollama cp, or
+        # "x" and "x:latest") and each must keep its own name.
+        self._show_cache: Dict[str, Tuple[Optional[int], Tuple[str, ...]]] = {}
 
     # --- low level ---------------------------------------------------------
     def _connect(self, timeout: float) -> http.client.HTTPConnection:
@@ -135,10 +140,11 @@ class OllamaAdapter:
         return sorted(models, key=lambda x: x.name)
 
     def show(self, model: ModelInfo) -> ModelInfo:
-        """Add context length and advertised capabilities. Cached by digest."""
+        """Add context length and advertised capabilities. Details cached by digest."""
         cached = self._show_cache.get(model.digest)
-        if cached:
-            return cached
+        if cached is not None:
+            ctx, caps = cached
+            return replace(model, context_length=ctx, advertised_capabilities=caps)
         status, data = self._request("POST", "/api/show", {"model": model.name}, timeout=15)
         if status != 200 or not isinstance(data, dict):
             self._raise_for(status, data, model.name)
@@ -148,9 +154,9 @@ class OllamaAdapter:
                 ctx = value
                 break
         caps = tuple(c for c in data.get("capabilities") or [] if isinstance(c, str))
-        full = ModelInfo(**{**model.__dict__, "context_length": ctx, "advertised_capabilities": caps})
-        self._show_cache[model.digest] = full
-        return full
+        if model.digest:
+            self._show_cache[model.digest] = (ctx, caps)
+        return replace(model, context_length=ctx, advertised_capabilities=caps)
 
     # --- chat ------------------------------------------------------------------
     def chat_once(self, model: str, messages: List[dict], tools: Optional[List[dict]] = None,
@@ -179,30 +185,56 @@ class OllamaAdapter:
         d = deadlines or self.deadlines
         cancel = cancel or CancelToken()
         started = time.monotonic()
-        conn = self._connect(d.connect)
+        conn = self._connect(min(d.connect, d.total))
         cancel.on_cancel(lambda: _abort(conn))
+        # The total deadline is enforced by a timer, not only between lines: a
+        # read blocked inside the socket is woken the moment time runs out.
+        total_hit = threading.Event()
+
+        def _total_expired() -> None:
+            total_hit.set()
+            _abort(conn)
+
+        watchdog = threading.Timer(d.total, _total_expired)
+        watchdog.daemon = True
+        watchdog.start()
+
+        def remaining() -> float:
+            return d.total - (time.monotonic() - started)
+
+        def bounded(phase: float) -> float:
+            return max(0.001, min(phase, remaining()))
+
+        def stopped(exc_msg: str) -> ModelError:
+            """Decide what an interrupted operation really means."""
+            if cancel.cancelled:
+                return Cancelled("Stopped.")
+            if total_hit.is_set() or remaining() <= 0:
+                return ModelTimeout(f"The reply took longer than the {d.total:g}s limit and was stopped.")
+            return StreamInterrupted(exc_msg)
+
         try:
             try:
                 conn.connect()
             except OSError as exc:
-                if cancel.cancelled:
-                    raise Cancelled("Stopped.") from None
+                if cancel.cancelled or total_hit.is_set():
+                    raise stopped("") from None
                 raise self._unreachable(exc) from None
-            if cancel.cancelled:  # stopped while connecting
-                raise Cancelled("Stopped.")
-            conn.sock.settimeout(d.first_token)
+            if cancel.cancelled or total_hit.is_set():
+                raise stopped("")
+            conn.sock.settimeout(bounded(d.first_token))
             body = {"model": model, "messages": messages, "stream": True, "options": options or {}}
             try:
                 conn.request("POST", "/api/chat", body=json.dumps(body).encode(),
                              headers={"Content-Type": "application/json"})
                 resp = conn.getresponse()
             except socket.timeout:
-                if cancel.cancelled:
-                    raise Cancelled("Stopped.") from None
-                raise ModelTimeout(f"{model} did not start answering within {d.first_token:.0f}s.") from None
+                if cancel.cancelled or remaining() <= 0:
+                    raise stopped("") from None
+                raise ModelTimeout(f"{model} did not start answering within {d.first_token:g}s.") from None
             except (OSError, http.client.HTTPException) as exc:
-                if cancel.cancelled:
-                    raise Cancelled("Stopped.") from None
+                if cancel.cancelled or total_hit.is_set():
+                    raise stopped("") from None
                 raise self._unreachable(exc) from None
 
             if resp.status != 200:
@@ -215,22 +247,21 @@ class OllamaAdapter:
 
             got_first = False
             while True:
-                if cancel.cancelled:
-                    raise Cancelled("Stopped.")
-                if time.monotonic() - started > d.total:
-                    raise ModelTimeout(f"The reply took longer than the {d.total:.0f}s limit and was stopped.")
+                if cancel.cancelled or remaining() <= 0:
+                    raise stopped("")
+                conn.sock.settimeout(bounded(d.idle if got_first else d.first_token))
                 try:
                     line = resp.readline(MAX_LINE + 1)
                 except socket.timeout:
+                    if cancel.cancelled or remaining() <= 0:
+                        raise stopped("") from None
                     if got_first:
-                        raise ModelTimeout(f"{model} went silent for more than {d.idle:.0f}s mid-reply.") from None
-                    raise ModelTimeout(f"{model} did not start answering within {d.first_token:.0f}s.") from None
+                        raise ModelTimeout(f"{model} went silent for more than {d.idle:g}s mid-reply.") from None
+                    raise ModelTimeout(f"{model} did not start answering within {d.first_token:g}s.") from None
                 except (OSError, http.client.HTTPException, ValueError) as exc:
-                    if cancel.cancelled:
-                        raise Cancelled("Stopped.") from None
-                    raise StreamInterrupted(f"The connection to Ollama broke mid-reply ({exc.__class__.__name__}).") from None
-                if cancel.cancelled:
-                    raise Cancelled("Stopped.")
+                    raise stopped(f"The connection to Ollama broke mid-reply ({exc.__class__.__name__}).") from None
+                if cancel.cancelled or total_hit.is_set():
+                    raise stopped("")
                 if not line:
                     raise StreamInterrupted("Ollama ended the reply early, without saying it was finished.")
                 if len(line) > MAX_LINE:
@@ -246,9 +277,7 @@ class OllamaAdapter:
                     raise StreamInterrupted("Ollama sent an unexpected reply shape.")
                 if "error" in chunk:
                     raise ProviderError(f"Ollama reported an error mid-reply: {self._error_text(chunk)}")
-                if not got_first:
-                    got_first = True
-                    conn.sock.settimeout(d.idle)
+                got_first = True
                 text = (chunk.get("message") or {}).get("content") or ""
                 if text:
                     yield ChatDelta(text)
@@ -261,4 +290,5 @@ class OllamaAdapter:
                     )
                     return
         finally:
+            watchdog.cancel()
             conn.close()

@@ -11,7 +11,7 @@ ollama pull qwen2.5:3b        # any chat model works; a few GB
 bin/umbrous                   # start, open the app, pick a model in the composer, chat
 bin/umbrous models            # installed models, tool-call labels, exposure check
 bin/umbrous probe --all       # run the tool-call probe on every installed model
-bin/umbrous test              # 106 tests; no Ollama needed (a stand-in is used)
+bin/umbrous test              # 109 tests; no Ollama needed (a stand-in is used)
 ```
 
 ## How a message travels
@@ -44,6 +44,15 @@ chat.js appends each delta as a text node, then shows "model · tokens · time"
 | `model/exposure.py` | Is Ollama reachable from the network? | Can't see firewall/router/IPv6 |
 | `web/chat.js` | Composer, model picker, stop, rendering | Only text nodes; links show their real address |
 
+### No switching, ever
+
+The page picks a default model once, on its very first load, and shows it in
+the pill before anything is sent. After that it never chooses for you: if the
+chosen model disappears, the pill says "Pick a model" and Send stays disabled
+until you pick one; if Ollama goes down, your choice is kept and a Retry
+button appears (at start or mid-chat). Opening the picker refreshes the model
+list and Ollama's status.
+
 ### Context and its budget
 
 ```
@@ -70,6 +79,10 @@ the reply, the footer shows Ollama's real count next to the estimate, e.g.
 | First token (includes loading the model) | 180 s | "did not start answering within…" |
 | Silence mid-reply | 60 s | "went silent for more than…" |
 | Whole reply | 600 s | "took longer than the … limit" |
+
+The whole-reply limit is enforced by a timer that shuts the Ollama socket the
+moment time runs out, and every read's own timeout is capped by the time left,
+so a read blocked inside the socket cannot overrun it.
 
 The send button becomes a stop button while a reply streams. Stop calls
 `/api/chat/cancel`, which shuts the Ollama socket down at once (a blocked read
@@ -149,7 +162,7 @@ restart Ollama). It cannot see the macOS firewall, your router, VPNs or IPv6.
 
 | File | Covers |
 |---|---|
-| `tests/test_m1_chat.py` | Context budget and truncation notices, message too long, loopback-only Ollama URL, streaming, exact model per reply, `num_ctx` sent, history on the next turn, Ollama down, missing model with **no fallback**, interrupted stream, first-token/idle/total timeouts, stop mid-reply, one reply per chat at a time, probe pass/fail stages, fresh probe code, probe per digest, exposure (loopback, not running, listening on all interfaces), JSON-only API, chat text never logged |
-| `tests/test_browser_m1.py` | Headless Chromium: chat, HTML/script reply inert, no remote loads, stop button, model labels, Exposure row. Skipped without Node + Playwright |
+| `tests/test_m1_chat.py` | Context budget and truncation notices, message too long, loopback-only Ollama URL, streaming, exact model per reply, `num_ctx` sent, two names sharing a digest keep their identity, history on the next turn, Ollama down, missing model with **no fallback**, interrupted stream, first-token/idle/total timeouts (total interrupts a blocked read), stop mid-reply, one reply per chat at a time, probe pass/fail stages, fresh probe code, probe per digest, exposure (loopback, not running, listening on all interfaces), JSON-only API, chat text never logged |
+| `tests/test_browser_m1.py` | Headless Chromium: chat, HTML/script reply inert, no remote loads, stop button, model labels, Exposure row; a vanished model is not replaced; Retry after Ollama goes down keeps the same model. Skipped without Node + Playwright |
 | `tests/test_page_bridge.py` | No HTML sinks or browser storage in either page script; the API helper never hands out the credential |
 | `tests/fake_ollama.py` | The stand-in Ollama: same endpoints, can refuse tools, stall or die mid-reply |

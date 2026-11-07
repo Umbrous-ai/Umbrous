@@ -27,6 +27,8 @@
   let chatId = null;
   let run = null;          // { runId, controller } while a reply is streaming
   let ollamaUp = false;
+  let autoPicked = false;  // a default may be picked on the first load only; never again
+  let downNotice = null;   // the single "Ollama is not running" notice with its Retry button
 
   // ---------- helpers ----------
   function newId() {
@@ -154,13 +156,23 @@
     }
     ollamaUp = !!j.reachable;
     models = j.models || [];
-    if (selected && !models.some((m) => m.name === selected)) {
-      // The chosen model disappeared: say so, do not substitute another one.
-      notice(`The model ${selected} is no longer installed. Pick another model.`, 'warn');
-      selected = null;
+    if (!ollamaUp) {
+      // Ollama is down: keep the chosen model as it is (it may come back), offer Retry.
+      ollamaDown(j.error);
+    } else {
+      if (downNotice) { downNotice.remove(); downNotice = null; }
+      if (selected && !models.some((m) => m.name === selected)) {
+        // The chosen model disappeared: say so and wait for an explicit choice.
+        notice(`The model ${selected} is no longer installed. Pick a model to continue.`, 'warn');
+        selected = null;
+      }
+      // Only on the very first load is a default picked (shown in the pill before
+      // anything is sent). After that, a missing choice stays missing until you pick.
+      if (!selected && !autoPicked && models.length) {
+        selected = (models.find((m) => m.tool_capable) || models[0]).name;
+      }
     }
-    if (!selected && models.length) selected = (models.find((m) => m.tool_capable) || models[0]).name;
-    if (!ollamaUp) ollamaDown(j.error);
+    autoPicked = true;
     renderPill();
     if (keepMenu && $('#model-menu')) openMenu();
   }
@@ -173,11 +185,21 @@
     return n;
   }
   function ollamaDown(message) {
-    const n = notice(message || 'Ollama is not running.', 'bad');
+    ollamaUp = false;
+    renderPill();
+    if (downNotice && downNotice.isConnected) {          // one notice at a time, moved to the end
+      downNotice.firstChild.textContent = message || 'Ollama is not running.';
+      thread().appendChild(downNotice);
+      scrollDown();
+      return;
+    }
+    const n = notice('', 'bad');
+    n.appendChild(el('span', '', message || 'Ollama is not running.'));
     const retry = el('button', 'pill retry', 'Retry');
     retry.type = 'button';
-    retry.onclick = async () => { retry.disabled = true; await loadModels(); if (ollamaUp) n.remove(); else retry.disabled = false; };
+    retry.onclick = async () => { retry.disabled = true; await loadModels(); retry.disabled = false; };
     n.appendChild(retry);
+    downNotice = n;
   }
   function newChat() {
     if (run) stop();
@@ -250,7 +272,7 @@
             if (ev.code === 'cancelled') meta.textContent = 'Stopped by you.' + (ev.partial ? ' The text above is incomplete.' : '');
             else meta.textContent = (ev.partial ? 'Incomplete: ' : 'Not answered: ') + ev.message;
             meta.classList.add(ev.code === 'cancelled' ? 'warn' : 'bad');
-            if (ev.code === 'ollama_unreachable') { ollamaUp = false; renderPill(); }
+            if (ev.code === 'ollama_unreachable') ollamaDown(ev.message);  // Retry button, same as at start
           }
         }
       }
@@ -291,7 +313,12 @@
     sendBtn.addEventListener('click', (e) => { if (run) { e.preventDefault(); stop(); } });
     input.addEventListener('input', syncSend);   // runs after the prototype's own listener
     $('[data-new]').addEventListener('click', newChat);
-    $('#model-pill').addEventListener('click', (e) => { e.stopPropagation(); $('#model-menu') ? closeMenu() : openMenu(); });
+    $('#model-pill').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if ($('#model-menu')) { closeMenu(); return; }
+      openMenu();
+      loadModels(true);  // refresh: Ollama may have come back, models may have changed
+    });
     document.addEventListener('click', (e) => { if (!e.target.closest('#model-menu')) closeMenu(); });
     $('[data-new]').click();  // the prototype's own New chat (sidebar state) plus ours (fresh chat id)
     loadModels();
