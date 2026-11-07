@@ -141,20 +141,17 @@ serves), is the visual source of truth. The native views reproduce it:
   radius 12), the sidebar with workspace switcher, New chat ⌘N, collapsible
   Projects (+ on hover) and Sessions, the 56 px header, the 696 px thread column,
   `.msg-u` bubbles, `.answer` text at 16/1.6, `.reply-meta`, the composer with
-  attach, model pill, Tools · 4 and the round send button, and the Details panel
-  with Runtime, Session, Tools, Files and Steps. The Details panel hides below
-  1180 px wide, as the page's media query did.
-- The right-hand panel is now a floating card under the header's list button,
-  after Freddy's reference screenshot (2026-11-07): the project's name with a ⋯
-  menu (Show details, Show data folder), Changes with added and removed line
-  counts, then Sources (+, Web search, View all). Its sizes and colours were
-  measured from that screenshot: 300 pt wide, 20 pt padding, 30 pt rows, 13 pt
-  text, background `#2D2D2D`, hairline `#3B3B3B`, radius 16. It closes on a
-  click outside or Escape. Changes reads +0 -0 because nothing in Umbrous can
-  change files until tools arrive (M3); adding sources waits for the same.
-  The docked Details panel (Runtime, Session, and the page's placeholder
-  sections) is still there behind the header's panel button and View all,
-  closed by default.
+  attach, model pill, Tools · 4 and the round send button.
+- The right sidebar shows only Changes and Sources (Freddy, 2026-11-07; it
+  replaces the page's Details list of Runtime, Session, Tools, Files and Steps).
+  The header's panel button shows and hides it; it starts shown and hides below
+  1180 px wide, as the page's media query did. Its rows follow Freddy's reference
+  screenshot: the project's name with a ⋯ menu (Show data folder), Changes with
+  added and removed line counts, a divider, then Sources (+, Web search, View
+  all); 20 pt side padding, 30 pt rows, 13 pt text. Changes reads +0 -0 because
+  nothing in Umbrous can change files until tools arrive (M3); adding sources
+  and View all wait for the same. Runtime facts that used to be there are
+  elsewhere: Ollama state in the model pill and notices, the version in About.
 
 `desktop/e2e/scripts/` and `stress.py seed-reference` reproduce the page's sample
 content (projects, sessions, the "pass rate" reply) as real data so both can be
@@ -167,8 +164,7 @@ Where the native view differs, and why:
 | A 28 px strip above the panels | macOS draws the window controls there. In the browser the title bar played that role; putting the controls inside the sidebar would move its contents |
 | Inline code (`tool router v2`) is a flat highlight, without the page's rounded, padded chip and branch icon | GPUI styles runs inside wrapped text with colour, weight and background only; padding, radius and inline icons are not possible inside a text run |
 | "Worked for 34s", the metric cards and the action pills from the sample are not shown | They were the prototype's demo content; the runtime does not produce them (the browser page did not show them for real replies either) |
-| Tools, Files and Steps in Details show the page's placeholder rows | Same as the browser page: no runtime behind them yet (prototypes/NOTES.md) |
-| Uptime refreshes every 5 s only while the window is in front | Avoids work while hidden; the page polled continuously |
+| The right sidebar holds Changes and Sources instead of the page's Details list | Freddy's request (2026-11-07) |
 
 Hover states follow the page's CSS: `.nav:hover`, `.icon-btn:hover` (and
 `[aria-pressed]` keeping its background), `.pill:hover`, `.section:hover` with

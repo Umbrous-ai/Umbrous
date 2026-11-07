@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    div, list, prelude::*, px, relative, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
+    div, list, prelude::*, px, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     FontWeight, ListAlignment, ListState, MouseButton, SharedString, Subscription, Window,
 };
 use serde_json::{json, Value};
@@ -80,11 +80,9 @@ pub struct Workspace {
     run: Option<Run>,
     notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
     sidebar: bool,
+    /// the right sidebar (Changes and Sources), shown and hidden by the header's panel button
     details: bool,
-    /// the context card under the header's list button (the right-hand panel)
-    card_open: bool,
     card_menu: bool,
-    card_closed_at: Option<Instant>,
     projects_open: bool,
     sessions_open: bool,
     /// estimated tokens and window of the last reply's context (Details ▸ Context)
@@ -222,10 +220,8 @@ impl Workspace {
             run: None,
             notice: None,
             sidebar: true,
-            details: false,
-            card_open: false,
+            details: true,
             card_menu: false,
-            card_closed_at: None,
             projects_open: true,
             sessions_open: true,
             context: None,
@@ -272,7 +268,6 @@ impl Workspace {
                             logfile::event("ui.connected", &[("ms_since_start", this.started.elapsed().as_millis().to_string())]);
                             this.load_projects(None, cx);
                             this.load_models(false, cx);
-                            this.start_health_refresh(cx);
                             cx.notify();
                         }
                         Err(e) => {
@@ -290,29 +285,6 @@ impl Workspace {
                 .detach();
             }
         }
-    }
-
-    /// The Details panel's Runtime section, refreshed every 5 s like the page did,
-    /// but only while the window is in front (a covered window costs nothing).
-    fn start_health_refresh(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(5)).await;
-            let api = match this.update(cx, |ws, _| {
-                if matches!(ws.phase, Phase::Ready) && ws.window_active { ws.api.clone() } else { None }
-            }) {
-                Ok(a) => a,
-                Err(_) => break, // window closed
-            };
-            let Some(api) = api else { continue };
-            let r = cx.background_spawn(async move { api.get::<api::Health>("/api/health") }).await;
-            if this.update(cx, |ws, cx| {
-                if let Ok(h) = r {
-                    ws.health = Some(h);
-                    cx.notify();
-                }
-            }).is_err() { break; }
-        })
-        .detach();
     }
 
     pub fn retry(&mut self, cx: &mut Context<Self>) {
@@ -877,7 +849,7 @@ impl Workspace {
 
     #[cfg(feature = "e2e")]
     pub fn set_card_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        self.card_open = open;
+        self.details = open;
         cx.notify();
     }
 
@@ -963,8 +935,7 @@ impl Workspace {
         cx.notify();
     }
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model_menu || self.options_menu || self.project_input.is_some() || self.card_open {
-            self.card_open = false;
+        if self.model_menu || self.options_menu || self.project_input.is_some() || self.card_menu {
             self.card_menu = false;
             self.model_menu = false;
             self.options_menu = false;
@@ -1042,11 +1013,6 @@ fn parse_iso_secs(iso: &str) -> Option<i64> {
 /// chat.js `fmtK()`
 fn fmt_k(n: u64) -> String {
     if n >= 10_000 { format!("{}k", (n as f64 / 1000.0).round()) } else if n >= 1000 { format!("{:.1}k", n as f64 / 1000.0) } else { n.to_string() }
-}
-
-/// runtime-bridge.js `uptime()`
-fn uptime(s: u64) -> String {
-    if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m {}s", s / 60, s % 60) } else { format!("{}h {}m", s / 3600, (s % 3600) / 60) }
 }
 
 impl Workspace {
@@ -1324,14 +1290,6 @@ impl Workspace {
                     cx.notify();
                 })))
             })
-            .child(ui::icon_btn("card-toggle", "list-check", self.card_open).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                // a click outside just closed it: this click should not reopen it
-                let just_closed = this.card_closed_at.map(|t| t.elapsed() < Duration::from_millis(250)).unwrap_or(false);
-                this.card_open = !this.card_open && !just_closed;
-                this.card_menu = false;
-                cx.notify();
-            })))
-            .child(div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(border_strong()))
             .child(ui::icon_btn("rtoggle", "sidebar-right", self.details).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.details = !this.details;
                 cx.notify();
@@ -1385,14 +1343,11 @@ impl Workspace {
         )
     }
 
-    /// The context card: floats under the header's list button, like Freddy's
-    /// reference. Sizes in points from that screenshot: 300 wide, 20 side
-    /// padding, 30 pt rows, 13 pt section titles, 14 pt items.
-    fn render_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The right sidebar: Changes and Sources only (Freddy, 2026-11-07), laid
+    /// out like his reference card: 20 pt side padding, 30 pt rows, 13 pt text.
+    /// The header's panel button shows and hides it.
+    fn render_right_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         use theme::*;
-        if !self.card_open {
-            return None;
-        }
         let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_else(|| "Umbrous".into());
         let row = |id: &'static str| {
             div().id(id).group(id).flex().items_center().gap(px(14.)).h(px(30.)).px(px(20.))
@@ -1418,15 +1373,11 @@ impl Workspace {
         let web = row("card-web")
             .child(ui::icon("globe").text_color(text_default()))
             .child(div().text_size(fs_13()).text_color(text_default()).child("Web search"));
+        // View all lists every source once there are more than fit here (M3)
         let all = row("card-all")
-            .cursor_pointer()
             .child(ui::hover_icon("connectors", &"card-all".into(), text_subtle(), text_default()))
             .child(div().text_size(fs_13()).text_color(text_subtle()).group_hover("card-all", |s| s.text_color(text_default())).child("View all"))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.details = true; // the full Details panel: runtime, session, tools
-                this.card_open = false;
-                cx.notify();
-            }));
+;
         let mut menu = None;
         if self.card_menu {
             let item = |id: &'static str, label: &'static str| {
@@ -1446,11 +1397,6 @@ impl Workspace {
                     .shadow_lg()
                     .flex()
                     .flex_col()
-                    .child(item("card-details", if self.details { "Hide details" } else { "Show details" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.details = !this.details;
-                        this.card_menu = false;
-                        cx.notify();
-                    })))
                     .child(item("card-folder", "Show data folder").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let Some(h) = logfile::umbrous_home() {
                             cx.reveal_path(&h);
@@ -1460,41 +1406,25 @@ impl Workspace {
                     }))),
             );
         }
-        Some(
-            div()
-                .id("context-card")
-                .absolute()
-                .top(px(64.))
-                .right(px(10.))
-                .w(px(300.))
-                .pt(px(8.))
-                .pb(px(10.))
-                .rounded(px(16.))
-                .bg(card_bg())
-                .border_1()
-                .border_color(card_border())
-                .shadow_lg()
-                .flex()
-                .flex_col()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.card_open = false;
-                    this.card_menu = false;
-                    this.card_closed_at = Some(Instant::now());
-                    cx.notify();
-                }))
-                .child(title_row(project.into(), ui::icon_btn("card-more", "more", self.card_menu).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.card_menu = !this.card_menu;
-                    cx.notify();
-                }))))
-                .child(changes)
-                .child(div().mx(px(20.)).mt(px(7.)).mb(px(6.)).h(px(1.)).bg(card_divider()))
-                // Adding sources needs the tools that arrive in M3; the + is shown, as in the reference
-                .child(title_row("Sources".into(), ui::icon_btn("card-add-source", "plus", false)))
-                .child(web)
-                .child(all)
-                .children(menu)
-                .into_any_element(),
-        )
+        ui::panel()
+            .id("right-panel")
+            .relative()
+            .w(px(300.))
+            .flex_none()
+            .h_full()
+            .pt(px(12.))
+            .child(title_row(project.into(), ui::icon_btn("card-more", "more", self.card_menu).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.card_menu = !this.card_menu;
+                cx.notify();
+            }))))
+            .child(changes)
+            .child(div().mx(px(20.)).mt(px(7.)).mb(px(6.)).h(px(1.)).bg(card_divider()))
+            // Adding sources needs the tools that arrive in M3; the + is shown, as in the reference
+            .child(title_row("Sources".into(), ui::icon_btn("card-add-source", "plus", false)))
+            .child(web)
+            .child(all)
+            .children(menu)
+            .into_any_element()
     }
 
     /// `.thread`: max 760, padding 48 32 32. Notices sit in the thread like the page's.
@@ -1728,117 +1658,6 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// `aside.rpanel`: Details with Runtime, Session, Tools, Files, Steps.
-    fn render_details(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        use theme::*;
-        let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
-        let h = self.health.clone();
-        let dash = || "–".to_string();
-        let (status_color, status_text): (gpui::Hsla, &str) = match &self.phase {
-            Phase::Ready => (success().into(), "Connected"),
-            Phase::Starting => (text_subtle().into(), "Starting"),
-            Phase::Failed(_) => (danger().into(), "Unreachable"),
-        };
-        let ollama = match &self.models {
-            Some(m) if m.reachable => format!("Running · {}", m.version.clone().unwrap_or_default()),
-            Some(_) => "Not running".into(),
-            None => dash(),
-        };
-        let exposure = h.as_ref().and_then(|h| h.ollama_exposure.as_ref()).and_then(|e| e.get("status").and_then(|s| s.as_str()).map(str::to_string));
-        let (exp_text, exp_bad) = match exposure.as_deref() {
-            Some("exposed") => ("EXPOSED on network".to_string(), true),
-            Some("loopback_only") => ("Loopback only".to_string(), false),
-            Some(_) => ("n/a".to_string(), false),
-            None => (dash(), false),
-        };
-        let (ctx_label, ctx_frac) = match self.context {
-            Some((est, win)) if win > 0 => (format!("~{} / {}", fmt_k(est), fmt_k(win)), (est as f32 / win as f32).min(1.0)),
-            _ => (dash(), 0.0),
-        };
-        let model = self.msgs.iter().rev().find_map(|m| (m.role == Role::Assistant && !m.streaming).then(|| m.meta.split(" · ").next().unwrap_or("").to_string()))
-            .filter(|s| !s.is_empty())
-            .or(self.model.clone())
-            .unwrap_or_else(dash);
-
-        let runtime = ui::rsec("Runtime", false)
-            .child(ui::kv("Status", div().flex().items_center().gap(px(6.)).child(ui::dot(status_color)).child(status_text)))
-            .child(ui::kv("Version", h.as_ref().map(|h| format!("{} · {}", h.version, h.milestone)).unwrap_or_else(dash)))
-            .child(ui::kv("Schema", h.as_ref().map(|h| format!("v{}", h.schema_version)).unwrap_or_else(dash)))
-            .child(ui::kv("Uptime", h.as_ref().map(|h| uptime(h.uptime_s)).unwrap_or_else(dash)))
-            .child(ui::kv("Address", h.as_ref().map(|h| h.bind.clone()).unwrap_or_else(dash)))
-            .child(ui::kv("Ollama", ollama))
-            .child(ui::kv("Exposure", div().when(exp_bad, |d| d.text_color(danger())).child(exp_text)));
-        let session = ui::rsec("Session", false)
-            .child(ui::kv("Model", model))
-            .child(ui::kv("Runs on", div().flex().items_center().gap(px(6.)).child(ui::dot(success())).child("Local")))
-            .child(ui::kv("Project", div().flex().items_center().gap(px(6.)).child(ui::icon("folder").text_color(text_strong())).child(project)))
-            .child(
-                div()
-                    .pt(px(6.))
-                    .child(div().flex().justify_between().text_size(fs_12()).text_color(text_subtle()).child("Context").child(ctx_label))
-                    .child(
-                        // `.ctx`: 4px track, accent fill
-                        div().mt(px(6.)).h(px(4.)).rounded_full().bg(bg_selected()).overflow_hidden().child(div().h_full().w(relative(ctx_frac)).bg(accent())),
-                    ),
-            );
-        // The page's Tools, Files and Steps sections are still placeholders with
-        // no runtime behind them (prototypes/NOTES.md); they are shown exactly as there.
-        let tools = ui::rsec("Tools", false)
-            .child(ui::rrow("terminal", "Terminal").child(ui::toggle(true)))
-            .child(ui::rrow("globe", "Web search").child(ui::toggle(true)))
-            .child(ui::rrow("doc", "Files").child(ui::toggle(true)))
-            .child(ui::rrow("branch", "Git").child(ui::toggle(true)));
-        let files = ui::rsec("Files", false)
-            .child(ui::rrow("doc", "router/timeout.ts").child(
-                div().flex().gap(px(4.)).font_family(MONO).text_size(fs_12()).child(div().text_color(success()).child("+6")).child(div().text_color(danger()).child("−2")),
-            ))
-            .child(ui::rrow("table", "evals/runs.csv").child(ui::code_small("read")))
-            .child(ui::rrow("doc", "CHANGELOG.md").child(ui::code_small("read")));
-        let steps = ui::rsec("Steps", true)
-            .child(ui::rrow("search", "Queried eval runs").child(ui::code_small("4s")))
-            .child(ui::rrow("table", "Compared by task type").child(ui::code_small("11s")))
-            .child(ui::rrow("branch", "Matched to a41f9c2").child(ui::code_small("19s")));
-
-        ui::panel()
-            .w(px(300.))
-            .flex_none()
-            .h_full()
-            .child(
-                // `.rhead`: 56px, padding 0 12 0 16
-                div()
-                    .h(px(56.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .pl(px(SP_16))
-                    .pr(px(SP_12))
-                    .border_b_1()
-                    .border_color(border())
-                    .child(div().flex_1().text_size(fs_14()).font_weight(FontWeight::MEDIUM).text_color(text_strong()).child("Details"))
-                    .child(ui::icon_btn("rclose", "sidebar-right", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.details = false;
-                        cx.notify();
-                    }))),
-            )
-            .child(
-                // `.rbody`: padding 8 16 16
-                div()
-                    .id("rbody")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .pt(px(SP_8))
-                    .px(px(SP_16))
-                    .pb(px(SP_16))
-                    .child(runtime)
-                    .child(session)
-                    .child(tools)
-                    .child(files)
-                    .child(steps),
-            )
-            .into_any_element()
-    }
-
     /// Starting / failed: centred like the page's `.empty` state.
     fn render_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
         use theme::*;
@@ -1955,11 +1774,10 @@ impl Render for Workspace {
                 .child(self.render_header(cx))
                 .child(self.render_transcript(cx))
                 .child(self.render_composer(cx))
-                .children(self.render_options_menu(cx))
-                .children(self.render_card(cx));
+                .children(self.render_options_menu(cx));
             app.when(self.sidebar, |d| d.child(self.render_sidebar(cx)))
                 .child(main)
-                .when(self.details && wide, |d| d.child(self.render_details(cx)))
+                .when(self.details && wide, |d| d.child(self.render_right_panel(cx)))
         };
         let el = root.child(app);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;

@@ -187,6 +187,7 @@ pub struct ModelInfo {
 pub struct Models {
     pub reachable: bool,
     #[serde(default)]
+    #[allow(dead_code)]
     pub version: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
@@ -194,6 +195,7 @@ pub struct Models {
     pub models: Vec<ModelInfo>,
 }
 
+#[allow(dead_code)] // logged nowhere yet; kept as the claim step's sanity check
 #[derive(Debug, Clone, Deserialize)]
 pub struct Health {
     pub version: String,
