@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -20,12 +21,15 @@ from umbrous.receipts.redaction import default_redactor
 class RunningRuntime:
     """Context manager: starts the runtime exactly as `serve` does, minus the browser."""
 
-    def __init__(self, **overrides) -> None:
+    def __init__(self, home: Optional[Path] = None, **overrides) -> None:
+        """Pass `home` to start again on the same data (a restart); it is then not deleted."""
         self.overrides = overrides
+        self._given_home = home
+        self._aliases: Dict[str, str] = {}
 
     def __enter__(self) -> "RunningRuntime":
         self._tmp = tempfile.TemporaryDirectory()
-        self.home = Path(self._tmp.name) / "home"
+        self.home = self._given_home or Path(self._tmp.name) / "home"
         make_private_dir(self.home)
         self.config = load_config(self.home, {"port": 0, **self.overrides})
         self.log_stream = io.StringIO()
@@ -75,8 +79,25 @@ class RunningRuntime:
         return self.request("POST", path, headers=h, body=json.dumps(obj).encode(),
                             token=token or self.policy.session_token)
 
-    def chat(self, chat_id: str, model: str, message: str) -> list:
-        """Send a chat message and return the streamed events."""
+    def new_chat(self, project_id: str = "prj_general") -> str:
+        status, _, body = self.post_json("/api/chats", {"project_id": project_id})
+        assert status == 201, (status, body)
+        cid = json.loads(body)["chat"]["id"]
+        return cid
+
+    def get_json(self, path: str) -> Tuple[int, dict]:
+        return self.json("GET", path, token=self.policy.session_token)
+
+    def chat(self, chat_id: str, model: str, message: str, create: bool = True) -> list:
+        """Send a chat message and return the streamed events.
+
+        Since M2 chats are created by the runtime. A name that is not a real
+        chat id yet (tests use readable ones like "chat_testtest01") gets a new
+        chat in General on first use, and the same chat after that, unless
+        create=False (to test an unknown id)."""
+        if create and chat_id not in self._aliases and not re.fullmatch(r"chat_[0-9a-f]{24}", chat_id):
+            self._aliases[chat_id] = self.new_chat()
+        chat_id = self._aliases.get(chat_id, chat_id)
         status, _, body = self.post_json("/api/chat", {"chat_id": chat_id, "model": model, "message": message})
         assert status == 200, status
         return [json.loads(line) for line in body.decode().splitlines() if line.strip()]

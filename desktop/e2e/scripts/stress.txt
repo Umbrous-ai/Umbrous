@@ -1,0 +1,21 @@
+# Responsiveness workload (docs/desktop.md, "Measurements"). Data from:
+#   python3 desktop/e2e/stress.py seed HOME 1000
+#   python3 desktop/e2e/stress.py fake-ollama 18556   (HOME/config.json: {"ollama_url": "http://127.0.0.1:18556"})
+wait_ready 30
+wait_models
+select_project Load test
+open_chat Long history
+record long_open
+scroll_test 80
+select_all_copy
+open_chat Huge reply
+record huge_open
+scroll_test 40
+new_chat
+send Stream the big markdown please
+sleep 3000
+scroll_test 40
+wait_reply 300
+sleep 800
+record after_stream
+quit

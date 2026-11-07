@@ -2,6 +2,7 @@
 
     bin/umbrous                 start the runtime and open the app (same as `serve`)
     bin/umbrous serve --no-open start the runtime and print the one-time URL instead
+    bin/umbrous serve --desktop how the desktop app starts it: JSON lines on stdout, commands on stdin
     bin/umbrous test            run the test suite
     bin/umbrous purge logs      delete the runtime's log files (asks for --yes)
     bin/umbrous models          list installed Ollama models, probe results and the exposure check
@@ -47,12 +48,25 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def serve(config: Config, open_browser: bool) -> int:
+def serve(config: Config, open_browser: bool, desktop: bool = False) -> int:
+    """Run until Ctrl-C / SIGTERM. With `desktop`, speak the desktop app's
+    protocol instead (see umbrous/desktop.py): JSON lines on stdout, commands on
+    stdin, and stop when stdin closes."""
     from umbrous.api.server import make_server
     from umbrous.browser import open_page
     from umbrous.logging_setup import log_event, setup_logging
     from umbrous.persistence import db
     from umbrous.receipts.redaction import default_redactor
+    from umbrous import desktop as desk
+
+    def say(text: str) -> None:  # human-readable output; stdout belongs to the protocol in desktop mode
+        print(text, file=sys.stderr if desktop else sys.stdout)
+
+    def fail(code: str, text: str, rc: int, **fields) -> int:
+        print(text, file=sys.stderr)
+        if desktop:
+            desk.emit("error", code=code, message=text, **fields)
+        return rc
 
     make_private_dir(config.home)
     make_private_dir(config.run_dir)
@@ -63,32 +77,43 @@ def serve(config: Config, open_browser: bool) -> int:
         try:
             other = json.loads(runtime_file.read_text())
             if _pid_alive(int(other["pid"])) and int(other["pid"]) != os.getpid():
-                print(f"Umbrous is already running (pid {other['pid']}, {other['origin']}). "
-                      "Stop it first, or use --home for a separate instance.", file=sys.stderr)
-                return 1
-        except (ValueError, KeyError, OSError):
+                where = "the desktop app" if other.get("mode") == "desktop" else "a terminal"
+                return fail("already_running",
+                            f"Umbrous is already running (pid {other['pid']}, {other['origin']}, started from {where}). "
+                            "Stop it first, or use --home for a separate instance.", 1,
+                            pid=int(other["pid"]), origin=str(other.get("origin", "")),
+                            mode=str(other.get("mode", "cli")))
+        except (ValueError, KeyError, OSError, TypeError):
             pass  # stale or unreadable: overwrite below
 
-    conn = db.connect(config.db_path)
+    try:
+        conn = db.connect(config.db_path)
+    except Exception as exc:  # SchemaError, sqlite3 errors, permissions
+        return fail("database_error", f"Cannot open the database at {config.db_path}: {exc}", 1)
     launch_id = db.record_launch(conn, __version__)
     try:
         server, runtime = make_server(config, db.schema_version(conn), db.launch_count(conn))
     except OSError as exc:
         db.record_stop(conn, launch_id)
-        print(f"Cannot listen on {config.host}:{config.port}: {exc.strerror}. "
-              "Is another program using that port? Try --port.", file=sys.stderr)
-        return 1
+        conn.close()
+        return fail("port_in_use", f"Cannot listen on {config.host}:{config.port}: {exc.strerror}. "
+                    "Is another program using that port? Try --port.", 1, port=config.port)
 
     policy = runtime.policy
     default_redactor.register(policy.session_token)
     default_redactor.register(policy.launch_code)
-    _write_private_json(runtime_file, {"pid": os.getpid(), "origin": policy.origin, "version": __version__})
+    _write_private_json(runtime_file, {"pid": os.getpid(), "origin": policy.origin, "version": __version__,
+                                       "mode": "desktop" if desktop else "cli"})
 
     log_event(log, "runtime.started", version=__version__, milestone=MILESTONE, bind=f"127.0.0.1:{policy.port}",
-              schema_version=runtime.schema_version, home=str(config.home))
+              schema_version=runtime.schema_version, home=str(config.home), mode="desktop" if desktop else "cli")
     launch_url = f"{policy.origin}/#launch={policy.launch_code}"
-    print(f"Umbrous {__version__} ({MILESTONE}) listening on {policy.origin} (loopback only). Ctrl-C stops it.")
-    if open_browser:
+    say(f"Umbrous {__version__} ({MILESTONE}) listening on {policy.origin} (loopback only). "
+        + ("Closing stdin stops it." if desktop else "Ctrl-C stops it."))
+    if desktop:
+        desk.emit("ready", origin=policy.origin, launch_code=policy.launch_code, pid=os.getpid(),
+                  version=__version__, milestone=MILESTONE, home=str(config.home))
+    elif open_browser:
         print(f"Opened in {open_page(launch_url, config.browser_profile_dir)}.")
     else:
         print("Open this URL within 2 minutes. It works once:")
@@ -100,10 +125,10 @@ def serve(config: Config, open_browser: bool) -> int:
         level = logging.WARNING if report.status == "exposed" else logging.INFO
         log_event(log, "ollama.exposure", level=level, **report.as_dict())
         prefix = "WARNING: " if report.status == "exposed" else ""
-        print(f"{prefix}Ollama exposure check: {report.summary}. {report.limits}")
+        say(f"{prefix}Ollama exposure check: {report.summary}. {report.limits}")
         if report.status == "exposed":
-            print("  Anyone on those networks can use your models. Unset OLLAMA_HOST "
-                  "(launchctl unsetenv OLLAMA_HOST) and restart Ollama to keep it on loopback.")
+            say("  Anyone on those networks can use your models. Unset OLLAMA_HOST "
+                "(launchctl unsetenv OLLAMA_HOST) and restart Ollama to keep it on loopback.")
         sys.stdout.flush()
 
     threading.Thread(target=_check_ollama_exposure, daemon=True).start()
@@ -113,6 +138,15 @@ def serve(config: Config, open_browser: bool) -> int:
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
+
+    if desktop:
+        def _reissue() -> str:
+            code = policy.reissue_launch_code()
+            default_redactor.register(code)
+            log_event(log, "desktop.launch_code_reissued")
+            return code
+
+        desk.watch_stdin(on_stop=lambda: _stop(None, None), on_reissue=_reissue)
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
@@ -125,8 +159,13 @@ def serve(config: Config, open_browser: bool) -> int:
             runtime_file.unlink()
         except FileNotFoundError:
             pass
-        log_event(log, "runtime.stopped", uptime_s=runtime.health()["uptime_s"])
-        print("Umbrous stopped.")
+        log_event(log, "runtime.stopped", uptime_s=int(runtime._clock() - runtime._started_mono))
+        say("Umbrous stopped.")
+        if desktop:
+            try:
+                desk.emit("stopped")
+            except (OSError, ValueError):
+                pass  # the app is gone; nobody to tell
     return 0
 
 
@@ -137,7 +176,8 @@ def run_tests(verbosity: int = 2) -> int:
 
 
 def purge_logs(config: Config, yes: bool) -> int:
-    files = sorted(config.log_dir.glob("runtime.log*")) if config.log_dir.exists() else []
+    files = sorted([*config.log_dir.glob("runtime.log*"), *config.log_dir.glob("desktop.log*")]) \
+        if config.log_dir.exists() else []  # desktop.log: the desktop app's own events (desktop/)
     if not files:
         print("No log files to purge.")
         return 0
@@ -209,6 +249,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_serve.add_argument("--port", type=int, help="loopback port (default 8417)")
     p_serve.add_argument("--no-open", action="store_true", help="print the one-time URL instead of opening a browser")
     p_serve.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    p_serve.add_argument("--desktop", action="store_true",
+                         help="started by the desktop app: JSON lines on stdout, commands on stdin (umbrous/desktop.py)")
     sub.add_parser("test", help="run the test suite")
     p_purge = sub.add_parser("purge", help="delete stored records")
     p_purge.add_argument("what", choices=["logs"], help="what to purge (receipts arrive in M3)")
@@ -234,11 +276,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         config = load_config(args.home, overrides)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
+        if getattr(args, "desktop", False):
+            from umbrous.desktop import emit
+            emit("error", code="config_error", message=f"Configuration error: {exc}")
         return 2
 
     if command == "purge":
         return purge_logs(config, args.yes)
     if command in ("models", "probe"):
         return models_command(config, command, getattr(args, "model", []), getattr(args, "all", False))
-    open_browser = config.open_browser and not (args.command == "serve" and args.no_open)
-    return serve(config, open_browser)
+    desktop = args.command == "serve" and args.desktop
+    open_browser = config.open_browser and not (args.command == "serve" and (args.no_open or desktop))
+    return serve(config, open_browser, desktop=desktop)

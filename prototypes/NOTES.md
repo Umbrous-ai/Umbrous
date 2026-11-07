@@ -38,3 +38,7 @@ Your light values are kept as `--light-*` variables in the CSS for a future ligh
 ## Since M1
 
 When connected to the runtime, `umbrous/web/chat.js` takes over the composer: the model pill picks an installed Ollama model, Send streams a real reply (and turns into Stop while it runs), and the Details panel shows the exact model and the context used. Ids were added to the model pill, Session ▸ Model and the Context bar for this. Sidebar sessions/projects and the Tools, Files and Steps sections are still placeholders.
+
+## Since M2
+
+The sidebar's Projects and Sessions now come from the runtime's history store: the placeholder entries are replaced on connect, the **+** next to Projects adds a project, and clicking a chat loads its saved transcript. The header's Options button (now `#chat-options`) opens Archive / Restore and a disabled Delete. Session ▸ Project got an inner `#sess-project` span. New CSS is under `/* M2: history */`. The inline prototype script is unchanged; the new sidebar buttons stop their click events so its placeholder handler never sees them.

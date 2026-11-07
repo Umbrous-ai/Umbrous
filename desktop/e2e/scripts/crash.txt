@@ -1,0 +1,10 @@
+wait_ready 30
+record before
+kill_backend
+wait_failed 10
+record failed
+screenshot @OUT@/crash.png
+retry
+wait_ready 30
+record restarted
+quit

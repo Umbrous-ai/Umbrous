@@ -131,6 +131,18 @@ textarea:focus-visible,input:focus-visible{outline:none}
 .mm-check:hover{color:var(--text-strong)}
 .mm-empty,.mm-foot{font-size:var(--fs-12);color:var(--text-subtle);padding:8px}
 .mm-foot{border-top:1px solid var(--border);margin-top:4px}
+/* M2: history */
+.nav.archived .t{color:var(--text-subtle);font-style:italic}
+.nav.toggle-archived{height:30px;font-size:var(--fs-12);color:var(--text-subtle)}
+.side-empty{font-size:var(--fs-12);color:var(--text-subtle);padding:4px 10px}
+.proj-input{width:100%;height:32px;padding:0 10px;border:1px solid var(--border-strong);border-radius:var(--r-8);background:var(--bg-raised);color:var(--text-strong);font:inherit;font-size:var(--fs-13)}
+.proj-error{font-size:var(--fs-12);color:var(--danger);padding:4px 10px}
+.head{position:relative}
+.opt-menu{position:absolute;top:48px;right:48px;z-index:6;min-width:220px;background:var(--bg-raised);border:1px solid var(--border-strong);border-radius:var(--r-12);padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.opt-menu button{display:block;width:100%;text-align:left;padding:7px 10px;border-radius:var(--r-8);font-size:var(--fs-13);color:var(--text-strong)}
+.opt-menu button:hover:not(:disabled){background:var(--bg-selected)}
+.opt-menu button:disabled{color:var(--text-subtle);cursor:default}
+.opt-menu .sub{display:block;font-size:var(--fs-12);color:var(--text-subtle)}
 .row{display:flex;align-items:center;gap:10px;height:32px;padding:0 8px;margin:0 -8px;border-radius:var(--r-6);font-size:var(--fs-13);color:var(--text-default)}
 .row:hover{background:var(--bg-hover)}
 .row .i{color:var(--text-subtle)}
@@ -262,7 +274,7 @@ h3{font-size:var(--fs-16);font-weight:var(--fw-medium);color:var(--text-strong);
   </aside>
 
   <section class="panel">
-    <div class="head"><svg class="i"><use href="#plus-circle"/></svg><h1 id="title">Why the pass rate dropped</h1><span class="sp"></span><button class="icon-btn" title="Options"><svg class="i fill-dots"><use href="#more"/></svg></button><button class="icon-btn" id="rtoggle" title="Toggle details" aria-pressed="true"><svg class="i"><use href="#sidebar-right"/></svg></button></div>
+    <div class="head"><svg class="i"><use href="#plus-circle"/></svg><h1 id="title">Why the pass rate dropped</h1><span class="sp"></span><button class="icon-btn" id="chat-options" title="Options"><svg class="i fill-dots"><use href="#more"/></svg></button><button class="icon-btn" id="rtoggle" title="Toggle details" aria-pressed="true"><svg class="i"><use href="#sidebar-right"/></svg></button></div>
     <div class="scroll" id="scroll">
       <div class="thread" id="thread">
         <div class="msg-u">Why did the eval pass rate drop last week?</div>
@@ -321,7 +333,7 @@ h3{font-size:var(--fs-16);font-weight:var(--fw-medium);color:var(--text-strong);
         <h4>Session</h4>
         <div class="kv"><span class="k">Model</span><span class="v" id="sess-model">umbra-large</span></div>
         <div class="kv"><span class="k">Runs on</span><span class="v"><span class="dot"></span>Local</span></div>
-        <div class="kv"><span class="k">Project</span><span class="v"><svg class="i"><use href="#folder"/></svg>Eval harness</span></div>
+        <div class="kv"><span class="k">Project</span><span class="v"><svg class="i"><use href="#folder"/></svg><span id="sess-project">Eval harness</span></span></div>
         <div class="kv" id="ctx-row" style="height:auto;padding-top:6px;display:block"><div style="display:flex;justify-content:space-between;font-size:var(--fs-12);color:var(--text-subtle)"><span>Context</span><span id="ctx-label">48k / 128k</span></div><div class="ctx"><i id="ctx-bar"></i></div></div>
       </div>
       <div class="rsec">

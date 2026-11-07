@@ -1,10 +1,10 @@
-"""The M1 run loop: one chat message in, one streamed reply out.
+"""The run loop: one chat message in, one streamed reply out.
 
     page ──message──▶ run_chat()
                         1. resolve the chosen model (installed? no fallback)
                         2. assemble context (system + recent turns + message, within budget)
                         3. stream the reply from the adapter, passing pieces on as events
-                        4. record the turn in this chat's memory
+                        4. store the message and reply in the chat's history (M2)
 
 Events (one JSON object per line on the wire):
     start  {run_id, model_requested, context}
@@ -12,13 +12,16 @@ Events (one JSON object per line on the wire):
     done   {model, prompt_tokens, reply_tokens, estimated_prompt_tokens, ms, done_reason}
     error  {code, message, partial}
 
-Chats live in memory only until M2 adds history: restarting the runtime
-forgets them. Turn contents are never logged; logs get ids, counts and timings.
+Since M2 the transcript lives in the history store (history/store.py), so it
+survives a restart. Only the per-chat "a reply is running" lock is in memory.
+Archived or unknown chats are refused before the model is called. Turn
+contents are never logged; logs get ids, counts and timings.
 
 What is remembered after a failure: if any reply text arrived (stopped,
 timed out, interrupted), the message and the partial reply are kept and the
 partial reply is marked as incomplete for the page. If nothing arrived, the
-message is not kept, so sending it again does not duplicate it.
+message is not kept, so sending it again does not duplicate it. A kept
+partial reply is stored with its status (stopped, timeout, interrupted, error).
 """
 
 from __future__ import annotations
@@ -28,12 +31,11 @@ import re
 import secrets
 import threading
 import time
-from collections import OrderedDict
-from dataclasses import dataclass, field
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator, Optional
 
 from umbrous.config import Config
-from umbrous.context.assemble import MessageTooLong, Turn, assemble
+from umbrous.context.assemble import MessageTooLong, assemble
+from umbrous.history.store import HistoryError, HistoryStore
 from umbrous.logging_setup import log_event
 from umbrous.model.base import CancelToken, Cancelled, ChatDelta, ChatDone, Deadlines, ModelError
 from umbrous.model.router import ModelRouter
@@ -41,8 +43,6 @@ from umbrous.model.router import ModelRouter
 log = logging.getLogger("umbrous.runloop")
 
 MAX_MESSAGE_CHARS = 32_000
-MAX_CHATS = 100
-MAX_TURNS_PER_CHAT = 500
 CHAT_ID_RE = re.compile(r"^chat_[A-Za-z0-9_-]{8,64}$")
 
 
@@ -51,32 +51,20 @@ class ChatBusy(Exception):
     message = "This chat is already waiting for a reply. Stop it or wait for it to finish."
 
 
-@dataclass
-class Chat:
-    chat_id: str
-    turns: List[Turn] = field(default_factory=list)
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-class ChatStore:
-    """In-memory chats (M2 replaces this with persistent history)."""
+class ChatLocks:
+    """One lock per chat id: a chat waits for at most one reply at a time."""
 
     def __init__(self) -> None:
-        self._chats: "OrderedDict[str, Chat]" = OrderedDict()
+        self._locks: Dict[str, threading.Lock] = {}
         self._lock = threading.Lock()
 
-    def get(self, chat_id: str) -> Chat:
-        if not isinstance(chat_id, str) or not CHAT_ID_RE.match(chat_id):
-            raise ValueError("chat_id must look like chat_<8 to 64 letters, digits, - or _>")
+    def get(self, chat_id: str) -> threading.Lock:
         with self._lock:
-            chat = self._chats.get(chat_id)
-            if chat is None:
-                chat = Chat(chat_id)
-                self._chats[chat_id] = chat
-                while len(self._chats) > MAX_CHATS:
-                    self._chats.popitem(last=False)
-            self._chats.move_to_end(chat_id)
-            return chat
+            return self._locks.setdefault(chat_id, threading.Lock())
+
+
+# status stored with a kept partial reply, by error code
+PARTIAL_STATUS = {"cancelled": "stopped", "timeout": "timeout", "stream_interrupted": "interrupted"}
 
 
 class RunRegistry:
@@ -111,7 +99,7 @@ def deadlines_from(config: Config) -> Deadlines:
                      total=config.total_timeout_s)
 
 
-def run_chat(config: Config, router: ModelRouter, store: ChatStore, runs: RunRegistry,
+def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: ChatLocks, runs: RunRegistry,
              chat_id: str, model_name: str, message: str) -> Iterator[dict]:
     if not isinstance(message, str) or not message.strip():
         yield {"type": "error", "code": "empty_message", "message": "Type a message first.", "partial": False}
@@ -120,22 +108,53 @@ def run_chat(config: Config, router: ModelRouter, store: ChatStore, runs: RunReg
         yield {"type": "error", "code": "message_too_long", "partial": False,
                "message": f"Messages are limited to {MAX_MESSAGE_CHARS:,} characters."}
         return
-    try:
-        chat = store.get(chat_id)
-    except ValueError as exc:
-        yield {"type": "error", "code": "bad_chat_id", "message": str(exc), "partial": False}
+    if not isinstance(chat_id, str) or not CHAT_ID_RE.match(chat_id):
+        yield {"type": "error", "code": "bad_chat_id", "partial": False,
+               "message": "chat_id must look like chat_<8 to 64 letters, digits, - or _>"}
         return
-    if not chat.lock.acquire(blocking=False):
+    try:
+        history.get_chat(chat_id)  # exists? (checked first so random ids never get a lock)
+    except HistoryError as exc:
+        yield {"type": "error", "code": exc.code, "message": exc.message, "partial": False}
+        return
+    lock = locks.get(chat_id)
+    if not lock.acquire(blocking=False):
         yield {"type": "error", "code": ChatBusy.code, "message": ChatBusy.message, "partial": False}
+        return
+    # Read the archive state only while holding the lock. Archive takes the same
+    # lock, so from here until the reply is saved the chat cannot be archived;
+    # reading it before the lock would let an archive slip in between the check
+    # and the model call, and the finished reply could then not be saved.
+    try:
+        archived = history.get_chat(chat_id).archived
+    except HistoryError as exc:
+        lock.release()
+        yield {"type": "error", "code": exc.code, "message": exc.message, "partial": False}
+        return
+    if archived:
+        lock.release()
+        yield {"type": "error", "code": "chat_archived", "partial": False,
+               "message": "This chat is archived. Restore it to continue."}
         return
 
     run_id, cancel = runs.start()
     started = time.monotonic()
     outcome, text_parts = "error", []
+
+    def keep(status: str, model: str, prompt_tokens: Optional[int] = None, reply_tokens: Optional[int] = None) -> Optional[dict]:
+        """Store the exchange. Returns an error event if storing failed."""
+        try:
+            history.append_exchange(chat_id, message, "".join(text_parts), model, status, prompt_tokens, reply_tokens)
+        except HistoryError as exc:  # e.g. archived from another tab mid-reply
+            return {"type": "error", "code": exc.code, "message": "The reply was not saved: " + exc.message,
+                    "partial": False}
+        return None
+
     try:
         try:
             model = router.resolve(model_name)
-            plan = assemble(config.system_prompt, chat.turns, message, recent_turns=config.recent_turns,
+            turns = history.turns(chat_id)
+            plan = assemble(config.system_prompt, turns, message, recent_turns=config.recent_turns,
                             context_tokens=config.context_tokens, reply_tokens=config.reply_tokens,
                             model_context=model.context_length)
         except (ModelError, MessageTooLong) as exc:
@@ -164,26 +183,32 @@ def run_chat(config: Config, router: ModelRouter, store: ChatStore, runs: RunReg
                         yield {"type": "error", "code": outcome, "message": detail, "partial": False}
                         return
                     outcome = "ok"
-                    chat.turns.append(Turn("user", message))
-                    chat.turns.append(Turn("assistant", "".join(text_parts)))
+                    failed = keep("complete", piece.model, piece.prompt_tokens, piece.reply_tokens)
+                    if failed:
+                        outcome = failed["code"]
+                        yield failed
+                        return
                     yield {"type": "done", "model": piece.model, "prompt_tokens": piece.prompt_tokens,
                            "reply_tokens": piece.reply_tokens, "estimated_prompt_tokens": plan.estimated_tokens,
                            "ms": int((time.monotonic() - started) * 1000), "done_reason": piece.done_reason}
         except ModelError as exc:
             outcome = exc.code
-            partial = bool(text_parts)
+            partial = bool("".join(text_parts).strip())
             if partial:
-                chat.turns.append(Turn("user", message))
-                chat.turns.append(Turn("assistant", "".join(text_parts)))
+                failed = keep(PARTIAL_STATUS.get(exc.code, "error"), model.name)
+                if failed:
+                    partial = False
             yield {"type": "error", "code": exc.code, "message": exc.message, "partial": partial}
         except GeneratorExit:
-            # The page went away mid-reply: stop the model call too.
+            # The page went away mid-reply: stop the model call too, and keep
+            # what arrived, as if the person had pressed stop.
             cancel.cancel()
             outcome = Cancelled.code
+            if "".join(text_parts).strip():
+                keep("stopped", model.name)
             raise
     finally:
-        del chat.turns[:-MAX_TURNS_PER_CHAT]
         runs.finish(run_id)
-        chat.lock.release()
+        lock.release()
         log_event(log, "run.end", run_id=run_id, chat_id=chat_id, outcome=outcome,
                   reply_chars=sum(len(t) for t in text_parts), ms=int((time.monotonic() - started) * 1000))

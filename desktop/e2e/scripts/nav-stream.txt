@@ -1,0 +1,89 @@
+# Regression: leaving or changing a chat while a reply streams, and stale responses.
+# Data: stress.py seed-reference; Ollama: stress.py fake-ollama (model slow:1b).
+wait_ready 30
+wait_models
+select_model slow:1b
+select_project Eval harness
+# 1. a new chat while a reply streams (crashed before: late events indexed the empty transcript)
+new_chat
+send Tell me a long story
+wait_streaming
+new_chat
+sleep 1500
+expect messages 0
+expect chat none
+expect running false
+# 2. back to it: the partial reply was saved as stopped
+open_chat Tell me a long story
+sleep 1500
+expect messages 2
+expect last_meta Stopped
+# 3. another chat mid-stream: its transcript stays its own
+send Continue the story please
+wait_streaming
+open_chat Draft the 0.4
+sleep 1500
+expect chat Draft the 0.4
+expect messages 2
+expect last_meta umbra-large
+# 4. another project mid-stream
+open_chat Tell me a long story
+send One more paragraph
+wait_streaming
+select_project Docs site
+sleep 1500
+expect messages 0
+expect running false
+# 5. a transcript that arrives after you moved on is dropped
+select_project Eval harness
+sleep 500
+open_chat_nowait Fix tool router
+new_chat
+sleep 1000
+expect chat none
+expect messages 0
+# 6. two quick clicks: the last one wins
+open_chat_nowait Fix tool router
+open_chat_nowait Design a tool
+sleep 1000
+expect chat Design a tool
+# 7. archive while a reply streams: the reply is stopped and saved first
+open_chat Tell me a long story
+send Final words
+wait_streaming
+archive
+sleep 800
+expect last_meta Stopped
+expect running false
+# 8. A -> B -> A: back to the chat on screen before B has loaded; A must win
+open_chat Draft the 0.4
+expect chat Draft the 0.4
+open_chat_nowait Fix tool router
+open_chat_nowait Draft the 0.4
+sleep 1000
+expect chat Draft the 0.4
+expect messages 2
+expect opening none
+# 9. A -> B -> A from a new chat (nothing on screen yet)
+new_chat
+open_chat_nowait Draft the 0.4
+open_chat_nowait Fix tool router
+open_chat_nowait Draft the 0.4
+sleep 1000
+expect chat Draft the 0.4
+expect opening none
+# 10. A -> B -> A while A's reply streams: back on A, the stopped reply is there
+open_chat Design a tool
+sleep 300
+send Another chapter
+wait_streaming
+open_chat_nowait Fix tool router
+open_chat_nowait Design a tool
+sleep 2000
+expect chat Design a tool
+expect running false
+expect messages 4
+expect last_meta Stopped
+expect opening none
+record end
+quit

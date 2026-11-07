@@ -1,0 +1,6 @@
+wait_ready 30
+wait_models
+sleep 500
+record state
+screenshot @OUT@/@NAME@.png
+quit
