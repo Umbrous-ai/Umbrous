@@ -30,3 +30,11 @@ Your light values are kept as `--light-*` variables in the CSS for a future ligh
 
 - SF Pro via the system font stack, so it renders as SF Pro on a Mac. Only weights 400 and 500 are used.
 - Icons are hand-drawn Nucleo-style outlines on a 16px grid at a 1px stroke. Nucleo is a paid set, so swap them for your licensed files; the names are in the SVG sprite at the top of each file.
+
+## Since M0
+
+`bin/umbrous` now serves this page from the local Python runtime at `http://127.0.0.1:8417/`. The only changes here are a **Runtime** section at the top of the Details panel (filled by `umbrous/web/runtime-bridge.js` from a real health call) and the script tag that loads it. Opened directly as a file (or with `bin/umbrous prototype`) it behaves as before and the Runtime section reads "Not connected".
+
+## Since M1
+
+When connected to the runtime, `umbrous/web/chat.js` takes over the composer: the model pill picks an installed Ollama model, Send streams a real reply (and turns into Stop while it runs), and the Details panel shows the exact model and the context used. Ids were added to the model pill, Session ▸ Model and the Context bar for this. Sidebar sessions/projects and the Tools, Files and Steps sections are still placeholders.

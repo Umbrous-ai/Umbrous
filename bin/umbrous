@@ -1,12 +1,26 @@
 #!/bin/sh
-# Opens the Umbrous app. For now this is the front-end prototype.
+# Starts the Umbrous runtime (M0) and opens the app in a dedicated browser profile.
+#   bin/umbrous              start the runtime and open the app
+#   bin/umbrous --help       all commands (serve, test, purge, version)
+#   bin/umbrous prototype    open the static prototype file without the runtime (the pre-M0 behaviour)
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-PAGE="$DIR/prototypes/umbrous-harness.html"
-# Prefer a standalone app window (no tabs or address bar) if a Chromium browser is installed.
-for APP in "Google Chrome" "Arc" "Brave Browser" "Microsoft Edge" "Chromium"; do
-  if open -Ra "$APP" 2>/dev/null; then
-    open -na "$APP" --args --app="file://$PAGE" --window-size=1440,900
-    exit 0
-  fi
-done
-open "$PAGE"
+
+if [ "$1" = "prototype" ]; then
+  PAGE="$DIR/prototypes/umbrous-harness.html"
+  # Prefer a standalone app window (no tabs or address bar) if a Chromium browser is installed.
+  for APP in "Google Chrome" "Arc" "Brave Browser" "Microsoft Edge" "Chromium"; do
+    if open -Ra "$APP" 2>/dev/null; then
+      open -na "$APP" --args --app="file://$PAGE" --window-size=1440,900
+      exit 0
+    fi
+  done
+  open "$PAGE"
+  exit 0
+fi
+
+PY="${UMBROUS_PYTHON:-python3}"
+if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+  echo "Umbrous needs Python 3.9 or newer (tried: $PY). Set UMBROUS_PYTHON to another interpreter." >&2
+  exit 1
+fi
+PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m umbrous "$@"
