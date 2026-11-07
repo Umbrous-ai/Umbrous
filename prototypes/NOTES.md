@@ -30,3 +30,7 @@ Your light values are kept as `--light-*` variables in the CSS for a future ligh
 
 - SF Pro via the system font stack, so it renders as SF Pro on a Mac. Only weights 400 and 500 are used.
 - Icons are hand-drawn Nucleo-style outlines on a 16px grid at a 1px stroke. Nucleo is a paid set, so swap them for your licensed files; the names are in the SVG sprite at the top of each file.
+
+## Since M0
+
+`bin/umbrous` now serves this page from the local Python runtime at `http://127.0.0.1:8417/`. The only changes here are a **Runtime** section at the top of the Details panel (filled by `umbrous/web/runtime-bridge.js` from a real health call) and the script tag that loads it. Opened directly as a file (or with `bin/umbrous prototype`) it behaves as before and the Runtime section reads "Not connected".

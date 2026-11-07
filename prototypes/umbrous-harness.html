@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Umbrous · Option B</title>
+<script src="/runtime-bridge.js" defer></script><!-- M0: connects to the local runtime; harmless when opened as a file -->
 <style>
 :root{
   /* Type: SF Pro, 400 + 500 only */
@@ -106,6 +107,7 @@ textarea:focus-visible,input:focus-visible{outline:none}
 .kv .k{color:var(--text-subtle);width:72px;flex:none}
 .kv .v{color:var(--text-strong);display:flex;align-items:center;gap:6px}
 .kv .dot{background:var(--success)}
+.kv .dot[data-state=off]{background:var(--text-subtle)}.kv .dot[data-state=bad]{background:var(--danger)}
 .row{display:flex;align-items:center;gap:10px;height:32px;padding:0 8px;margin:0 -8px;border-radius:var(--r-6);font-size:var(--fs-13);color:var(--text-default)}
 .row:hover{background:var(--bg-hover)}
 .row .i{color:var(--text-subtle)}
@@ -282,6 +284,14 @@ h3{font-size:var(--fs-16);font-weight:var(--fw-medium);color:var(--text-strong);
   <aside class="panel rpanel" id="rpanel">
     <div class="rhead"><h2>Details</h2><button class="icon-btn" title="Close" data-rclose><svg class="i"><use href="#sidebar-right"/></svg></button></div>
     <div class="rbody">
+      <div class="rsec" id="runtime">
+        <h4>Runtime</h4>
+        <div class="kv" id="rt-status-row"><span class="k">Status</span><span class="v"><span class="dot" id="rt-dot" data-state="off"></span><span id="rt-status">Not connected</span></span></div>
+        <div class="kv"><span class="k">Version</span><span class="v" id="rt-version">–</span></div>
+        <div class="kv"><span class="k">Schema</span><span class="v" id="rt-schema">–</span></div>
+        <div class="kv"><span class="k">Uptime</span><span class="v" id="rt-uptime">–</span></div>
+        <div class="kv"><span class="k">Address</span><span class="v" id="rt-bind">–</span></div>
+      </div>
       <div class="rsec">
         <h4>Session</h4>
         <div class="kv"><span class="k">Model</span><span class="v">umbra-large</span></div>

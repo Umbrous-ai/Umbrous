@@ -1,0 +1,71 @@
+"""Shared test helpers: a real runtime on a random loopback port in a temp home."""
+
+from __future__ import annotations
+
+import http.client
+import io
+import json
+import tempfile
+import threading
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
+from umbrous.api.server import make_server
+from umbrous.config import load_config, make_private_dir
+from umbrous.logging_setup import setup_logging
+from umbrous.persistence import db
+from umbrous.receipts.redaction import default_redactor
+
+
+class RunningRuntime:
+    """Context manager: starts the runtime exactly as `serve` does, minus the browser."""
+
+    def __enter__(self) -> "RunningRuntime":
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name) / "home"
+        make_private_dir(self.home)
+        self.config = load_config(self.home, {"port": 0})
+        self.log_stream = io.StringIO()
+        setup_logging(self.config, stream=self.log_stream)
+        self.conn = db.connect(self.config.db_path)
+        db.record_launch(self.conn, "test")
+        self.server, self.runtime = make_server(self.config, db.schema_version(self.conn), db.launch_count(self.conn))
+        self.policy = self.runtime.policy
+        default_redactor.register(self.policy.session_token)
+        default_redactor.register(self.policy.launch_code)
+        self.port = self.policy.port
+        self.host = f"127.0.0.1:{self.port}"
+        self.origin = f"http://{self.host}"
+        self._thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def request(self, method: str, path: str, headers: Optional[Dict[str, str]] = None,
+                body: Optional[bytes] = None, host: Optional[str] = None,
+                token: Optional[str] = None) -> Tuple[int, Dict[str, str], bytes]:
+        """Send a request with full control over headers (including Host)."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            conn.putheader("Host", host if host is not None else self.host)
+            if token:
+                conn.putheader("X-Umbrous-Token", token)
+            for k, v in (headers or {}).items():
+                conn.putheader(k, v)
+            if body is not None:
+                conn.putheader("Content-Length", str(len(body)))
+            conn.endheaders(body)
+            r = conn.getresponse()
+            return r.status, {k.lower(): v for k, v in r.getheaders()}, r.read()
+        finally:
+            conn.close()
+
+    def json(self, *args, **kwargs) -> Tuple[int, dict]:
+        status, _, body = self.request(*args, **kwargs)
+        return status, json.loads(body)
