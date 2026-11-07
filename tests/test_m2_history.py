@@ -241,6 +241,40 @@ class HistoryApiTests(unittest.TestCase):
             self.assertFalse(full["chat"]["archived"])
             self.assertEqual(rt.post_json(f"/api/chats/{cid}/archive", {})[0], 200)   # once it has ended
 
+    def test_archive_between_the_first_check_and_the_lock_is_honoured(self):
+        """Codex's ordering: pause run_chat right after its first look at the
+        chat, archive through the API, resume. The run must see the archive
+        (it is re-read under the lock) and refuse before calling the model,
+        instead of running the model and then failing to save."""
+        with self.rt() as rt:
+            cid = rt.new_chat()
+            store = rt.runtime.history
+            real_get = store.get_chat
+            paused, resume = threading.Event(), threading.Event()
+
+            def get_chat(chat_id):
+                info = real_get(chat_id)
+                if not paused.is_set():     # the first lookup is run_chat's first look at the chat
+                    paused.set()
+                    resume.wait(5)          # hold it there while the chat is archived
+                return info
+
+            store.get_chat = get_chat
+            result = {}
+            t = threading.Thread(target=lambda: result.update(ev=rt.chat(cid, "qwen2.5:3b", "hello")))
+            t.start()
+            self.assertTrue(paused.wait(5))
+            status, _, _ = rt.post_json(f"/api/chats/{cid}/archive", {})   # lock is free: succeeds
+            self.assertEqual(status, 200)
+            resume.set()
+            t.join(10)
+            store.get_chat = real_get
+            self.assertEqual([(e["type"], e.get("code")) for e in result["ev"]], [("error", "chat_archived")])
+            self.assertEqual(self.chat_requests(), [])                     # the model never ran
+            _, full = rt.get_json(f"/api/chats/{cid}")
+            self.assertTrue(full["chat"]["archived"])
+            self.assertEqual(full["messages"], [])
+
     def test_stop_then_archive_keeps_the_partial_reply(self):
         with self.rt() as rt:
             cid = rt.new_chat()

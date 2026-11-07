@@ -103,7 +103,9 @@ uses `?` parameters, so a crafted id is refused, never interpreted.
   partial reply is saved, then archives. The runtime enforces the order:
   archive takes the same per-chat lock as a reply, so it is refused while a
   reply is running (for example from a second tab) and can never slip in
-  between the reply and its save.
+  between the reply and its save. The reply side reads "is this chat
+  archived?" only after it holds that lock, so an archive that lands just
+  before is seen and the message is refused before any model runs.
 
 ## Where copies of your chats exist
 

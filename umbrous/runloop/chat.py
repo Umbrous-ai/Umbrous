@@ -113,17 +113,28 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                "message": "chat_id must look like chat_<8 to 64 letters, digits, - or _>"}
         return
     try:
-        info = history.get_chat(chat_id)
+        history.get_chat(chat_id)  # exists? (checked first so random ids never get a lock)
     except HistoryError as exc:
         yield {"type": "error", "code": exc.code, "message": exc.message, "partial": False}
-        return
-    if info.archived:
-        yield {"type": "error", "code": "chat_archived", "partial": False,
-               "message": "This chat is archived. Restore it to continue."}
         return
     lock = locks.get(chat_id)
     if not lock.acquire(blocking=False):
         yield {"type": "error", "code": ChatBusy.code, "message": ChatBusy.message, "partial": False}
+        return
+    # Read the archive state only while holding the lock. Archive takes the same
+    # lock, so from here until the reply is saved the chat cannot be archived;
+    # reading it before the lock would let an archive slip in between the check
+    # and the model call, and the finished reply could then not be saved.
+    try:
+        archived = history.get_chat(chat_id).archived
+    except HistoryError as exc:
+        lock.release()
+        yield {"type": "error", "code": exc.code, "message": exc.message, "partial": False}
+        return
+    if archived:
+        lock.release()
+        yield {"type": "error", "code": "chat_archived", "partial": False,
+               "message": "This chat is archived. Restore it to continue."}
         return
 
     run_id, cancel = runs.start()
