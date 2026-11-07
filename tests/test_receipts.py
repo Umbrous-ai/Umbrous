@@ -60,9 +60,24 @@ class RedactionTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(self.r.redact(text), expected)
 
-    def test_count_like_names_are_not_secrets(self):
-        text = "max_tokens=512 tokens: 40 token_count=7"
+    def test_known_count_names_with_numbers_are_not_secrets(self):
+        text = "max_tokens=512 tokens: 40 token_count=7 prompt_tokens=\"12\""
         self.assertEqual(self.r.redact(text), text)
+
+    def test_plural_credential_names_are_still_secrets(self):
+        cases = {
+            "access_tokens=opaquecredential123": "access_tokens=[REDACTED:assignment]",
+            'refresh_tokens="first-secret second-secret"': 'refresh_tokens="[REDACTED:assignment]"',
+            "api_tokens: abc": "api_tokens: [REDACTED:assignment]",
+            "session_tokens=12345": "session_tokens=[REDACTED:assignment]",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.r.redact(text), expected)
+
+    def test_count_names_with_non_numeric_values_are_redacted(self):
+        self.assertEqual(self.r.redact('max_tokens="abc def"'), 'max_tokens="[REDACTED:assignment]"')
+        self.assertEqual(self.r.redact("token_count=s3cr3t"), "token_count=[REDACTED:assignment]")
 
     def test_url_credentials(self):
         out = self.r.redact("clone https://fred:s3cretpass@example.com/repo.git")
@@ -83,6 +98,12 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(out["headers"]["Accept"], "json")
         self.assertEqual(out["items"][0]["github_token"], "[REDACTED:field]")
         self.assertEqual(out["n"], 3)
+
+    def test_plural_credential_keys_in_structures(self):
+        out = self.r.redact_obj({"access_tokens": ["a", "b"], "refresh_tokens": "x y", "max_tokens": 512})
+        self.assertEqual(out["access_tokens"], "[REDACTED:field]")
+        self.assertEqual(out["refresh_tokens"], "[REDACTED:field]")
+        self.assertEqual(out["max_tokens"], 512)
 
     def test_ordinary_text_is_untouched(self):
         text = "Read docs/a.md (120 bytes), tokens used: 512, see https://example.com/path"

@@ -48,13 +48,22 @@ _ASSIGNMENT = re.compile(
     r"(\s*[:=]\s*)"
     r"(?:([\"'])((?:\\.|(?!\3)[^\\\n])*)(\3)?|([^\s'\"]+))"
 )
-# Names that contain "token" etc. but hold counts, not secrets (e.g. max_tokens=512).
-_NOT_SECRET_NAME = re.compile(r"(?i)(tokens|_count|_limit|_budget|_used)$|^(max|num|n)_")
+# A short, fixed list of names that hold token *counts* (as in model usage), not
+# secrets. They are left alone only when the value is a plain whole number, so
+# `access_tokens=...` or `max_tokens="abc def"` are still redacted.
+COUNT_NAMES = frozenset({
+    "tokens", "max_tokens", "max_new_tokens", "max_output_tokens", "max_completion_tokens",
+    "num_tokens", "n_tokens", "token_count", "tokens_used", "token_limit", "token_budget",
+    "prompt_tokens", "completion_tokens", "input_tokens", "output_tokens", "total_tokens",
+    "context_tokens",
+})
+_WHOLE_NUMBER = re.compile(r"^[0-9]+$")
 
 
 def _redact_assignment(m: "re.Match[str]") -> str:
-    name, sep, quote, _quoted, closing, _bare = m.groups()
-    if _NOT_SECRET_NAME.search(name):
+    name, sep, quote, quoted, closing, bare = m.groups()
+    value = quoted if quote else bare
+    if name.lower() in COUNT_NAMES and value is not None and _WHOLE_NUMBER.match(value):
         return m.group(0)
     mark = MARK.format(kind="assignment")
     if quote:
@@ -71,7 +80,9 @@ SENSITIVE_KEYS = frozenset({
 
 def _is_sensitive_key(key: str) -> bool:
     k = key.lower().replace(" ", "_")
-    return k in SENSITIVE_KEYS or k.endswith("_token") or k.endswith("_secret") or k.endswith("_password")
+    if k in COUNT_NAMES:
+        return False
+    return (k in SENSITIVE_KEYS or k.endswith(("_token", "_tokens", "_secret", "_secrets", "_password", "_passwords")))
 
 
 class Redactor:

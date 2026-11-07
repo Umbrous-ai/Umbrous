@@ -67,8 +67,10 @@ log line. Rules, in order:
 3. **Assignments.** `password=...`, `API_KEY: "..."`, `*_token=...` keep the
    name and lose the value, whatever its length. A quoted value is removed up
    to its closing quote, spaces included (or to the end of the line if the
-   quote is never closed). Names that hold counts rather than secrets, such as
-   `max_tokens` or `token_count`, are left alone.
+   quote is never closed). The only exception is a fixed list of names that
+   hold token counts (`max_tokens`, `token_count`, `prompt_tokens`, ...; see
+   `COUNT_NAMES`), and only when the value is a whole number. Plural credential
+   names such as `access_tokens` are still redacted.
 4. **Sensitive field names.** In structured data, any value under a key such
    as `password`, `token`, `authorization`, `cookie`, or ending in `_token`,
    `_secret`, `_password` becomes `[REDACTED:field]`, whatever it contains.

@@ -146,7 +146,7 @@ Things to notice: the value is written with `textContent`, so even
 `"<b>hi</b>"` shows as text. The server reads the page once at launch (and pins
 its inline script by hash in the CSP), so restart after editing it.
 
-## Tests (61, `bin/umbrous test`)
+## Tests (64, `bin/umbrous test`)
 
 | File | Covers |
 |---|---|
