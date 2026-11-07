@@ -15,7 +15,8 @@ Routes (everything under /api/ needs the session credential, see security.py):
     GET  /api/health          runtime status, shown in the Details panel
     GET  /api/models          Ollama status, installed models, probe results, exposure check (M1)
     POST /api/models/probe    run the tool-call probe on one model (M1)
-    POST /api/chat            send a message; the reply streams back as JSON lines (M1)
+    POST /api/chat            send a message; the reply streams back as JSON lines (M1).
+                              {"approvals": true} only from a client that shows approval cards (M3)
     POST /api/chat/cancel     stop a reply that is streaming (M1)
     GET  /api/projects                       projects with chat counts (M2)
     POST /api/projects        {name}         add a project (M2)
@@ -438,7 +439,8 @@ class Handler(BaseHTTPRequestHandler):
         when the connection closes (HTTP/1.0), which the page treats as the end."""
         rt = self.runtime
         events = run_chat(rt.config, rt.router, rt.history, rt.chat_locks, rt.runs, str(body.get("chat_id", "")),
-                          str(body.get("model", "")), body.get("message"), gate=rt.gate)
+                          str(body.get("model", "")), body.get("message"), gate=rt.gate,
+                          approvals=body.get("approvals") is True)
         self.send_response(200)
         for k, v in BASE_HEADERS.items():
             self.send_header(k, v)

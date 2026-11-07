@@ -80,6 +80,14 @@ def ollama_tools() -> List[dict]:
     return out
 
 
+# Said (to the model, in the receipt, and on screen) when a project asks before
+# reads but the app in use cannot show an approval request. Refused at once:
+# never a silent wait, and never a quiet switch to a looser profile.
+APPROVAL_UNAVAILABLE = ("This project uses Ask before read, and this app cannot show approval requests yet, "
+                        "so the read was refused. Switch the project to Workspace read to let chats read "
+                        "ordinary files in its folder, or answer approvals in the browser page.")
+
+
 @dataclass
 class Call:
     tool: str
@@ -286,7 +294,7 @@ class Gate:
         if verdict.outcome == ASK:
             if ask is None:
                 return self._finish(task_id, action_id, project_id, chat_id, verdict, started, "denied",
-                                    "no_approver", "Approval is needed, and nothing here can ask you.")
+                                    "approval_unavailable", APPROVAL_UNAVAILABLE)
             approval_id = self.approvals.request(verdict.binding, project_id, verdict.action)
             ask(verdict, approval_id)
             choice = self.approvals.wait(approval_id, cancelled, approval_timeout)

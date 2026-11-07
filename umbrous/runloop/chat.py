@@ -36,7 +36,7 @@ from typing import Dict, Iterator, Optional
 
 from umbrous.config import Config
 from umbrous.context.assemble import MessageTooLong, assemble, estimate_tokens
-from umbrous.gate.gate import Call, Gate, ollama_tools
+from umbrous.gate.gate import APPROVAL_UNAVAILABLE, Call, Gate, ollama_tools
 from umbrous.history.store import HistoryError, HistoryStore
 from umbrous.logging_setup import log_event
 from umbrous.model.base import CancelToken, Cancelled, ChatDelta, ChatDone, ChatToolCalls, Deadlines, ModelError
@@ -116,7 +116,12 @@ def deadlines_from(config: Config) -> Deadlines:
 
 
 def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: ChatLocks, runs: RunRegistry,
-             chat_id: str, model_name: str, message: str, gate: Optional[Gate] = None) -> Iterator[dict]:
+             chat_id: str, model_name: str, message: str, gate: Optional[Gate] = None,
+             approvals: bool = False) -> Iterator[dict]:
+    """`approvals`: the client can show approval cards and answer them (the
+    browser page says so). Without it, a read that needs approval is refused at
+    once with `approval_unavailable` instead of waiting for an answer that
+    cannot come."""
     if not isinstance(message, str) or not message.strip():
         yield {"type": "error", "code": "empty_message", "message": "Type a message first.", "partial": False}
         return
@@ -191,7 +196,9 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
         log_event(log, "run.start", run_id=run_id, chat_id=chat_id, model=model.name, task_id=task_id,
                   turns_sent=plan.turns_included, est_tokens=plan.estimated_tokens, window=plan.window)
         tools_info = {"on": tools_on, "workspace": ws.name if ws else None,
-                      "profile": ws.profile if ws else None}
+                      "profile": ws.profile if ws else None, "approvals": approvals}
+        if tools_on and ws.profile == "ask_before_read" and not approvals:
+            tools_info["notice"] = APPROVAL_UNAVAILABLE
         if ws and not tools_on:
             tools_info["off_reason"] = (f"{model.name} has not passed the tool check, so it cannot use the "
                                         "workspace. Run Check tools in the model menu, or pick a verified model.")
@@ -237,7 +244,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                                              f"At most {MAX_CALLS_PER_ROUND} tool calls run per step.")
                     else:
                         result = None
-                        for ev in _run_gated(gate, task_id, chat_info.project_id, chat_id, call, cancel):
+                        for ev in _run_gated(gate, task_id, chat_info.project_id, chat_id, call, cancel, approvals):
                             if ev["type"] == "_result":
                                 result = ev["outcome"]
                             else:
@@ -321,7 +328,7 @@ def _dedupe(evidence: list) -> list:
 
 
 def _run_gated(gate: Gate, task_id: str, project_id: str, chat_id: str, call: Call,
-               cancel: CancelToken) -> Iterator[dict]:
+               cancel: CancelToken, approvals: bool = True) -> Iterator[dict]:
     """Run one call through the gate on a worker thread, passing on an approval
     request as an event while the gate waits for your answer."""
     q: "queue.Queue[dict]" = queue.Queue()
@@ -334,7 +341,8 @@ def _run_gated(gate: Gate, task_id: str, project_id: str, chat_id: str, call: Ca
 
     def work() -> None:
         try:
-            box["outcome"] = gate.run(task_id, project_id, chat_id, call, ask=ask, cancelled=lambda: cancel.cancelled)
+            box["outcome"] = gate.run(task_id, project_id, chat_id, call, ask=ask if approvals else None,
+                                      cancelled=lambda: cancel.cancelled)
         except BaseException as exc:  # surfaced below
             box["error"] = exc
 

@@ -17,7 +17,7 @@ bin/umbrous probe qwen2.5:7b      # a model must pass the tool check before it g
 bin/umbrous workspace General ~/code/umbrous-test-ws        # or Details ▸ Access in the page
 bin/umbrous                        # ask "what does plan.md say about Friday?"
 bin/umbrous receipts --last 5      # what the tools did
-bin/umbrous test                   # 188 tests; no Ollama needed
+bin/umbrous test                   # 189 tests; no Ollama needed
 ```
 
 ## Words used here
@@ -25,7 +25,7 @@ bin/umbrous test                   # 188 tests; no Ollama needed
 | Word | Means |
 |---|---|
 | **Workspace** | The one folder a project's chats may read. One per project, or none. Without one, chats get no tools at all |
-| **Profile** | The project's rule for reads. **Workspace read** allows list, read and search. **Ask before read** asks you each time |
+| **Profile** | The project's rule for reads. **Workspace read** (the default) allows list, read and search. **Ask before read** asks you each time, in the browser page only (see The desktop app) |
 | **Approve once** | Allows exactly one request: the same action, arguments, project and policy version. It is used up when it runs |
 | **Grant** | "Allow reads in this project". Kept until you revoke it, or until the workspace or profile changes |
 | **Hard block** | Refused under every profile, and you are never asked: paths outside the workspace, symbolic links, hard-linked files, special files, and excluded names (`.env`, keys, credentials, `.git`, `.ssh`, …) |
@@ -177,18 +177,45 @@ Clients that do not know them ignore them (the desktop app does).
 
 ## The desktop app
 
-The runtime changes reach Umbrous.app, because it starts the same Python
-runtime. The native interface does not show steps, approval cards, Sources
-or the Access view yet (it ignores the new events). So in the app, for now:
+Umbrous.app starts the same Python runtime, so the gate, the hard blocks and
+the receipts apply there unchanged. The native interface does not show steps,
+approval cards, Sources or an Access editor yet. What that means, decided by
+Freddy on 2026-11-07:
 
-- Attach the workspace and run the probe from the terminal
-  (`bin/umbrous workspace …`, `bin/umbrous probe …`).
-- Use **Workspace read**. Under **Ask before read** a request waits for an
-  answer the app cannot give, and is denied after 5 minutes. Answer from
-  the browser page instead (`bin/umbrous`).
+- **Workspace read is the default.** Attaching a folder authorizes ordinary
+  reads inside it without repeated prompts. Exclusions, path checks and
+  receipts stay exactly as they are.
+- **Ask before read is an optional, stricter mode that the app cannot serve
+  yet,** so the app never offers it. Only the browser page can answer its cards.
+  The page says so when it sends a message (`"approvals": true`). A client that
+  doesn't send that flag, such as the app, gets each read that needs approval
+  **refused at once** with `approval_unavailable` and a clear reason. Nothing
+  waits five minutes. A grant you gave earlier in the page still applies.
+- **A project already on Ask before read is never loosened for you.** In the
+  app it shows a notice that explains the mode and offers **Switch to
+  Workspace read**. Only that button, the page's Access section, or
+  `bin/umbrous workspace PROJECT --profile workspace_read` changes it.
+  Setting Ask before read from the CLI prints the same warning.
+- Attach a workspace and run the tool check from the terminal for now
+  (`bin/umbrous workspace …`, `bin/umbrous probe …`), or in the browser page.
 
-The native approval cards, Access view and Sources are the next step, built
-and checked on the Mac.
+Checked in the real app by `desktop/e2e/validate-m3.sh WORKDIR`, which is also
+part of `validate-native.sh`. It needs `build-native.sh --e2e` and uses a
+throwaway data folder, the M3 fixture and a fake Ollama. The script
+(`desktop/e2e/scripts/m3-access.txt`) does this:
+
+1. It opens General, which is on Ask before read, and checks that the notice
+   is shown and the profile is unchanged.
+2. It asks for a read. The reply says reads can't be approved here, quickly and
+   without the file's text, and the profile is still Ask before read.
+3. It presses Switch to Workspace read. The notice goes away.
+4. It reads `notes/plan.md` and gets the answer from the file. Reading
+   `../outside/secret.txt`, `link.txt` and `notes/.ENV` is still refused, and no
+   secret appears.
+
+At the end it lists the receipts.
+
+The native approval cards, Access view and Sources are the next step.
 
 ## Changes to existing files
 
@@ -261,5 +288,6 @@ Say you want `*.tfstate` (Terraform state, often full of secrets) never read.
 | File | Covers |
 |---|---|
 | `tests/test_m3_fs.py` | Normal read with lines and hash; line window; symlink as file and as folder; hard link; FIFO without hanging; device file; too large, binary, non-UTF-8; folder and missing; excluded names in any case and Unicode form; listing hides excluded and marks symlinks; search never follows links or reads excluded; result and time bounds; symlinked root; **swap race** (3,000 swaps) |
-| `tests/test_m3_gate.py` | Gate order and every block reason; profiles; once is single-use and bound to arguments, project and policy version; grants and revoke; detach and re-attach revoke grants; unknown tools and bad arguments; receipts for every outcome; chat with evidence; unverified model gets no tools; no workspace gets no tools; hostile file; round and call limits; context budget cut; ask profile through the API with once, grant, deny; stop while a card is waiting; access API; no file content or paths in logs; `purge receipts` needs `--yes` |
+| `tests/test_m3_gate.py` | Gate order and every block reason; profiles; once is single-use and bound to arguments, project and policy version; grants and revoke; detach and re-attach revoke grants; unknown tools and bad arguments; receipts for every outcome; chat with evidence; unverified model gets no tools; no workspace gets no tools; hostile file; round and call limits; context budget cut; ask profile through the API with once, grant, deny; stop while a card is waiting; **a client without approval cards (the app) is refused at once, the profile is not loosened, an earlier grant still applies, switching to Workspace read works**; access API; no file content or paths in logs; `purge receipts` needs `--yes` |
+| `desktop/e2e/validate-m3.sh` | The real app on macOS: the Ask before read notice, a read refused at once, Switch to Workspace read, a read answered from the file, outside / symlink / `.ENV` still blocked |
 | `tests/test_browser_m3.py` | Headless Chromium: attach from Access, a read with Sources, outside / `.ENV` / symlink blocked with no card, search, Ask before read with once, grant (listed, then no card), revoke, deny, outside still blocked under ask, steps and Sources after reopening, detach. Skipped without Node + Playwright |

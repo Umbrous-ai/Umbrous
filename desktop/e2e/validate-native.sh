@@ -74,6 +74,8 @@ e2e nav-stream nav-stream.txt "$W/h-nav"; kill $FAKE
 if grep -q '"error"' "$W"/*.jsonl 2>/dev/null; then echo "FAIL: e2e assertions failed:"; grep -h '"error"' "$W"/*.jsonl; fi
 grep -h '"app.panic"' "$W"/h-*/logs/desktop.log && echo "FAIL: the app panicked" || echo "ok   no panics logged"
 [ "$(tail -1 "$W/nav-stream.jsonl" | grep -c '"record":"end"')" = 1 ] && echo "ok   nav-stream: all $(grep -c '"ok":true' "$W/nav-stream.jsonl") assertions passed" || echo "FAIL: nav-stream did not reach its end"
+echo "### M3: Ask before read in the app, the switch, reads (validate-m3.sh)"
+"$ROOT/desktop/e2e/validate-m3.sh" "$W"
 echo "### a runtime started from a terminal is reported and left running"
 mkdir -p "$W/h-cli"
 PYTHONPATH="$ROOT" python3 -m umbrous --home "$W/h-cli" serve --no-open --port 0 >/dev/null 2>&1 & CLI=$!; sleep 2

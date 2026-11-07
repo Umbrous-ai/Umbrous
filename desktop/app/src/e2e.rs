@@ -86,6 +86,8 @@ fn snapshot(ws: &Workspace, label: &str) -> Value {
         "metas": ws.msgs.iter().rev().take(4).rev().map(|m| m.meta.clone()).collect::<Vec<_>>(),
         "blocks_last": ws.msgs.last().map(|m| m.blocks.len()),
         "model": ws.model,
+        "access": ws.access.as_ref().map(|a| json!({"project": a.project_id, "profile": a.workspace.as_ref().map(|w| w.profile.clone())})),
+        "ask_notice": ws.asks_before_read(),
         "ollama": ws.models.as_ref().map(|m| json!({"reachable": m.reachable, "models": m.models.len()})),
         "perf": format!("{:?}", ws.perf),
     })
@@ -177,6 +179,15 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 ws.is_running() && ws.msgs.last().map(|m| m.streaming && m.text.len() > 20).unwrap_or(false)
             }).await?;
         }
+        "wait_access" => {
+            // until the selected project's access has loaded (M3)
+            wait_until(cx, window, 10, "access", |ws| ws.access.as_ref().map(|a| ws.project_id.as_deref() == Some(a.project_id.as_str())).unwrap_or(false)).await?;
+        }
+        "switch_workspace_read" => {
+            // what the notice's "Switch to Workspace read" button does
+            window.update(cx, |ws, _, cx| ws.switch_to_workspace_read(cx)).ok();
+            wait_until(cx, window, 10, "profile switched", |ws| !ws.asks_before_read()).await?;
+        }
         "wait_idle" => {
             wait_until(cx, window, arg.parse().unwrap_or(60), "no reply running", |ws| !ws.is_running()).await?;
         }
@@ -187,6 +198,10 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "chat" => ws.chat.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "none".into()),
                 "running" => ws.is_running().to_string(),
                 "last_meta" => ws.msgs.last().map(|m| m.meta.clone()).unwrap_or_default(),
+                "last_text" => ws.msgs.last().map(|m| m.text.clone()).unwrap_or_default(),
+                "no_text" => (!ws.msgs.iter().any(|m| m.text.contains(val))).to_string(),
+                "access" => ws.access.as_ref().and_then(|a| a.workspace.as_ref()).map(|w| w.profile.clone()).unwrap_or_else(|| "none".into()),
+                "ask_notice" => ws.asks_before_read().to_string(),
                 "last_text_len_over" => (ws.msgs.last().map(|m| m.text.len()).unwrap_or(0) > val.parse::<usize>().unwrap_or(0)).to_string(),
                 "phase" => match &ws.phase { Phase::Ready => "ready".into(), Phase::Starting => "starting".into(), Phase::Failed(f) => f.code.clone() },
                 "sessions" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),
@@ -195,7 +210,8 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             }).map_err(|_| "window gone".to_string())?;
             let ok = match what {
                 "chat" if val != "none" => got.contains(val),
-                "last_meta" | "sessions" => got.contains(val),
+                "last_meta" | "sessions" | "last_text" => got.contains(val),
+                "no_text" => got == "true",
                 "last_text_len_over" => got == "true",
                 _ => got == val,
             };

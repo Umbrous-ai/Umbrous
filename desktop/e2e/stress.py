@@ -3,6 +3,8 @@
     python3 desktop/e2e/stress.py seed HOME [EXCHANGES]   a project "Load test" with one long chat
     python3 desktop/e2e/stress.py fake-ollama PORT        a fake Ollama whose model streams a ~100 KB Markdown reply
     python3 desktop/e2e/stress.py fake-empty PORT         a fake Ollama with no models installed
+    python3 desktop/e2e/stress.py fake-workspace PORT     a fake Ollama whose model reads files with tools (M3)
+    python3 desktop/e2e/stress.py seed-workspace DIR      a test workspace (DIR/ws) and an outside secret (M3)
 
 HOME is a throwaway data folder; point the app at it with UMBROUS_HOME, and at
 the fake Ollama with {"ollama_url": "http://127.0.0.1:PORT"} in HOME/config.json.
@@ -76,9 +78,16 @@ def seed_reference(home: Path) -> None:
     print(f"seeded reference content in {home}")
 
 
-def fake_ollama(port: int, empty: bool = False) -> None:
-    from tests.fake_ollama import FakeModel, FakeOllama
-    models = [] if empty else [
+def seed_workspace(base: Path) -> None:
+    """The M3 test fixture: notes, an .ENV, symlinks and a hard link to a file outside."""
+    from tests.test_m3_fs import make_fixture
+    base.mkdir(parents=True, exist_ok=True)
+    print(make_fixture(base))
+
+
+def fake_ollama(port: int, empty: bool = False, workspace: bool = False) -> None:
+    from tests.fake_ollama import FakeModel, FakeOllama, workspace_agent
+    models = [FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02)] if workspace else [] if empty else [
         FakeModel("stress:1b", reply=big_markdown(100), chunk_delay=0.0005),
         # streams for ~30 s: time to switch chats, projects or archive mid-reply
         FakeModel("slow:1b", reply=big_markdown(20), chunk_delay=0.01),
@@ -91,7 +100,9 @@ def fake_ollama(port: int, empty: bool = False) -> None:
 if __name__ == "__main__":
     if sys.argv[1] == "seed-reference":
         seed_reference(Path(sys.argv[2]))
+    elif sys.argv[1] == "seed-workspace":
+        seed_workspace(Path(sys.argv[2]))
     elif sys.argv[1] == "seed":
         seed(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 1000)
     else:
-        fake_ollama(int(sys.argv[2]), empty=sys.argv[1] == "fake-empty")
+        fake_ollama(int(sys.argv[2]), empty=sys.argv[1] == "fake-empty", workspace=sys.argv[1] == "fake-workspace")

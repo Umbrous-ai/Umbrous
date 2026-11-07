@@ -195,6 +195,19 @@ pub struct Models {
     pub models: Vec<ModelInfo>,
 }
 
+/// GET /api/projects/<id>/access (umbrous/gate/access.py, M3). Only what the app uses.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccessWorkspace {
+    pub name: String,
+    pub profile: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Access {
+    pub project_id: String,
+    pub workspace: Option<AccessWorkspace>,
+}
+
 #[allow(dead_code)] // logged nowhere yet; kept as the claim step's sanity check
 #[derive(Debug, Clone, Deserialize)]
 pub struct Health {

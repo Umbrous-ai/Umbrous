@@ -79,6 +79,12 @@ pub struct Workspace {
     project_error: Option<String>,
     run: Option<Run>,
     notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
+    /// The selected project's workspace access (M3). This app cannot show approval
+    /// requests yet, so a project on Ask before read gets an explanation and an
+    /// explicit switch, never a silent change or a request left waiting.
+    pub access: Option<api::Access>,
+    access_seq: u64,
+    pub access_error: Option<String>,
     sidebar: bool,
     /// the right sidebar (Changes and Sources), shown and hidden by the header's panel button
     details: bool,
@@ -219,6 +225,9 @@ impl Workspace {
             project_error: None,
             run: None,
             notice: None,
+            access: None,
+            access_seq: 0,
+            access_error: None,
             sidebar: true,
             details: true,
             card_menu: false,
@@ -335,6 +344,7 @@ impl Workspace {
 
     pub fn load_chats(&mut self, cx: &mut Context<Self>) {
         let Some(pid) = self.project_id.clone() else { return };
+        self.load_access(cx);
         let show_archived = self.show_archived;
         self.chats_seq += 1;
         let seq = self.chats_seq;
@@ -369,10 +379,57 @@ impl Workspace {
         );
     }
 
+    /// The selected project's access (workspace and profile). Asked again whenever
+    /// the chat list is, so a change made in the browser page or the CLI shows up.
+    pub fn load_access(&mut self, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        self.access_seq += 1;
+        let seq = self.access_seq;
+        let path = format!("/api/projects/{pid}/access");
+        self.api_call(cx, move |api| api.get::<api::Access>(&path), move |this, r, _| {
+            if seq != this.access_seq || this.project_id.as_deref() != Some(pid.as_str()) {
+                return;
+            }
+            if let Ok(a) = r {
+                this.access = Some(a);
+            }
+        });
+    }
+
+    pub fn asks_before_read(&self) -> bool {
+        self.access
+            .as_ref()
+            .filter(|a| self.project_id.as_deref() == Some(a.project_id.as_str()))
+            .and_then(|a| a.workspace.as_ref())
+            .map(|w| w.profile == "ask_before_read")
+            .unwrap_or(false)
+    }
+
+    /// The explicit way out of Ask before read in this app: you press the button,
+    /// the runtime changes the profile, and the notice goes away once it has.
+    pub fn switch_to_workspace_read(&mut self, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        logfile::event("ui.profile_switch", &[("to", "workspace_read".into())]);
+        let path = format!("/api/projects/{pid}/profile");
+        self.access_error = None;
+        self.api_call(cx, move |api| api.post::<api::Access>(&path, json!({"profile": "workspace_read"})), move |this, r, _| {
+            match r {
+                Ok(a) if this.project_id.as_deref() == Some(a.project_id.as_str()) => {
+                    this.access_seq += 1; // a list answer already on its way is older than this
+                    this.access = Some(a);
+                }
+                Ok(_) => {}
+                Err(e) => this.access_error = Some(e.message),
+            }
+        });
+    }
+
     pub fn select_project(&mut self, id: String, cx: &mut Context<Self>) {
         if self.project_id.as_deref() != Some(&id) {
             self.project_id = Some(id);
             self.show_archived = false;
+            self.access = None;
+            self.access_error = None;
             self.new_chat(cx);
             self.load_chats(cx);
         }
@@ -1447,6 +1504,27 @@ impl Workspace {
                 ui::notice(Some(ui::NoticeKind::Warn))
                     .child(div().flex_1().min_w_0().child("This chat is archived. All its messages are kept and shown here read-only. Restore it to continue."))
                     .child(ui::pill("restore").child("Restore").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_archived(false, cx))))
+                    .into_any_element(),
+            );
+        }
+        if self.asks_before_read() {
+            let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
+            let folder = self.access.as_ref().and_then(|a| a.workspace.as_ref()).map(|w| w.name.clone()).unwrap_or_default();
+            let error = self.access_error.clone();
+            notices.push(
+                ui::notice(Some(ui::NoticeKind::Warn))
+                    .child(
+                        div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
+                            .child(format!(
+                                "{project} uses Ask before read. This app cannot show approval requests yet, so chats here cannot read files in {folder}: each read is refused right away. Workspace read lets chats read ordinary files in that folder without asking; excluded files, links and paths outside it stay blocked, and every read still gets a receipt. Or keep Ask before read and answer requests in the browser page."
+                            ))
+                            .when_some(error, |d, e| d.child(div().text_color(danger()).child(e))),
+                    )
+                    .child(
+                        ui::pill("switch-workspace-read")
+                            .child("Switch to Workspace read")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.switch_to_workspace_read(cx))),
+                    )
                     .into_any_element(),
             );
         }

@@ -714,7 +714,7 @@
         if (mine !== view) return;
         chatId = j.chat.id;
       }
-      const r = await api.fetch('/api/chat', { json: { chat_id: chatId, model: selected, message: q }, signal: controller.signal });
+      const r = await api.fetch('/api/chat', { json: { chat_id: chatId, model: selected, message: q, approvals: true }, signal: controller.signal });
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
       const reader = r.body.getReader();
       const dec = new TextDecoder();

@@ -146,9 +146,12 @@ class GateUnitTests(unittest.TestCase):
             self.assertEqual((out.decision, out.code), ("denied", code), path)
             self.assertNotIn(SECRET, out.model_text)
 
-    def test_no_approver_means_denied(self):
+    def test_no_approver_means_denied_at_once(self):
         self.access.set_profile("prj_general", "ask_before_read")
-        self.assertEqual(self.run_call("read_file", path="readme.txt").code, "no_approver")
+        out = self.run_call("read_file", path="readme.txt")
+        self.assertEqual((out.decision, out.code), ("denied", "approval_unavailable"))
+        self.assertIn("Switch the project to Workspace read", out.model_text)
+        self.assertEqual(self.access.workspace("prj_general").profile, "ask_before_read")   # never loosened
 
     def test_approval_timeout(self):
         self.access.set_profile("prj_general", "ask_before_read")
@@ -268,7 +271,7 @@ class ToolChatTests(unittest.TestCase):
         with self.rt() as rt:
             rt.post_json("/api/models/probe", {"model": "reader:3b"})
             ev = rt.chat(rt.new_chat(), "reader:3b", "read notes/plan.md")
-            self.assertEqual(ev[0]["tools"], {"on": False, "workspace": None, "profile": None})
+            self.assertEqual(ev[0]["tools"], {"on": False, "workspace": None, "profile": None, "approvals": False})
 
     def test_hostile_file_cannot_expand_access(self):
         with self.rt() as rt:
@@ -311,9 +314,12 @@ class ToolChatTests(unittest.TestCase):
             self.assertIn("characters left out to fit the context budget", tool_msg["content"])
             self.assertLess(len(tool_msg["content"]) / 4, 2048)
 
-    def stream_chat(self, rt, cid, model, message, on_event):
+    def stream_chat(self, rt, cid, model, message, on_event, approvals=True):
         conn = http.client.HTTPConnection("127.0.0.1", rt.port, timeout=30)
-        body = json.dumps({"chat_id": cid, "model": model, "message": message}).encode()
+        body = {"chat_id": cid, "model": model, "message": message}
+        if approvals:
+            body["approvals"] = True   # what the browser page sends; the native app does not
+        body = json.dumps(body).encode()
         conn.request("POST", "/api/chat", body=body, headers={
             "Host": rt.host, "Origin": rt.origin, "Content-Type": "application/json",
             "X-Umbrous-Token": rt.policy.session_token})
@@ -364,6 +370,40 @@ class ToolChatTests(unittest.TestCase):
             self.assertEqual(next(e for e in ev if e["type"] == "tool_result")["code"], "denied_by_you")
             # a closed approval cannot be answered again
             self.assertEqual(rt.post_json(f"/api/approvals/{denied[0]['approval_id']}", {"choice": "once"})[0], 409)
+
+    def test_client_without_approval_cards_is_refused_at_once(self):
+        """The native app cannot show approval cards yet. Under Ask before read its
+        reads are refused immediately with a clear reason, never left waiting, and
+        the project's profile is not loosened behind your back."""
+        with self.rt() as rt:
+            self.setup_rt(rt)
+            rt.post_json("/api/projects/prj_general/profile", {"profile": "ask_before_read"})
+            cid = rt.new_chat()
+            t0 = time.monotonic()
+            ev = self.stream_chat(rt, cid, "reader:3b", "read readme.txt", lambda e: None, approvals=False)
+            self.assertLess(time.monotonic() - t0, 10)
+            types = [e["type"] for e in ev]
+            self.assertNotIn("approval_required", types)
+            self.assertFalse(ev[0]["tools"]["approvals"])
+            self.assertIn("cannot show approval requests", ev[0]["tools"]["notice"])
+            result = next(e for e in ev if e["type"] == "tool_result")
+            self.assertEqual((result["decision"], result["code"]), ("denied", "approval_unavailable"))
+            self.assertEqual(types[-1], "done")
+            self.assertNotIn("garden needs water", "".join(e.get("text", "") for e in ev))
+            self.assertEqual(rt.get_json("/api/projects/prj_general/access")[1]["workspace"]["profile"], "ask_before_read")
+            receipts = rt.get_json(f"/api/receipts?chat_id={cid}")[1]["receipts"]
+            self.assertEqual([r["reason"].split(":")[0] for r in receipts], ["approval_unavailable"])
+            # a grant you gave in the browser page still applies here, with no card
+            def grant(e):
+                if e["type"] == "approval_required":
+                    rt.post_json(f"/api/approvals/{e['approval_id']}", {"choice": "grant"})
+            self.stream_chat(rt, cid, "reader:3b", "read readme.txt", grant)          # as the browser page would
+            ev = self.stream_chat(rt, cid, "reader:3b", "read readme.txt", lambda e: None, approvals=False)
+            self.assertEqual(next(e for e in ev if e["type"] == "tool_result")["decision"], "allowed")
+            # switching to Workspace read is the explicit way out
+            self.assertEqual(rt.post_json("/api/projects/prj_general/profile", {"profile": "workspace_read"})[0], 200)
+            ev = self.stream_chat(rt, cid, "reader:3b", "read notes/plan.md", lambda e: None, approvals=False)
+            self.assertIn("Ship M3", "".join(e.get("text", "") for e in ev))
 
     def test_stop_while_an_approval_card_is_open(self):
         with self.rt() as rt:
