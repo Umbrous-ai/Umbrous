@@ -32,6 +32,7 @@ from umbrous import MILESTONE, __version__
 from umbrous.api.security import CLAIM_PATH, LAUNCH_HEADER, AccessPolicy, evaluate
 from umbrous.config import Config, ensure_loopback
 from umbrous.logging_setup import log_event
+from umbrous.receipts.redaction import default_redactor
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PAGE_PATH = REPO_ROOT / "prototypes" / "umbrous-harness.html"
@@ -147,7 +148,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         finally:
-            log_event(log, "http.request", method=self.command, path=path if len(path) < 200 else path[:200] + "…",
+            # Redact first, then truncate: truncating first could cut a secret in half,
+            # and a half secret no longer matches the exact-value redaction rule.
+            safe_path = default_redactor.redact(path)
+            if len(safe_path) > 200:
+                safe_path = safe_path[:200] + "…"
+            log_event(log, "http.request", method=self.command, path=safe_path,
                       status=status, reason=reason, ms=int((time.monotonic() - start) * 1000))
 
     def _route(self, path: str) -> Tuple[int, str]:

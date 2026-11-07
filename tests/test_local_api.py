@@ -136,6 +136,22 @@ class LocalApiTests(unittest.TestCase):
                     socket.create_connection((addr, self.rt.port), timeout=2).close()
 
 
+class LogTruncationTests(unittest.TestCase):
+    def test_long_path_is_redacted_before_it_is_truncated(self):
+        # Codex review repro: "/" + 180 filler + "/" + token used to leave a token prefix in the log.
+        with RunningRuntime() as rt:
+            token = rt.policy.session_token
+            rt.request("GET", "/" + "a" * 180 + "/" + token)
+            for _ in range(100):
+                logfile = (rt.config.log_dir / "runtime.log").read_text()
+                if '"http.request"' in logfile:
+                    break
+                time.sleep(0.02)
+            for n in (8, 12, 18):
+                self.assertNotIn(token[:n], logfile)
+            self.assertIn("/[REDACTED:", logfile)
+
+
 class LaunchCodeTests(unittest.TestCase):
     def test_launch_code_works_once(self):
         with RunningRuntime() as rt:

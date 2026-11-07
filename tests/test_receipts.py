@@ -48,6 +48,22 @@ class RedactionTests(unittest.TestCase):
         out = self.r.redact('DB_PASSWORD="hunter2hunter2" user=fred')
         self.assertEqual(out, 'DB_PASSWORD="[REDACTED:assignment]" user=fred')
 
+    def test_short_and_quoted_assignment_values(self):
+        cases = {
+            "password=abc": "password=[REDACTED:assignment]",
+            'password="two secret words" user=x': 'password="[REDACTED:assignment]" user=x',
+            "passphrase: 'correct horse battery staple'": "passphrase: '[REDACTED:assignment]'",
+            'API_KEY: "never closed and has spaces': 'API_KEY: "[REDACTED:assignment]',
+            "token=x": "token=[REDACTED:assignment]",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.r.redact(text), expected)
+
+    def test_count_like_names_are_not_secrets(self):
+        text = "max_tokens=512 tokens: 40 token_count=7"
+        self.assertEqual(self.r.redact(text), text)
+
     def test_url_credentials(self):
         out = self.r.redact("clone https://fred:s3cretpass@example.com/repo.git")
         self.assertEqual(out, "clone https://[REDACTED:url_credentials]example.com/repo.git")

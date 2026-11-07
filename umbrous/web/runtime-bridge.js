@@ -3,13 +3,14 @@
 // 1. bin/umbrous opens the page as http://127.0.0.1:<port>/#launch=<one-time code>.
 // 2. This script removes the code from the address bar, then trades it once
 //    at POST /api/session/claim for the session credential.
-// 3. The credential is kept in sessionStorage (this tab only, gone when the tab
-//    closes) and sent as X-Umbrous-Token on every API call.
+// 3. The credential is kept only in this script's memory (a local variable),
+//    never in sessionStorage, localStorage or cookies, which a browser writes to
+//    disk. Reloading the page therefore ends the session: relaunch bin/umbrous.
+//    It is sent as X-Umbrous-Token on every API call.
 // 4. Every 5 s it calls GET /api/health and fills in the Details panel's
 //    Runtime section. Values are written with textContent, never as HTML.
 (() => {
   'use strict';
-  const KEY = 'umbrous.session';
   const POLL_MS = 5000;
   const $ = (id) => document.getElementById(id);
 
@@ -36,22 +37,19 @@
   async function sessionToken() {
     const params = new URLSearchParams(location.hash.slice(1));
     const code = params.get('launch');
-    if (code) {
-      history.replaceState(null, '', location.pathname + location.search); // drop the code from the URL
-      try {
-        const token = await claim(code);
-        sessionStorage.setItem(KEY, token);
-        return token;
-      } catch (_) { /* fall through: maybe this tab already has a session */ }
+    if (!code) return null;
+    history.replaceState(null, '', location.pathname + location.search); // drop the code from the URL
+    try {
+      return await claim(code); // held only by the caller's local variable
+    } catch (_) {
+      return null;
     }
-    return sessionStorage.getItem(KEY);
   }
 
   async function poll(token) {
     try {
       const r = await fetch('/api/health', { headers: { 'X-Umbrous-Token': token }, cache: 'no-store', credentials: 'omit' });
       if (r.status === 401) {
-        sessionStorage.removeItem(KEY);
         status('bad', 'Session ended', 'The runtime restarted or the credential is wrong. Relaunch with bin/umbrous.');
         return false;
       }
@@ -72,7 +70,7 @@
   async function start() {
     const token = await sessionToken();
     if (!token) {
-      status('off', 'No session', 'Open Umbrous with bin/umbrous so the page receives a launch code.');
+      status('off', 'No session', 'Sessions do not survive a reload or a new tab. Relaunch with bin/umbrous.');
       return;
     }
     if (!(await poll(token))) return;

@@ -45,8 +45,12 @@ bin/umbrous ── python3 -m umbrous ──▶ binds 127.0.0.1:8417
    Fragments are never sent to the server or logged. The page's
    `runtime-bridge.js` removes it from the address bar and trades it for the
    credential at `/api/session/claim`.
-5. The page keeps the credential in `sessionStorage` (this tab only) and sends
-   it as `X-Umbrous-Token` on every API call.
+5. The page keeps the credential only in JavaScript memory (a local variable
+   in `runtime-bridge.js`) and sends it as `X-Umbrous-Token` on every API call.
+   It is never put in `sessionStorage`, `localStorage` or a cookie, because
+   Chrome writes those to the profile on disk, where a backup could pick up a
+   credential that still works. The cost: reloading the page or opening a new
+   tab ends the session. Stop the runtime (Ctrl-C) and run `bin/umbrous` again.
 
 Why the extra launch code step? The URL a browser is opened with ends up in
 the process list and browser history. Putting the credential itself there
@@ -118,8 +122,14 @@ than the code is refused.
    `curl http://<your-mac-ip>:8417/` is refused the same way.
 3. Look at `~/Library/Application Support/Umbrous/logs/runtime.log`: one JSON
    line per request, with the refusal reason, and no credential anywhere.
-4. Ctrl-C. The panel switches to Unreachable. Run `bin/umbrous` again: the old
-   tab shows "Session ended", because each launch has a new credential.
+4. Reload the page: the panel shows "No session", because the credential only
+   lived in the page's memory.
+5. Ctrl-C. A still-open page switches to Unreachable. Run `bin/umbrous` again:
+   the old window shows "Session ended", because each launch has a new
+   credential.
+6. To see an authenticated call, use the developer tools' Network tab on a
+   `/api/health` request. Don't copy the credential into a terminal command:
+   it would end up in the process list and your shell history.
 
 ## Exercise: change one harmless status field
 
@@ -136,12 +146,13 @@ Things to notice: the value is written with `textContent`, so even
 `"<b>hi</b>"` shows as text. The server reads the page once at launch (and pins
 its inline script by hash in the CSP), so restart after editing it.
 
-## Tests (55, `bin/umbrous test`)
+## Tests (61, `bin/umbrous test`)
 
 | File | Covers |
 |---|---|
-| `tests/test_local_api.py` | Real server on a random port: page + headers, health, missing/wrong credential, foreign Origin, `null` Origin, cross-site fetch metadata, CORS preflight, bad Host (DNS rebinding), path tricks, body limit, loopback bind, not reachable on non-loopback addresses, launch code single use, credential differs per launch, logs never contain secrets |
+| `tests/test_local_api.py` | Real server on a random port: page + headers, long paths redacted before truncation, health, missing/wrong credential, foreign Origin, `null` Origin, cross-site fetch metadata, CORS preflight, bad Host (DNS rebinding), path tricks, body limit, loopback bind, not reachable on non-loopback addresses, launch code single use, credential differs per launch, logs never contain secrets |
 | `tests/test_security_policy.py` | Policy unit tests with a fake clock: launch code expiry, Host matching, same-site vs same-origin |
 | `tests/test_config_and_db.py` | Non-loopback hosts refused, config precedence, schema migration, newer DB refused, failed migration rolls back, file permissions |
-| `tests/test_receipts.py` | Fixture secrets redacted (incl. inside a receipt), field limits, invalid receipts rejected |
+| `tests/test_receipts.py` | Fixture secrets redacted (incl. inside a receipt), short and quoted passwords, field limits, invalid receipts rejected |
+| `tests/test_page_bridge.py` | The page never stores the credential in browser storage or writes HTML; the demo never puts it on a command line |
 | `tests/test_cli.py` | Whole command: start, refuse a second copy, claim, health, clean stop on SIGTERM, purge |

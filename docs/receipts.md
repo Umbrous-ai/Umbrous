@@ -65,7 +65,10 @@ log line. Rules, in order:
    Slack keys and tokens, JWTs, `Bearer ...` values, and `user:pass@` in URLs
    become `[REDACTED:<kind>]`.
 3. **Assignments.** `password=...`, `API_KEY: "..."`, `*_token=...` keep the
-   name and lose the value.
+   name and lose the value, whatever its length. A quoted value is removed up
+   to its closing quote, spaces included (or to the end of the line if the
+   quote is never closed). Names that hold counts rather than secrets, such as
+   `max_tokens` or `token_count`, are left alone.
 4. **Sensitive field names.** In structured data, any value under a key such
    as `password`, `token`, `authorization`, `cookie`, or ending in `_token`,
    `_secret`, `_password` becomes `[REDACTED:field]`, whatever it contains.

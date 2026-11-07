@@ -39,11 +39,28 @@ _PATTERNS: Tuple[Tuple[str, Pattern[str]], ...] = (
     ("url_credentials", re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]+@")),
 )
 
-# `password = hunter22`, `API_KEY: "abc..."`, `token=...`: keep the name, drop the value.
+# `password = hunter22`, `API_KEY: "abc..."`, `token=x`: keep the name, drop the value.
+# The value is either quoted (everything up to the matching quote, spaces included,
+# or to the end of the line if the quote is never closed) or unquoted (up to the
+# next whitespace). Any length counts: `password=abc` is still a password.
 _ASSIGNMENT = re.compile(
-    r"(?i)\b([A-Za-z0-9_]*(?:password|passwd|secret|api[_-]?key|token|access[_-]?key)[A-Za-z0-9_]*)"
-    r"(\s*[:=]\s*)(['\"]?)([^\s'\"]{6,})\3"
+    r"(?im)\b([A-Za-z0-9_-]*(?:password|passphrase|passwd|pwd|secret|api[_-]?key|token|access[_-]?key)[A-Za-z0-9_-]*)"
+    r"(\s*[:=]\s*)"
+    r"(?:([\"'])((?:\\.|(?!\3)[^\\\n])*)(\3)?|([^\s'\"]+))"
 )
+# Names that contain "token" etc. but hold counts, not secrets (e.g. max_tokens=512).
+_NOT_SECRET_NAME = re.compile(r"(?i)(tokens|_count|_limit|_budget|_used)$|^(max|num|n)_")
+
+
+def _redact_assignment(m: "re.Match[str]") -> str:
+    name, sep, quote, _quoted, closing, _bare = m.groups()
+    if _NOT_SECRET_NAME.search(name):
+        return m.group(0)
+    mark = MARK.format(kind="assignment")
+    if quote:
+        return f"{name}{sep}{quote}{mark}{closing or ''}"
+    return f"{name}{sep}{mark}"
+
 
 SENSITIVE_KEYS = frozenset({
     "password", "passwd", "secret", "token", "api_key", "apikey", "access_key",
@@ -77,7 +94,7 @@ class Redactor:
                 text = text.replace(value, MARK.format(kind="runtime_secret"))
         for kind, pattern in _PATTERNS:
             text = pattern.sub(MARK.format(kind=kind), text)
-        text = _ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{MARK.format(kind='assignment')}{m.group(3)}", text)
+        text = _ASSIGNMENT.sub(_redact_assignment, text)
         return text
 
     def redact_obj(self, obj: Any) -> Any:

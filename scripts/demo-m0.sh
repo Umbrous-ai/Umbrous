@@ -28,11 +28,15 @@ fi
 cat <<'MSG'
 
 == 7. The allowed path
-The page itself holds the credential. In the Umbrous window open the developer
-console (Cmd-Option-I) and run:
-    sessionStorage.getItem('umbrous.session')
-then, in a terminal:
-    curl --noproxy '*' -s -H "X-Umbrous-Token: <that value>" http://127.0.0.1:8417/api/health
-That works, which is the point of "a layer, not a guarantee": anything that can
-read the page (an extension, malware running as you) can use the credential.
+Only the page holds the session credential, and only in its memory. To watch
+an authenticated call, open the developer tools in the Umbrous window
+(Cmd-Option-I), go to the Network tab and click a /api/health request: you will
+see the X-Umbrous-Token header and the JSON reply.
+
+Do not copy that value into a terminal command. It would land in the process
+list and your shell history, and it stays valid until the runtime stops.
+
+That the page (and so anything that can read the page: an extension, malware
+running as you) can use the credential is the point of "a layer, not a
+guarantee".
 MSG
