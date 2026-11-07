@@ -16,7 +16,7 @@ bin/umbrous                          # ask something that needs a few files
 bin/umbrous tasks                    # recent tasks: status, steps, actions
 bin/umbrous tasks --task tsk_…       # one task's trace (every event) and report
 bin/umbrous purge tasks --all --yes  # delete task state (receipts are separate)
-bin/umbrous test                     # 219 tests; no Ollama needed
+bin/umbrous test                     # 221 tests; no Ollama needed
 ```
 
 In the browser page, each reply that used tools ends with a **report**. Its
@@ -96,10 +96,21 @@ also cut to fit the context budget, as in M3. All of this goes back to the
 model as part of the tool result (a bounded amount of text), and is noted as
 **uncertainty** in the report.
 
-When the answer is done, Verify (`tasks/run.py`) looks for citations of the
-form `path:12` or `path:12-30` in it. A cited file that no completed read
-covers, or a line outside the ranges read, is added to uncertainty. Only the
-path and line numbers are kept, never the answer.
+When the answer is done, Verify (`tasks/run.py`, `citations()`) finds the
+file citations in it: `name:12`, `name:12-30` or `name:12:5`, with or without
+folders or an extension (`README:1`, `src/Makefile:3`), and `name line 12` for
+path-like or well-known names. Each is checked against the lines that a
+completed **read_file** returned. A line that only appeared in **search
+results** does not count as read, because a search shows each line cut to 200
+characters; it is reported as "only seen in search results". A cited file
+that was never read, or a line outside the ranges read, is reported too. The
+report says how many citations it checked (`citations_checked`); when there
+were none, the page says that nothing in the answer was matched to a read,
+rather than calling it verified. Only the path and line numbers are kept,
+never the answer.
+
+Verify only understands those citation forms. A claim made without one
+("the readme says…") is not checked, and the report does not pretend it was.
 
 The report has `status`, `code`, `steps`, `tool_calls`, `actions` (counts by
 status), `evidence`, `failures` (each action that did not complete, with its
@@ -258,6 +269,7 @@ The tests below exist; try writing them yourself first, then compare.
 | Test | Checks |
 |---|---|
 | `test_m4_tasks.TaskStoreTests` | schema 5; only valid transitions; ordered events; purge removes every table's rows |
+| `test_a_search_hit_is_not_a_read`, `test_extensionless_citations_are_checked` | only completed reads verify a citation; `README:1`, `Makefile:3` are checked; host:port and times are not citations |
 | `test_multi_step_read_task_has_a_trace_and_a_report` | 4 steps, 3 actions, each requested → started → completed; checkpoints; evidence; Verify flags an unread file and an unread line; same ids as the receipts; the chat transcript unchanged |
 | `test_step_limit…`, `test_total_tool_call_limit`, `test_task_time_limit` | each limit ends with a clear report |
 | `test_hung_tool_is_abandoned_and_reported_unknown` | a stuck tool becomes unknown, the task goes on, its late result is logged but never used |

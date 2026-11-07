@@ -119,6 +119,7 @@ class TaskRunTests(unittest.TestCase):
         return RunningRuntime(ollama_url=self.fake.url, **kw)
 
     def setup_rt(self, rt, *models):
+        """Attach the workspace and pass the tool check for the given models."""
         status, _, body = rt.post_json("/api/projects/prj_general/workspace", {"root": str(self.ws)})
         self.assertEqual(status, 200, body)
         for m in models:
@@ -193,6 +194,44 @@ class TaskRunTests(unittest.TestCase):
             msgs = rt.get_json(f"/api/chats/{cid}")[1]["messages"]
             self.assertEqual([m["role"] for m in msgs], ["user", "assistant"])
             self.assertEqual(msgs[1]["task_id"], done["task_id"])
+
+    # ------------------------------------------------------------ Verify (Codex review, 2026-11-07)
+    def verify_report(self, rt, model, steps, answer):
+        self.fake.models.append(FakeModel(model, agent=scripted(*steps, final=lambda m: answer)))
+        self.assertEqual(rt.post_json("/api/models/probe", {"model": model})[0], 200)
+        return rt.chat(rt.new_chat(), model, "go")[-1]["report"]
+
+    def test_a_search_hit_is_not_a_read(self):
+        long_line = "Ship it " + "x" * 400            # longer than the 200 characters a search shows
+        (self.ws / "notes" / "long.md").write_text("# Long\n" + long_line + "\n")
+        with self.rt() as rt:
+            self.setup_rt(rt)
+            rep = self.verify_report(rt, "searchonly:3b", [("search_files", {"query": "Ship it"})],
+                                     "It says so in notes/long.md:2.")
+            self.assertEqual(rep["citations_checked"], 1)
+            self.assertIn("The answer cites notes/long.md:2, which was only seen in search results "
+                          "(lines cut to 200 characters), not read.", rep["uncertainty"])
+            rep = self.verify_report(rt, "searchread:3b", [("search_files", {"query": "Ship it"}),
+                                                           ("read_file", {"path": "notes/long.md"})],
+                                     "It says so in notes/long.md:2.")
+            # read after the search: verified (the search itself skipped the fixture's links and binaries)
+            self.assertFalse([u for u in rep["uncertainty"] if "long.md" in u], rep["uncertainty"])
+
+    def test_extensionless_citations_are_checked(self):
+        (self.ws / "README").write_text("Read me.\n")
+        (self.ws / "Makefile").write_text("all:\n\ttrue\n")
+        with self.rt() as rt:
+            self.setup_rt(rt)
+            rep = self.verify_report(rt, "noext:3b", [("list_files", {})],
+                                     "See README:1 and Makefile:3, and src/Dockerfile line 2. Served on localhost:8417 at 10:30.")
+            self.assertEqual(rep["citations_checked"], 3)
+            for name in ("README", "Makefile", "src/Dockerfile"):
+                self.assertIn(f"The answer cites {name}, which was not read in this task.", rep["uncertainty"])
+            self.assertEqual(len(rep["uncertainty"]), 3)  # host:port and a time are not citations
+            rep = self.verify_report(rt, "noextread:3b", [[("read_file", {"path": "README"}),
+                                                            ("read_file", {"path": "Makefile"})]],
+                                     "See README:1 and Makefile:1-2 (Makefile:2:3 too).")
+            self.assertEqual((rep["citations_checked"], rep["uncertainty"]), (3, []))
 
     def test_tasks_api_rejects_bad_ids_and_methods(self):
         with self.rt() as rt:

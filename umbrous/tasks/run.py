@@ -32,8 +32,33 @@ from umbrous.tasks.store import TaskStore
 
 log = logging.getLogger("umbrous.tasks")
 
-# A citation in the answer: path/with.ext:12 or :12-30 (also "path line 12").
-CITE_RE = re.compile(r"(?<![\w/.-])([\w][\w./-]*\.[A-Za-z0-9]{1,8})(?::| lines? )(\d{1,7})(?:\s*[-–]\s*(\d{1,7}))?")
+# A citation in the answer: name:12 or name:12-30, where the name may have
+# folders and need not have an extension (README:1, src/Makefile:3). The
+# "name line 12" form counts only for path-like names (a "." or "/") or
+# well-known extensionless files, so "in line 3" is not taken for a file.
+CITE_RE = re.compile(r"(?<![\w/.:@-])((?:\.?/)?(?:[\w.-]+/)*[A-Za-z_][\w.-]*)"
+                     r"(:| lines? )(\d{1,7})(?:\s*[-–]\s*(\d{1,7}))?(?::\d+)?(?!\d)")   # a :column is ignored
+BARE_NAMES = {"readme", "makefile", "dockerfile", "license", "licence", "changelog", "notice", "authors",
+              "contributing", "codeowners", "procfile", "gemfile", "rakefile", "vagrantfile", "jenkinsfile",
+              "brewfile", "justfile", "copying", "install", "todo"}
+NOT_FILES = {"localhost"}       # host:port is not a citation
+
+
+def citations(answer: str) -> List[Tuple[str, int, int]]:
+    """(path, first line, last line) for each file citation in the answer, at most 40."""
+    out = []
+    for m in CITE_RE.finditer(answer or ""):
+        name, sep, a, b = m.group(1), m.group(2), int(m.group(3)), int(m.group(4) or m.group(3))
+        path = name[2:] if name.startswith("./") else name.lstrip("/")
+        base = path.rsplit("/", 1)[-1]
+        if base.lower() in NOT_FILES:
+            continue
+        if sep != ":" and "." not in base and "/" not in path and base.lower() not in BARE_NAMES:
+            continue
+        out.append((path, a, b))
+        if len(out) >= 40:
+            break
+    return out
 MAX_LIST = 20
 
 
@@ -51,6 +76,11 @@ class TaskRun:
         self.failures: List[dict] = []
         self.uncertainty: List[str] = []
         self.limits_hit: List[str] = []
+        # Provenance for Verify: lines a completed read_file returned, and lines
+        # that only appeared in search results (each cut to 200 characters).
+        self.read_ranges: Dict[str, List[Tuple[int, int]]] = {}
+        self.search_lines: Dict[str, set] = {}
+        self.citations_checked = 0
         self._safe(store.create if store else None, task_id, project_id, chat_id, model, self.limits)
         self._safe(store.set_status if store else None, task_id, "started")
 
@@ -116,6 +146,14 @@ class TaskRun:
         place = "the workspace folder" if a["resource"] == "." else a["resource"]
         if status == "completed":
             self.evidence.extend(evidence)
+            for e in evidence:
+                if e.get("kind") != "file":
+                    continue
+                lines = tuple(e["lines"]) if e.get("lines") else (0, 0)
+                if a["tool"] == "read_file":
+                    self.read_ranges.setdefault(e["ref"], []).append(lines)
+                elif a["tool"] == "search_files":
+                    self.search_lines.setdefault(e["ref"], set()).add(lines[0])
             o = observed or {}
             if o.get("timed_out"):
                 self.note(f"The search in {place} hit its time limit, so it may have missed matches.")
@@ -146,23 +184,22 @@ class TaskRun:
 
     # ---------------------------------------------------------------- verify + finish
     def verify(self, answer: str) -> None:
-        """Check the answer's file:line citations against the reads that completed.
+        """Check the answer's file:line citations against what completed reads
+        returned. Only a read counts: a search shows a line cut to 200
+        characters, so a line seen only in search results is reported as such.
         Only the outcome is kept (the cited path and line), never the answer."""
-        ranges: Dict[str, List[Tuple[int, int]]] = {}
-        for e in self.evidence:
-            if e.get("kind") == "file":
-                lines = e.get("lines")
-                ranges.setdefault(e["ref"], []).append(tuple(lines) if lines else (0, 0))
-        checked = 0
-        for m in CITE_RE.finditer(answer or ""):
-            if checked >= 40:
-                break
-            checked += 1
-            path, a, b = m.group(1).lstrip("./"), int(m.group(2)), int(m.group(3) or m.group(2))
-            if path not in ranges:
+        cites = citations(answer)
+        self.citations_checked = len(cites)
+        for path, a, b in cites:
+            where = f"{path}:{a}" + (f"-{b}" if b != a else "")
+            if path in self.read_ranges:
+                if not any(lo <= a and b <= hi for lo, hi in self.read_ranges[path]):
+                    self.note(f"The answer cites {where}, outside the lines read.")
+            elif path in self.search_lines:
+                self.note(f"The answer cites {where}, which was only seen in search results "
+                          "(lines cut to 200 characters), not read.")
+            else:
                 self.note(f"The answer cites {path}, which was not read in this task.")
-            elif not any(lo <= a and b <= hi for lo, hi in ranges[path]):
-                self.note(f"The answer cites {path}:{a}" + (f"-{b}" if b != a else "") + ", outside the lines read.")
 
     def finish(self, status: str, code: Optional[str], answer: str = "") -> dict:
         if status == "completed":
@@ -171,7 +208,7 @@ class TaskRun:
             "task_id": self.task_id, "status": status, "code": code, "steps": self.step,
             "tool_calls": self.tool_calls, "actions": self.counts(), "evidence": _dedupe(self.evidence),
             "failures": self.failures, "uncertainty": self.uncertainty, "limits_hit": self.limits_hit,
-            "limits": self.limits, "ms": self.ms(),
+            "limits": self.limits, "ms": self.ms(), "citations_checked": self.citations_checked,
         }
         self._safe(self.store and self.store.artifact, self.task_id, "report", report)
         self._safe(self.store and self.store.set_status, self.task_id, status, code,

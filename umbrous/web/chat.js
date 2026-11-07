@@ -463,7 +463,9 @@
     list('Did not complete', (rep.failures || []).map((f) => `${f.tool} ${f.resource}: ${f.status} (${f.code}) ${f.message || ''}`), 'fail');
     list('Not fully checked', rep.uncertainty || [], 'unc');
     if (rep.status === 'completed' && !(rep.failures || []).length && !(rep.uncertainty || []).length)
-      box.appendChild(el('div', 'tr-item ok', 'Every action completed and every cited line was read.'));
+      box.appendChild(el('div', 'tr-item ok', rep.citations_checked
+        ? `Every action completed, and the ${rep.citations_checked === 1 ? 'file:line citation' : rep.citations_checked + ' file:line citations'} in the answer ${rep.citations_checked === 1 ? 'is' : 'are'} covered by reads.`
+        : 'Every action completed. The answer cites no file:line to check, so nothing it says was matched to a read.'));
     return box;
   }
   async function showTrace(taskId) {
