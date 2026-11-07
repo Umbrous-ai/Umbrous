@@ -36,6 +36,8 @@ pub struct Composer {
     disabled: bool,
     undo: Vec<(String, Range<usize>)>,
     redo: Vec<(String, Range<usize>)>,
+    /// one-line field (the sidebar's project name box)
+    compact: bool,
     /// remembered x position for up/down
     goal_x: Option<Pixels>,
 }
@@ -54,6 +56,7 @@ impl Composer {
             focus: cx.focus_handle(),
             content: String::new(),
             placeholder: "Message a local model…".into(),
+            compact: false,
             selected: 0..0,
             reversed: false,
             marked: None,
@@ -73,6 +76,11 @@ impl Composer {
 
     pub fn set_placeholder(&mut self, p: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.placeholder = p.into();
+        cx.notify();
+    }
+
+    pub fn set_compact(&mut self, cx: &mut Context<Self>) {
+        self.compact = true;
         cx.notify();
     }
 
@@ -425,10 +433,15 @@ impl EntityInputHandler for Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = self.content.is_empty();
-        let text: SharedString = if empty { self.placeholder.clone() } else { self.content.clone().into() };
+        let placeholder: SharedString = if self.disabled && !self.compact {
+            "Archived chats are read-only. Restore it to continue.".into() // chat.js setComposer()
+        } else {
+            self.placeholder.clone()
+        };
+        let text: SharedString = if empty { placeholder } else { self.content.clone().into() };
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = vec![];
         if empty {
-            highlights.push((0..text.len(), HighlightStyle { color: Some(theme::faint().into()), ..Default::default() }));
+            highlights.push((0..text.len(), HighlightStyle { color: Some(theme::text_subtle().into()), ..Default::default() }));
         } else {
             // selection and marked (IME) text; they never overlap in practice, so order them
             if !self.selected.is_empty() {
@@ -437,7 +450,7 @@ impl Render for Composer {
             if let Some(m) = self.marked.clone() {
                 highlights.retain(|(r, _)| r.end <= m.start || r.start >= m.end);
                 highlights.push((m, HighlightStyle {
-                    underline: Some(UnderlineStyle { thickness: px(1.), color: Some(theme::text().into()), wavy: false }),
+                    underline: Some(UnderlineStyle { thickness: px(1.), color: Some(theme::text_strong().into()), wavy: false }),
                     ..Default::default()
                 }));
                 highlights.sort_by_key(|(r, _)| r.start);
@@ -493,13 +506,13 @@ impl Render for Composer {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .w_full()
-            .min_h(px(22.))
+            .min_h(px(if self.compact { 19.5 } else { 21. }))
             .max_h(px(240.))
             .overflow_hidden()
             .relative()
-            .text_size(px(14.))
-            .line_height(px(21.))
-            .text_color(if self.disabled { theme::faint() } else { theme::text() })
+            .text_size(px(if self.compact { 13. } else { 14. }))
+            .line_height(px(if self.compact { 19.5 } else { 21. }))
+            .text_color(if self.disabled { theme::text_subtle() } else { theme::text_strong() })
             .child(styled)
             .child(
                 canvas(

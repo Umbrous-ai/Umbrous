@@ -15,7 +15,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Entity, FontStyle, FontWeight, HighlightStyle, MouseButton,
+    div, prelude::*, px, relative, AnyElement, App, Entity, FontStyle, FontWeight, HighlightStyle, MouseButton,
     SharedString, StrikethroughStyle, StyledText, UnderlineStyle,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -120,14 +120,17 @@ fn highlights(block: &Block, sel: Option<Range<usize>>, mono: bool) -> Vec<(Rang
     let style_of = |i: Inline| {
         let mut h = HighlightStyle::default();
         if i.bold {
-            h.font_weight = Some(FontWeight::SEMIBOLD);
+            // `.answer strong`: weight 500, strong colour
+            h.font_weight = Some(FontWeight::MEDIUM);
+            h.color = Some(theme::text_strong().into());
         }
         if i.italic {
             h.font_style = Some(FontStyle::Italic);
         }
         if i.code && !mono {
-            h.background_color = Some(theme::inline_code_bg());
-            h.color = Some(gpui::rgb(0xe6d9ff).into());
+            // `.chip`: soft accent background, strong text
+            h.background_color = Some(theme::accent_soft());
+            h.color = Some(theme::text_strong().into());
         }
         if i.link {
             h.color = Some(theme::accent().into());
@@ -253,78 +256,107 @@ pub fn rows_for(ix: usize, m: &Msg) -> Vec<Row> {
 }
 
 fn block_element<H: SelectionHost>(host: &Entity<H>, ix: usize, bi: usize, b: &Block, s: Option<Range<usize>>) -> AnyElement {
+    use theme::*;
     match &b.kind {
-        BlockKind::Paragraph => div().child(text_block(host, ix, bi, b, s, false)).into_any_element(),
-        BlockKind::Heading(level) => div()
-            .pt(px(4.))
-            .text_size(px(match level { 1 => 20., 2 => 17., _ => 15. }))
-            .font_weight(FontWeight::SEMIBOLD)
+        // `.answer`: 16px / 1.6, default colour
+        BlockKind::Paragraph => div()
+            .text_size(fs_16())
+            .line_height(px(25.6))
+            .text_color(text_default())
             .child(text_block(host, ix, bi, b, s, false))
             .into_any_element(),
+        // `h3`: 16px, weight 500, strong
+        BlockKind::Heading(level) => div()
+            .text_size(if *level == 1 { fs_18() } else { fs_16() })
+            .line_height(px(25.6))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(text_strong())
+            .child(text_block(host, ix, bi, b, s, false))
+            .into_any_element(),
+        // `.hl`: 14px / 1.6, padding-left 20, subtle markers
         BlockKind::ListItem { marker, depth } => div()
             .flex()
-            .pl(px(4. + 18. * *depth as f32))
-            .gap(px(8.))
-            .child(div().flex_shrink_0().min_w(px(14.)).text_color(theme::muted()).child(marker.clone()))
+            .pl(px(20. * *depth as f32))
+            .text_size(fs_14())
+            .line_height(px(22.4))
+            .text_color(text_default())
+            .child(div().flex_none().w(px(24.)).pl(px(if marker == "•" { 6. } else { 0. })).text_color(text_subtle()).child(marker.clone()))
             .child(div().flex_1().min_w_0().child(text_block(host, ix, bi, b, s, false)))
             .into_any_element(),
+        // code: a raised card, mono
         BlockKind::Code { lang } => div()
             .flex()
             .flex_col()
-            .rounded(px(8.))
+            .rounded(px(R_8))
             .border_1()
-            .border_color(theme::border())
-            .bg(theme::code_bg())
+            .border_color(border())
+            .bg(bg_raised())
+            .when(!lang.is_empty() && lang != "table", |d| {
+                d.child(div().px(px(SP_12)).pt(px(SP_8)).text_size(fs_12()).text_color(text_subtle()).child(lang.clone()))
+            })
             .child(
                 div()
-                    .px(px(12.))
-                    .pt(px(6.))
-                    .text_size(px(11.))
-                    .text_color(theme::faint())
-                    .child(if lang.is_empty() { "code".to_string() } else { lang.clone() }),
-            )
-            .child(
-                div()
-                    .px(px(12.))
-                    .py(px(8.))
-                    .font_family(theme::MONO)
-                    .text_size(px(12.5))
-                    .line_height(px(19.))
+                    .px(px(SP_12))
+                    .py(px(SP_8))
+                    .font_family(MONO)
+                    .text_size(fs_13())
+                    .line_height(px(19.5))
+                    .text_color(text_strong())
                     .child(text_block(host, ix, bi, b, s, true)),
             )
             .into_any_element(),
         BlockKind::Quote => div()
-            .border_l_2()
-            .border_color(theme::border())
-            .pl(px(12.))
-            .text_color(theme::muted())
+            .border_l_1()
+            .border_color(border_strong())
+            .pl(px(SP_12))
+            .text_size(fs_16())
+            .line_height(px(25.6))
+            .text_color(text_subtle())
             .child(text_block(host, ix, bi, b, s, false))
             .into_any_element(),
-        BlockKind::Rule => div().h(px(1.)).bg(theme::border()).into_any_element(),
+        BlockKind::Rule => div().h(px(1.)).bg(border()).into_any_element(),
     }
 }
 
-pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &Selection) -> AnyElement {
-    let outer = div().w_full().flex().justify_center().px(px(32.));
-    let inner = div().w_full().max_w(px(760.)).min_w_0();
+/// Space above a block, from the page: paragraphs follow each other at 12,
+/// headings get the `h3` margin, list items the `li` margin of 8.
+fn block_gap(kind: &BlockKind, prev: Option<&BlockKind>) -> f32 {
+    match (kind, prev) {
+        (_, None) => 0.,
+        (BlockKind::ListItem { .. }, Some(BlockKind::ListItem { .. })) => 8.,
+        (BlockKind::Heading(_), _) => 24.,
+        (_, Some(BlockKind::Heading(_))) => 12.,
+        _ => 16.,
+    }
+}
+
+pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &Selection, first: bool) -> AnyElement {
+    use theme::*;
+    // `.thread`: centred, 32 on the sides, 48 above the first message
+    let outer = div().w_full().flex().justify_center().px(px(SP_32)).when(first, |d| d.pt(px(SP_48)));
+    // `.thread { max-width: 760px; padding: 0 32px }`: a 696px text column
+    let inner = div().w_full().max_w(px(696.)).min_w_0();
     let ix = row.msg;
     match row.kind {
+        // `.msg-u`: right-aligned, raised, 1px border, radius 12, padding 10 16, 14px strong, 48 below
         RowKind::User => {
             let b = m.blocks.first().cloned().unwrap_or_else(|| Block { kind: BlockKind::Paragraph, text: String::new(), spans: vec![] });
             let s = sel.in_block(ix, 0, b.text.len());
             outer
-                .pt(px(18.))
-                .pb(px(8.))
+                .when(!first, |d| d.pt(px(SP_48)))
                 .child(
                     inner.flex().justify_end().child(
                         div()
-                            .max_w(px(560.))
-                            .px(px(14.))
-                            .py(px(9.))
-                            .rounded(px(12.))
-                            .bg(theme::user_bubble())
+                            .max_w(relative(0.8))
+                            .bg(bg_raised())
                             .border_1()
-                            .border_color(theme::border())
+                            .border_color(border())
+                            .rounded(px(R_12))
+                            .px(px(SP_16))
+                            .py(px(10.))
+                            .text_size(fs_14())
+                            .line_height(px(21.))
+                            .text_color(text_strong())
                             .child(text_block(host, ix, 0, &b, s, false)),
                     ),
                 )
@@ -333,19 +365,21 @@ pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &S
         RowKind::Block(bi) => {
             let Some(b) = m.blocks.get(bi) else { return div().into_any_element() };
             let s = sel.in_block(ix, bi, b.text.len());
-            outer.pt(px(if bi == 0 { 8. } else { 10. })).child(inner.child(block_element(host, ix, bi, b, s))).into_any_element()
+            let gap = if bi == 0 { SP_48 } else { block_gap(&b.kind, m.blocks.get(bi - 1).map(|p| &p.kind)) };
+            outer.pt(px(gap)).child(inner.child(block_element(host, ix, bi, b, s))).into_any_element()
         }
-        RowKind::Pending => outer.pt(px(8.)).child(inner.text_color(theme::faint()).child("…")).into_any_element(),
+        RowKind::Pending => outer.pt(px(SP_48)).child(inner).into_any_element(),
+        // `.reply-meta`: 12px subtle, 8 above; `.reply` 16 below
         RowKind::Meta => {
             let color = match m.meta_kind {
-                MetaKind::Normal => theme::faint(),
-                MetaKind::Warn => theme::warn(),
-                MetaKind::Bad => theme::bad(),
+                MetaKind::Normal => text_subtle(),
+                MetaKind::Warn => warning(),
+                MetaKind::Bad => danger(),
             };
             outer
-                .pt(px(8.))
-                .pb(px(10.))
-                .child(inner.text_size(px(12.)).line_height(px(18.)).text_color(color).child(m.meta.clone()))
+                .pt(px(SP_8))
+                .pb(px(SP_16))
+                .child(inner.text_size(fs_12()).line_height(px(18.)).text_color(color).child(m.meta.clone()))
                 .into_any_element()
         }
     }

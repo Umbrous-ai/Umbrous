@@ -200,4 +200,8 @@ pub struct Health {
     pub milestone: String,
     pub schema_version: u32,
     pub bind: String,
+    #[serde(default)]
+    pub uptime_s: u64,
+    #[serde(default)]
+    pub ollama_exposure: Option<Value>,
 }

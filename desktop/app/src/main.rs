@@ -7,6 +7,7 @@
 
 mod actions;
 mod api;
+mod assets;
 mod backend;
 mod composer;
 #[cfg(feature = "e2e")]
@@ -15,6 +16,7 @@ mod logfile;
 mod markdown;
 mod theme;
 mod transcript;
+mod ui;
 mod workspace;
 
 use std::fs::OpenOptions;
@@ -135,7 +137,8 @@ fn open_main_window(started: Started, cx: &mut App) -> WindowHandle<Workspace> {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Umbrous".into()),
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(18.), px(18.))),
+                    // the controls sit in a 28px strip above the panels (workspace::TITLEBAR)
+                    traffic_light_position: Some(point(px(13.), px(7.))),
                 }),
                 window_min_size: Some(size(px(900.), px(600.))),
                 app_id: Some("ai.umbrous.desktop".into()),
@@ -172,7 +175,7 @@ fn main() {
     let (tx, rx) = futures::channel::mpsc::unbounded();
     backend.start(tx.clone());
     let mut started = Some(Started(backend, tx, rx));
-    let app = Application::new();
+    let app = Application::new().with_assets(assets::Assets);
     // Dock click (or `open`) while hidden: show the window again.
     app.on_reopen(|cx| cx.activate(true));
     app.run(move |cx: &mut App| {

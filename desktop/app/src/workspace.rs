@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    div, list, prelude::*, px, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
+    div, list, prelude::*, px, relative, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     FontWeight, ListAlignment, ListState, MouseButton, SharedString, Subscription, Window,
 };
 use serde_json::{json, Value};
@@ -24,6 +24,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::logfile;
 use crate::markdown;
 use crate::theme;
+use crate::ui;
 use crate::transcript::{self, MetaKind, Msg, Pos, Role, Row, Selection, SelectionHost};
 
 const STREAM_BATCH: Duration = Duration::from_millis(33);
@@ -59,6 +60,8 @@ pub struct Workspace {
     pub chat: Option<api::ChatInfo>,
     pub msgs: Vec<Msg>,
     pub list: ListState,
+    /// keep the newest text in view while a reply streams; off once you scroll up
+    follow: std::rc::Rc<std::cell::Cell<bool>>,
     /// list rows (see transcript::Row) and each message's row range
     rows: Vec<Row>,
     msg_rows: Vec<std::ops::Range<usize>>,
@@ -74,11 +77,16 @@ pub struct Workspace {
     notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
     sidebar: bool,
     details: bool,
+    projects_open: bool,
+    sessions_open: bool,
+    /// estimated tokens and window of the last reply's context (Details ▸ Context)
+    context: Option<(u64, u64)>,
     focus: FocusHandle,
     parse_in_flight: bool,
     loading_chat: bool,
     pub started: Instant,
     logged_first_frame: bool,
+    window_active: bool,
     pub perf: Perf,
     _subs: Vec<Subscription>,
 }
@@ -147,10 +155,17 @@ impl Workspace {
             ComposerEvent::Submit(text) => this.send(text.clone(), window, cx),
         })];
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            this.window_active = window.is_window_active();
             if window.is_window_active() && matches!(this.phase, Phase::Ready) {
                 this.load_models(false, cx); // Ollama may have started or stopped meanwhile
             }
         }));
+        // Messages start at the top like the page's thread; `follow` keeps the
+        // end in view while new text arrives, until you scroll away from it.
+        let list = ListState::new(0, ListAlignment::Top, px(800.));
+        let follow = std::rc::Rc::new(std::cell::Cell::new(true));
+        let f = follow.clone();
+        list.set_scroll_handler(move |ev, _, _| f.set(ev.visible_range.end >= ev.count));
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
                 if this.update(cx, |this, cx| this.on_backend(ev, cx)).is_err() {
@@ -172,7 +187,8 @@ impl Workspace {
             show_archived: false,
             chat: None,
             msgs: vec![],
-            list: ListState::new(0, ListAlignment::Bottom, px(800.)),
+            list,
+            follow,
             rows: vec![],
             msg_rows: vec![],
             selection: Selection::default(),
@@ -187,11 +203,15 @@ impl Workspace {
             notice: None,
             sidebar: true,
             details: true,
+            projects_open: true,
+            sessions_open: true,
+            context: None,
             focus: cx.focus_handle(),
             parse_in_flight: false,
             loading_chat: false,
             started: Instant::now(),
             logged_first_frame: false,
+            window_active: true,
             perf: Perf::default(),
             _subs: subs,
         }
@@ -223,6 +243,7 @@ impl Workspace {
                             logfile::event("ui.connected", &[("ms_since_start", this.started.elapsed().as_millis().to_string())]);
                             this.load_projects(None, cx);
                             this.load_models(false, cx);
+                            this.start_health_refresh(cx);
                             cx.notify();
                         }
                         Err(e) => {
@@ -240,6 +261,29 @@ impl Workspace {
                 .detach();
             }
         }
+    }
+
+    /// The Details panel's Runtime section, refreshed every 5 s like the page did,
+    /// but only while the window is in front (a covered window costs nothing).
+    fn start_health_refresh(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            let api = match this.update(cx, |ws, _| {
+                if matches!(ws.phase, Phase::Ready) && ws.window_active { ws.api.clone() } else { None }
+            }) {
+                Ok(a) => a,
+                Err(_) => break, // window closed
+            };
+            let Some(api) = api else { continue };
+            let r = cx.background_spawn(async move { api.get::<api::Health>("/api/health") }).await;
+            if this.update(cx, |ws, cx| {
+                if let Ok(h) = r {
+                    ws.health = Some(h);
+                    cx.notify();
+                }
+            }).is_err() { break; }
+        })
+        .detach();
     }
 
     pub fn retry(&mut self, cx: &mut Context<Self>) {
@@ -324,6 +368,7 @@ impl Workspace {
     pub fn new_chat(&mut self, cx: &mut Context<Self>) {
         self.stop_reply(cx);
         self.chat = None;
+        self.context = None;
         self.msgs.clear();
         self.rebuild_rows();
         self.selection = Selection::default();
@@ -355,6 +400,7 @@ impl Workspace {
                     Ok((chat, msgs)) => {
                         let archived = chat.archived;
                         this.chat = Some(chat);
+                        this.context = None;
                         this.msgs = msgs;
                         this.rebuild_rows();
                         this.selection = Selection::default();
@@ -493,13 +539,13 @@ impl Workspace {
             text: String::new(),
             blocks: Arc::new(vec![]),
             parsed_len: 0,
-            meta: format!("{model} is answering…"),
+            meta: format!("Waiting for {model}…"),
             meta_kind: MetaKind::Normal,
             streaming: true,
         });
+        self.follow.set(true); // sending always brings the conversation's end into view
         self.append_rows(n);
         self.append_rows(n + 1);
-        self.list.scroll_to_reveal_item(self.rows.len().saturating_sub(1));
         let stop = Arc::new(AtomicBool::new(false));
         self.run = Some(Run { chat_id: existing.clone().unwrap_or_default(), run_id: None, stop: stop.clone() });
         cx.notify();
@@ -578,6 +624,13 @@ impl Workspace {
                             if let Some(run) = self.run.as_mut() {
                                 run.run_id = ev.get("run_id").and_then(Value::as_str).map(str::to_string);
                             }
+                            if let Some(m) = ev.get("model_requested").and_then(Value::as_str) {
+                                msg.meta = format!("{m} is answering…");
+                            }
+                            let c = &ev["context"];
+                            if let (Some(est), Some(win)) = (c["estimated_tokens"].as_u64(), c["window"].as_u64()) {
+                                self.context = Some((est, win));
+                            }
                         }
                         "delta" => msg.text.push_str(ev.get("text").and_then(Value::as_str).unwrap_or("")),
                         "done" => {
@@ -619,11 +672,11 @@ impl Workspace {
                     ended = true;
                     let msg = &mut self.msgs[ix];
                     if let Some(e) = err {
-                        if msg.meta.ends_with("answering…") {
+                        if msg.meta.ends_with('…') {
                             msg.meta = e.message;
                             msg.meta_kind = MetaKind::Bad;
                         }
-                    } else if msg.meta.ends_with("answering…") {
+                    } else if msg.meta.ends_with('…') {
                         msg.meta = "Stopped.".into();
                         msg.meta_kind = MetaKind::Warn;
                     }
@@ -712,6 +765,14 @@ impl Workspace {
             self.msg_rows.push(start..self.rows.len());
         }
         self.list.reset(self.rows.len());
+        self.follow.set(true);
+        self.reveal_end();
+    }
+
+    fn reveal_end(&self) {
+        if self.follow.get() && !self.rows.is_empty() {
+            self.list.scroll_to_reveal_item(self.rows.len() - 1);
+        }
     }
 
     fn append_rows(&mut self, ix: usize) {
@@ -721,6 +782,7 @@ impl Workspace {
         self.rows.extend(new);
         self.msg_rows.push(start..start + n);
         self.list.splice(start..start, n);
+        self.reveal_end();
     }
 
     /// Replace message `ix`'s rows; rows before block `first_changed` keep their
@@ -738,6 +800,7 @@ impl Workspace {
         self.rows.splice(old_tail.clone(), new[keep..].iter().copied());
         self.list.splice(old_tail, new_tail);
         self.msg_rows[ix] = old.start..old.start + new.len();
+        self.reveal_end();
         for r in self.msg_rows.iter_mut().skip(ix + 1) {
             *r = (r.start as isize + delta) as usize..(r.end as isize + delta) as usize;
         }
@@ -799,116 +862,126 @@ fn stored_msg(m: &api::Message) -> Msg {
 }
 
 // ---------------- rendering ----------------
+//
+// Every view below mirrors a part of prototypes/umbrous-harness.html. The
+// comments name the CSS class it reproduces; sizes and colours come from
+// theme.rs, which holds that file's tokens.
 
-fn icon_button(id: &'static str, label: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .px(px(8.))
-        .py(px(4.))
-        .rounded(px(6.))
-        .text_color(theme::muted())
-        .cursor_pointer()
-        .hover(|s| s.bg(theme::hover()).text_color(theme::text()))
-        .child(label.into())
+/// chat.js `ago()`: now, 5m, 3h, 2d
+fn ago(iso: &str) -> String {
+    let secs = parse_iso_secs(iso).map(|t| {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        (now - t).max(0)
+    });
+    match secs {
+        Some(s) if s < 60 => "now".into(),
+        Some(s) if s < 3600 => format!("{}m", s / 60),
+        Some(s) if s < 86_400 => format!("{}h", s / 3600),
+        Some(s) => format!("{}d", s / 86_400),
+        None => String::new(),
+    }
 }
 
-fn section_label(t: &str) -> gpui::Div {
-    div().px(px(12.)).pt(px(14.)).pb(px(6.)).text_size(px(12.)).text_color(theme::faint()).child(t.to_string())
+/// "2026-11-07T13:40:27.844Z" → Unix seconds (UTC), without a date library.
+fn parse_iso_secs(iso: &str) -> Option<i64> {
+    let (date, time) = iso.split_once('T')?;
+    let mut d = date.split('-').map(|x| x.parse::<i64>());
+    let (y, m, dd) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
+    let t: Vec<i64> = time.trim_end_matches('Z').split(':').map(|x| x.split('.').next().unwrap_or("0").parse().unwrap_or(0)).collect();
+    let (y2, m2) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * m2 + 2) / 5 + dd - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + t.first().copied().unwrap_or(0) * 3600 + t.get(1).copied().unwrap_or(0) * 60 + t.get(2).copied().unwrap_or(0))
 }
 
-fn row(label: &str, value: impl Into<SharedString>) -> gpui::Div {
-    div()
-        .flex()
-        .justify_between()
-        .gap(px(12.))
-        .py(px(4.))
-        .child(div().text_color(theme::faint()).child(label.to_string()))
-        .child(div().text_color(theme::text()).truncate().child(value.into()))
+/// chat.js `fmtK()`
+fn fmt_k(n: u64) -> String {
+    if n >= 10_000 { format!("{}k", (n as f64 / 1000.0).round()) } else if n >= 1000 { format!("{:.1}k", n as f64 / 1000.0) } else { n.to_string() }
+}
+
+/// runtime-bridge.js `uptime()`
+fn uptime(s: u64) -> String {
+    if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m {}s", s / 60, s % 60) } else { format!("{}h {}m", s / 3600, (s % 3600) / 60) }
 }
 
 impl Workspace {
+    /// `aside.panel`: workspace switcher, New chat, Projects, Sessions.
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use theme::*;
         let mut projects = div().flex().flex_col();
         for p in &self.projects {
-            let selected = self.project_id.as_deref() == Some(&p.id);
+            let current = self.project_id.as_deref() == Some(&p.id);
             let id = p.id.clone();
             projects = projects.child(
-                div()
-                    .id(SharedString::from(format!("p-{}", p.id)))
-                    .mx(px(8.))
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(7.))
-                    .flex()
-                    .justify_between()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(theme::active()))
-                    .hover(|s| s.bg(theme::hover()))
-                    .child(div().truncate().child(format!("▢  {}", p.name)))
-                    .child(div().text_size(px(12.)).text_color(theme::faint()).child(p.chats.to_string()))
+                ui::nav(SharedString::from(format!("p-{}", p.id)), current)
+                    .font_weight(FontWeight::NORMAL)
+                    .child(ui::icon("folder").text_color(if current { text_strong() } else { text_default() }))
+                    .child(ui::nav_title(p.name.clone()))
+                    .when(p.chats > 0, |d| d.child(ui::nav_count(p.chats.to_string())))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.select_project(id.clone(), cx))),
             );
         }
         if let Some(input) = &self.project_input {
+            // `.proj-input`
             projects = projects.child(
                 div()
-                    .mx(px(8.))
+                    .h(px(32.))
                     .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
                     .border_1()
-                    .border_color(theme::accent())
+                    .border_color(border_strong())
+                    .rounded(px(R_8))
+                    .bg(bg_raised())
+                    .text_size(fs_13())
                     .child(input.clone()),
             );
             if let Some(err) = &self.project_error {
-                projects = projects.child(div().mx(px(18.)).text_size(px(12.)).text_color(theme::bad()).child(err.clone()));
+                projects = projects.child(div().text_size(fs_12()).text_color(danger()).px(px(10.)).py(px(4.)).child(err.clone()));
             }
         }
 
         let mut sessions = div().flex().flex_col();
         let current = self.chat.as_ref().map(|c| c.id.clone());
-        let list: Vec<&api::ChatInfo> = self.chats.iter().chain(self.archived.iter()).collect();
-        if list.is_empty() {
-            sessions = sessions.child(div().px(px(20.)).py(px(6.)).text_size(px(13.)).text_color(theme::faint()).child(
-                if self.projects.iter().any(|p| Some(&p.id) == self.project_id.as_ref() && p.archived_chats > 0) {
-                    "All chats here are archived."
-                } else {
-                    "No chats yet."
-                },
-            ));
+        let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref());
+        let pname = project.map(|p| p.name.clone()).unwrap_or_default();
+        let archived_count = project.map(|p| p.archived_chats).unwrap_or(0);
+        if self.chats.is_empty() {
+            // `.side-empty`
+            let text = if archived_count > 0 {
+                format!("No active chats in {pname}. {archived_count} archived.")
+            } else {
+                format!("No chats in {pname} yet.")
+            };
+            sessions = sessions.child(div().text_size(fs_12()).text_color(text_subtle()).px(px(10.)).py(px(4.)).child(text));
         }
-        for c in list {
+        for c in self.chats.iter().chain(self.archived.iter()) {
             let id = c.id.clone();
-            let selected = current.as_deref() == Some(&c.id);
-            sessions = sessions.child(
-                div()
-                    .id(SharedString::from(format!("c-{}", c.id)))
-                    .mx(px(8.))
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(7.))
-                    .flex()
-                    .gap(px(6.))
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(theme::active()))
-                    .hover(|s| s.bg(theme::hover()))
-                    .child(div().flex_1().min_w_0().truncate().when(c.archived, |d| d.text_color(theme::muted())).child(c.title.clone()))
-                    .when(c.archived, |d| d.child(div().text_size(px(11.)).text_color(theme::faint()).child("archived")))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_chat(id.clone(), cx))),
-            );
+            let is_current = current.as_deref() == Some(&c.id);
+            let streaming = self.run.as_ref().map(|r| r.chat_id == c.id).unwrap_or(false);
+            let mut row = ui::nav(SharedString::from(format!("c-{}", c.id)), is_current);
+            row = if c.archived {
+                // `.nav.archived .t`: subtle, italic
+                row.child(ui::nav_title(c.title.clone()).text_color(text_subtle()).italic()).child(ui::nav_count("archived"))
+            } else {
+                row.child(ui::nav_title(c.title.clone()))
+            };
+            if !c.archived {
+                row = if streaming { row.child(ui::dot(accent())) } else { row.child(ui::nav_count(ago(&c.updated_at))) };
+            }
+            sessions = sessions.child(row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_chat(id.clone(), cx))));
         }
-        let archived_count = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.archived_chats).unwrap_or(0);
-        if archived_count > 0 {
+        if self.show_archived || archived_count > 0 {
+            // `.nav.toggle-archived`
             let label = if self.show_archived { "Hide archived".to_string() } else { format!("Show archived ({archived_count})") };
             sessions = sessions.child(
-                div()
-                    .id("toggle-archived")
-                    .mx(px(18.))
-                    .py(px(6.))
-                    .text_size(px(12.))
-                    .text_color(theme::faint())
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme::text()))
+                ui::nav("toggle-archived", false)
+                    .h(px(30.))
+                    .text_size(fs_12())
+                    .text_color(text_subtle())
                     .child(label)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.show_archived = !this.show_archived;
@@ -917,106 +990,206 @@ impl Workspace {
             );
         }
 
-        div()
-            .id("sidebar")
-            .w(px(272.))
-            .flex_shrink_0()
+        // `.section`: 32px, margin-top 24, 13px medium subtle, chevron; `.add` shows on hover
+        let section = |id: &'static str, label: &'static str, open: bool| {
+            div()
+                .id(id)
+                .group(id)
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .w_full()
+                .h(px(32.))
+                .px(px(10.))
+                .mt(px(SP_24))
+                .rounded(px(R_6))
+                .text_size(fs_13())
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(text_subtle())
+                .cursor_pointer()
+                .hover(|s| s.text_color(text_default()))
+                .child(label)
+                .child(ui::chevron(open).text_color(text_subtle()))
+        };
+        let projects_open = self.projects_open;
+        let sessions_open = self.sessions_open;
+
+        ui::panel()
+            .w(px(300.))
+            .flex_none()
             .h_full()
-            .flex()
-            .flex_col()
-            .bg(theme::panel())
-            .border_r_1()
-            .border_color(theme::border())
-            .overflow_y_scroll()
+            // `.ws`: padding 16 16 12
             .child(
                 div()
-                    .h(px(52.))
-                    .pl(px(92.)) // traffic lights
-                    .pr(px(12.))
                     .flex()
                     .items_center()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Umbrous"),
-            )
-            .child(
-                div()
-                    .id("new-chat")
-                    .mx(px(8.))
-                    .px(px(10.))
-                    .py(px(7.))
-                    .rounded(px(7.))
-                    .flex()
-                    .justify_between()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
-                    .child("⊕  New chat")
-                    .child(div().text_size(px(12.)).text_color(theme::faint()).child("⌘N"))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.new_chat(cx);
-                        window.focus(&this.composer.focus_handle(cx));
-                    })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .pr(px(12.))
-                    .child(section_label("Projects"))
-                    .child(icon_button("add-project", "+").on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        let input = cx.new(|cx| {
-                            let mut c = Composer::new(cx);
-                            c.set_placeholder("Project name", cx);
-                            c
-                        });
-                        let sub = cx.subscribe_in(&input, window, |this, _, ev: &ComposerEvent, window, cx| match ev {
-                            ComposerEvent::Submit(name) => this.add_project(name.clone(), window, cx),
-                        });
-                        this._subs.push(sub);
-                        window.focus(&input.focus_handle(cx));
-                        this.project_input = Some(input);
-                        this.project_error = None;
+                    .gap(px(8.))
+                    .pt(px(SP_16))
+                    .px(px(SP_16))
+                    .pb(px(SP_12))
+                    .child(
+                        // `.ws-btn`
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .h(px(32.))
+                            .px(px(6.))
+                            .ml(px(-6.))
+                            .rounded(px(R_8))
+                            .text_size(fs_14())
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(text_strong())
+                            .hover(|s| s.bg(bg_hover()))
+                            .child(div().size(px(22.)).flex().items_center().justify_center().child(ui::icon_sized("logo", 20.).text_color(text_strong())))
+                            .child("Umbrous")
+                            .child(ui::icon("chevrons").text_color(text_subtle())),
+                    )
+                    .child(div().flex_1())
+                    .child(ui::icon_btn("search", "search", false))
+                    .child(ui::icon_btn("collapse-sidebar", "sidebar", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.sidebar = false;
                         cx.notify();
                     }))),
             )
-            .child(projects)
-            .child(section_label("Sessions"))
-            .child(sessions)
+            // `.side-scroll`: padding 4 12 12
+            .child(
+                div()
+                    .id("side-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .pt(px(SP_4))
+                    .px(px(SP_12))
+                    .pb(px(SP_12))
+                    .child(
+                        ui::nav("new-chat", self.chat.is_none() && self.msgs.is_empty())
+                            .text_color(text_strong())
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(ui::icon("plus-circle").text_color(text_strong()))
+                            .child(ui::nav_title("New chat"))
+                            .child(
+                                // `.nav kbd`
+                                div()
+                                    .text_size(fs_12())
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(text_subtle())
+                                    .border_1()
+                                    .border_color(border())
+                                    .rounded(px(R_4))
+                                    .px(px(5.))
+                                    .line_height(px(18.))
+                                    .child("⌘N"),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.new_chat(cx);
+                                window.focus(&this.composer.focus_handle(cx));
+                            })),
+                    )
+                    .child(
+                        section("sec-projects", "Projects", projects_open)
+                            .child(
+                                div()
+                                    .id("add-project")
+                                    .ml_auto()
+                                    .size(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(R_6))
+                                    .invisible()
+                                    .group_hover("sec-projects", |s| s.visible())
+                                    .hover(|s| s.bg(bg_hover()).text_color(text_strong()))
+                                    .child(ui::icon("plus").text_color(text_subtle()))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        this.begin_add_project(window, cx);
+                                    })),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.projects_open = !this.projects_open;
+                                cx.notify();
+                            })),
+                    )
+                    .when(projects_open, |d| d.child(projects))
+                    .child(section("sec-sessions", "Sessions", sessions_open).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.sessions_open = !this.sessions_open;
+                        cx.notify();
+                    })))
+                    .when(sessions_open, |d| d.child(sessions)),
+            )
             .into_any_element()
     }
 
+    fn begin_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            let mut c = Composer::new(cx);
+            c.set_placeholder("Project name, then Enter", cx);
+            c.set_compact(cx);
+            c
+        });
+        let sub = cx.subscribe_in(&input, window, |this, _, ev: &ComposerEvent, window, cx| match ev {
+            ComposerEvent::Submit(name) => this.add_project(name.clone(), window, cx),
+        });
+        self._subs.push(sub);
+        window.focus(&input.focus_handle(cx));
+        self.project_input = Some(input);
+        self.project_error = None;
+        self.projects_open = true;
+        cx.notify();
+    }
+
+    /// `.head`: 56px, padding 0 16 0 24, bottom border.
     fn render_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use theme::*;
         let title = self.chat.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "New chat".into());
         let has_chat = self.chat.is_some();
+        let sidebar_hidden = !self.sidebar;
         div()
-            .h(px(52.))
-            .flex_shrink_0()
-            .px(px(16.))
+            .h(px(56.))
+            .flex_none()
             .flex()
             .items_center()
-            .justify_between()
+            .gap(px(10.))
+            .pl(px(SP_24))
+            .pr(px(SP_16))
             .border_b_1()
-            .border_color(theme::border())
-            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(title))
+            .border_color(border())
+            .when(sidebar_hidden, |d| {
+                d.child(ui::icon_btn("show-sidebar", "sidebar", false).ml(px(-8.)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.sidebar = true;
+                    cx.notify();
+                })))
+            })
+            .child(ui::icon("plus-circle").text_color(text_subtle()))
             .child(
                 div()
-                    .flex()
-                    .gap(px(4.))
-                    .when(has_chat, |d| {
-                        d.child(icon_button("options", "⋯").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.options_menu = !this.options_menu;
-                            cx.notify();
-                        })))
-                    })
-                    .child(icon_button("toggle-details", "▤").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.details = !this.details;
-                        cx.notify();
-                    }))),
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(fs_14())
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(text_strong())
+                    .child(title),
             )
+            .when(has_chat, |d| {
+                d.child(ui::icon_btn("chat-options", "more", self.options_menu).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.options_menu = !this.options_menu;
+                    cx.notify();
+                })))
+            })
+            .child(ui::icon_btn("rtoggle", "sidebar-right", self.details).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.details = !this.details;
+                cx.notify();
+            })))
             .into_any_element()
     }
 
+    /// `.opt-menu`: top 48, right 48, min 220, raised, strong border, radius 12.
     fn render_options_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use theme::*;
         if !self.options_menu {
             return None;
         }
@@ -1024,77 +1197,120 @@ impl Workspace {
         Some(
             div()
                 .absolute()
-                .top(px(46.))
+                .top(px(48.))
                 .right(px(48.))
-                .w(px(220.))
-                .p(px(4.))
-                .rounded(px(9.))
-                .bg(theme::panel_2())
+                .min_w(px(220.))
+                .p(px(6.))
+                .rounded(px(R_12))
+                .bg(bg_raised())
                 .border_1()
-                .border_color(theme::border())
+                .border_color(border_strong())
                 .shadow_lg()
                 .flex()
                 .flex_col()
+                .text_size(fs_13())
                 .child(
                     div()
                         .id("opt-archive")
                         .px(px(10.))
-                        .py(px(6.))
-                        .rounded(px(6.))
+                        .py(px(7.))
+                        .rounded(px(R_8))
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme::hover()))
+                        .text_color(text_strong())
+                        .hover(|s| s.bg(bg_selected()))
                         .child(if archived { "Restore chat" } else { "Archive chat" })
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_archived(!archived, cx))),
                 )
                 .child(
                     div()
                         .px(px(10.))
-                        .py(px(6.))
-                        .text_color(theme::faint())
-                        .flex()
-                        .justify_between()
+                        .py(px(7.))
+                        .text_color(text_subtle())
                         .child("Delete chat")
-                        .child(div().text_size(px(11.)).child("Not available yet")),
+                        .child(div().text_size(fs_12()).child("Not available yet")),
                 )
                 .into_any_element(),
         )
     }
 
+    /// `.thread`: max 760, padding 48 32 32. Notices sit in the thread like the page's.
     fn render_transcript(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        if self.msgs.is_empty() {
+        use theme::*;
+        let archived = self.chat.as_ref().map(|c| c.archived).unwrap_or(false);
+        let mut notices: Vec<AnyElement> = vec![];
+        if self.msgs.is_empty() && !self.loading_chat {
             let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
-            let text = if self.loading_chat {
-                "Loading…".to_string()
-            } else {
-                format!("New chat in {project}. It talks to a model running in Ollama on this Mac; nothing leaves this machine. It is saved on this Mac once you send the first message.")
+            notices.push(
+                ui::notice(None)
+                    .child(div().flex_1().min_w_0().child(format!(
+                        "New chat in {project}. It talks to a model running in Ollama on this Mac; nothing leaves this machine. It is saved on this Mac once you send the first message."
+                    )))
+                    .into_any_element(),
+            );
+        }
+        if archived {
+            notices.push(
+                ui::notice(Some(ui::NoticeKind::Warn))
+                    .child(div().flex_1().min_w_0().child("This chat is archived. All its messages are kept and shown here read-only. Restore it to continue."))
+                    .child(ui::pill("restore").child("Restore").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_archived(false, cx))))
+                    .into_any_element(),
+            );
+        }
+        if let Some((text, kind, retry)) = self.notice.clone() {
+            let k = match kind {
+                MetaKind::Bad => Some(ui::NoticeKind::Bad),
+                MetaKind::Warn => Some(ui::NoticeKind::Warn),
+                MetaKind::Normal => None,
             };
-            return div()
-                .flex_1()
+            notices.push(
+                ui::notice(k)
+                    .child(div().flex_1().min_w_0().child(text))
+                    .when(retry, |d| {
+                        d.child(ui::pill("retry-ollama").child("Retry").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_models(false, cx))))
+                    })
+                    .into_any_element(),
+            );
+        }
+        let notice_col = |notices: Vec<AnyElement>, top: f32| {
+            div()
+                .w_full()
                 .flex()
-                .items_center()
                 .justify_center()
-                .px(px(48.))
-                .child(div().max_w(px(520.)).text_color(theme::muted()).text_center().child(text))
-                .into_any_element();
+                .px(px(SP_32))
+                .pt(px(top))
+                .child(div().w_full().max_w(px(696.)).flex().flex_col().gap(px(SP_16)).children(notices))
+        };
+        if self.msgs.is_empty() {
+            return div().flex_1().min_h_0().child(notice_col(notices, SP_48)).into_any_element();
         }
         let host = cx.entity();
         let state = self.list.clone();
-        list(state, move |ix, _window, cx| {
-            let host2 = host.clone();
-            let ws = host.read(cx);
-            match ws.rows.get(ix).and_then(|r| ws.msgs.get(r.msg).map(|m| (*r, m))) {
-                Some((row, m)) => transcript::render_row(&host2, row, m, &ws.selection),
-                None => div().into_any_element(),
-            }
-        })
-        .flex_1()
-        .size_full()
-        .into_any_element()
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                list(state, move |ix, _window, cx| {
+                    let host2 = host.clone();
+                    let ws = host.read(cx);
+                    match ws.rows.get(ix).and_then(|r| ws.msgs.get(r.msg).map(|m| (*r, m))) {
+                        Some((row, m)) => transcript::render_row(&host2, row, m, &ws.selection, ix == 0),
+                        None => div().into_any_element(),
+                    }
+                })
+                .flex_1()
+                .size_full(),
+            )
+            .when(!notices.is_empty(), |d| d.child(notice_col(notices, SP_8)))
+            .into_any_element()
     }
 
+    /// `.composer-dock` + `.composer`: raised box, strong border, radius 12, padding 12.
     fn render_composer(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use theme::*;
         let up = self.ollama_up();
-        let pill = match (&self.models, up) {
+        let pill_label = match (&self.models, up) {
             (None, _) => "Checking Ollama…".to_string(),
             (Some(_), false) => "Ollama not running".to_string(),
             (Some(m), true) if m.models.is_empty() => "No models installed".to_string(),
@@ -1102,81 +1318,50 @@ impl Workspace {
         };
         let running = self.run.is_some();
         let can_send = self.can_send() && !self.composer.read(cx).text().trim().is_empty();
-        let archived = self.chat.as_ref().map(|c| c.archived).unwrap_or(false);
 
-        let mut wrap = div().w_full().flex().flex_col().items_center().px(px(32.)).pb(px(18.)).pt(px(8.)).gap(px(8.));
-        if archived {
-            wrap = wrap.child(
-                div()
-                    .w_full()
-                    .max_w(px(760.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .rounded(px(8.))
-                    .bg(theme::panel_2())
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(div().text_color(theme::muted()).child("This chat is archived and read-only. Every message is kept."))
-                    .child(icon_button("restore", "Restore").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_archived(false, cx)))),
-            );
-        }
-        if let Some((text, kind, retry)) = self.notice.clone() {
-            wrap = wrap.child(
-                div()
-                    .w_full()
-                    .max_w(px(760.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(theme::border())
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(div().flex_1().text_color(if kind == MetaKind::Bad { theme::bad() } else { theme::warn() }).child(text))
-                    .when(retry, |d| {
-                        d.child(icon_button("retry-ollama", "Retry").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_models(false, cx))))
-                    }),
-            );
-        }
         let mut menu = None;
         if self.model_menu {
+            // `.model-menu`: bottom 36, left 32, 380 wide, raised, strong border, radius 12, padding 6
             let mut m = div()
                 .absolute()
-                .bottom(px(44.))
-                .left(px(8.))
-                .w(px(340.))
-                .p(px(4.))
-                .rounded(px(9.))
-                .bg(theme::panel_2())
+                .bottom(px(36.))
+                .left(px(32.))
+                .w(px(380.))
+                .p(px(6.))
+                .rounded(px(R_12))
+                .bg(bg_raised())
                 .border_1()
-                .border_color(theme::border())
+                .border_color(border_strong())
                 .shadow_lg()
                 .flex()
                 .flex_col();
+            let empty = |t: &str| div().p(px(8.)).text_size(fs_12()).text_color(text_subtle()).child(t.to_string());
             match &self.models {
-                Some(ms) if !ms.reachable => m = m.child(div().p(px(8.)).text_color(theme::muted()).child("Ollama is not running. Open the Ollama app, then reopen this menu.")),
-                Some(ms) if ms.models.is_empty() => m = m.child(div().p(px(8.)).text_color(theme::muted()).child("No models installed. In Terminal: ollama pull qwen2.5:3b")),
+                Some(ms) if !ms.reachable => m = m.child(empty("Ollama is not running. Start it, then reopen this menu.")),
+                Some(ms) if ms.models.is_empty() => m = m.child(empty("No models installed. In a terminal: ollama pull qwen2.5:3b")),
                 Some(ms) => {
                     for (i, md) in ms.models.iter().enumerate() {
                         let name = md.name.clone();
-                        let sub = [md.parameter_size.clone(), md.context_length.map(|c| format!("ctx {}k", c / 1024)).unwrap_or_default(),
-                                   if md.tool_capable { "tool calls verified".into() } else { "plain chat".to_string() }]
-                            .into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-                        let selected = self.model.as_deref() == Some(&md.name);
+                        let label = if md.tool_capable { "tool calls verified" } else { "plain chat only" };
+                        let sub = [md.parameter_size.clone(), md.context_length.map(|c| format!("ctx {}", fmt_k(c))).unwrap_or_default(), label.to_string()]
+                            .into_iter()
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        let on = self.model.as_deref() == Some(&md.name);
                         m = m.child(
                             div()
-                                .id(("model", i))
-                                .px(px(10.))
+                                .id(("mm-row", i))
+                                .flex()
+                                .flex_col()
+                                .px(px(8.))
                                 .py(px(6.))
-                                .rounded(px(6.))
+                                .rounded(px(R_8))
                                 .cursor_pointer()
-                                .when(selected, |d| d.bg(theme::active()))
-                                .hover(|s| s.bg(theme::hover()))
-                                .child(md.name.clone())
-                                .child(div().text_size(px(12.)).text_color(theme::faint()).child(sub))
+                                .when(on, |d| d.bg(bg_selected()))
+                                .hover(|s| s.bg(bg_selected()))
+                                .child(div().text_size(fs_13()).text_color(text_strong()).child(md.name.clone()))
+                                .child(div().text_size(fs_12()).text_color(text_subtle()).child(sub))
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     this.model = Some(name.clone());
                                     this.model_menu = false;
@@ -1190,182 +1375,266 @@ impl Workspace {
                 }
                 None => {}
             }
-            m = m.child(div().px(px(10.)).py(px(6.)).text_size(px(11.)).text_color(theme::faint()).child("Only installed models are listed. Umbrous never switches models for you."));
+            m = m.child(
+                div()
+                    .mt(px(4.))
+                    .p(px(8.))
+                    .border_t_1()
+                    .border_color(border())
+                    .text_size(fs_12())
+                    .text_color(text_subtle())
+                    .child("Only installed models are listed. Umbrous never switches models for you."),
+            );
             menu = Some(m);
         }
 
-        let send_label = if running { "■" } else { "↑" };
-        wrap.child(
-            div()
-                .relative()
-                .w_full()
-                .max_w(px(760.))
-                .rounded(px(12.))
-                .bg(theme::panel())
-                .border_1()
-                .border_color(theme::border())
-                .px(px(14.))
-                .pt(px(12.))
-                .pb(px(8.))
-                .flex()
-                .flex_col()
-                .gap(px(10.))
-                .child(self.composer.clone())
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            div()
-                                .id("model-pill")
-                                .px(px(10.))
-                                .py(px(4.))
-                                .rounded(px(7.))
-                                .border_1()
-                                .border_color(theme::border())
-                                .text_size(px(12.5))
-                                .cursor_pointer()
-                                .text_color(if up { theme::text() } else { theme::warn() })
-                                .hover(|s| s.bg(theme::hover()))
-                                .child(format!("◎  {pill}  ⌄"))
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    if this.model_menu {
-                                        this.model_menu = false;
-                                        cx.notify();
-                                    } else {
-                                        this.load_models(true, cx);
-                                    }
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id("send")
-                                .size(px(28.))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(if can_send || running { theme::accent() } else { theme::active() })
-                                .text_color(if can_send || running { gpui::rgb(0xffffff) } else { theme::faint() })
-                                .when(can_send || running, |d| d.cursor_pointer())
-                                .child(send_label)
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    if this.run.is_some() {
-                                        this.stop_reply(cx);
-                                    } else {
-                                        let text = this.composer.read(cx).text().to_string();
-                                        this.send(text, window, cx);
-                                    }
-                                })),
-                        ),
-                )
-                .children(menu),
-        )
-        .into_any_element()
-    }
-
-    fn render_details(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
-        let ollama = match &self.models {
-            Some(m) if m.reachable => format!("Running · {}", m.version.clone().unwrap_or_default()),
-            Some(_) => "Not running".into(),
-            None => "…".into(),
-        };
-        let (version, schema, bind) = self
-            .health
-            .as_ref()
-            .map(|h| (format!("{} · {}", h.version, h.milestone), format!("v{}", h.schema_version), h.bind.clone()))
-            .unwrap_or_default();
-        div()
-            .id("details")
-            .w(px(288.))
-            .flex_shrink_0()
-            .h_full()
-            .bg(theme::panel())
-            .border_l_1()
-            .border_color(theme::border())
+        // `.send`: 28px circle; strong when enabled, selected/subtle when disabled
+        let active = can_send || running;
+        let send = div()
+            .id("send")
+            .ml_auto()
+            .size(px(28.))
+            .rounded_full()
             .flex()
-            .flex_col()
-            .overflow_y_scroll()
-            .text_size(px(13.))
-            .child(div().h(px(52.)).px(px(16.)).flex().items_center().font_weight(FontWeight::MEDIUM).child("Details"))
+            .items_center()
+            .justify_center()
+            .bg(if active { text_strong() } else { bg_selected() })
+            .when(active, |d| d.cursor_pointer())
+            .child(ui::icon(if running { "stop" } else { "arrow-up" }).text_color(if active { bg_app() } else { text_subtle() }))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                if this.run.is_some() {
+                    this.stop_reply(cx);
+                } else {
+                    let text = this.composer.read(cx).text().to_string();
+                    this.send(text, window, cx);
+                }
+            }));
+
+        div()
+            .flex_none()
+            .px(px(SP_24))
+            .pb(px(SP_24))
+            .flex()
+            .justify_center()
             .child(
                 div()
-                    .px(px(16.))
+                    .w_full()
+                    .max_w(px(760.))
+                    .border_1()
+                    .border_color(border_strong())
+                    .bg(bg_raised())
+                    .rounded(px(R_12))
+                    .p(px(12.))
                     .flex()
                     .flex_col()
-                    .child(div().pt(px(10.)).pb(px(4.)).text_size(px(12.)).text_color(theme::faint()).child("Session"))
-                    .child(row("Model", self.model.clone().unwrap_or_else(|| "—".into())))
+                    .gap(px(4.))
+                    .child(div().min_h(px(40.)).child(self.composer.clone()))
                     .child(
-                        div().flex().justify_between().py(px(4.))
-                            .child(div().text_color(theme::faint()).child("Runs on"))
-                            .child(div().flex().items_center().gap(px(6.)).child(div().size(px(7.)).rounded_full().bg(theme::good())).child("Local")),
-                    )
-                    .child(row("Project", project))
-                    .child(div().pt(px(18.)).pb(px(4.)).text_size(px(12.)).text_color(theme::faint()).child("Runtime"))
-                    .child(row("Status", match &self.phase { Phase::Ready => "Connected", Phase::Starting => "Starting", Phase::Failed(_) => "Stopped" }))
-                    .child(row("Version", version))
-                    .child(row("Schema", schema))
-                    .child(row("Address", bind))
-                    .child(row("Ollama", ollama)),
+                        // `.bar`
+                        div()
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(ui::icon_btn("attach", "clip", false))
+                            .child(
+                                ui::pill("model-pill")
+                                    .when(!up && self.models.is_some(), |d| d.text_color(warning()))
+                                    .child(ui::icon("cpu").text_color(if !up && self.models.is_some() { warning() } else { text_default() }))
+                                    .child(pill_label)
+                                    .child(ui::icon("chevron-down").text_color(text_default()))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        if this.model_menu {
+                                            this.model_menu = false;
+                                            cx.notify();
+                                        } else {
+                                            this.load_models(true, cx);
+                                        }
+                                    })),
+                            )
+                            .child(ui::pill("tools-pill").child(ui::icon("sliders").text_color(text_default())).child("Tools · 4"))
+                            .child(send)
+                            .children(menu),
+                    ),
             )
             .into_any_element()
     }
 
+    /// `aside.rpanel`: Details with Runtime, Session, Tools, Files, Steps.
+    fn render_details(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use theme::*;
+        let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
+        let h = self.health.clone();
+        let dash = || "–".to_string();
+        let (status_color, status_text): (gpui::Hsla, &str) = match &self.phase {
+            Phase::Ready => (success().into(), "Connected"),
+            Phase::Starting => (text_subtle().into(), "Starting"),
+            Phase::Failed(_) => (danger().into(), "Unreachable"),
+        };
+        let ollama = match &self.models {
+            Some(m) if m.reachable => format!("Running · {}", m.version.clone().unwrap_or_default()),
+            Some(_) => "Not running".into(),
+            None => dash(),
+        };
+        let exposure = h.as_ref().and_then(|h| h.ollama_exposure.as_ref()).and_then(|e| e.get("status").and_then(|s| s.as_str()).map(str::to_string));
+        let (exp_text, exp_bad) = match exposure.as_deref() {
+            Some("exposed") => ("EXPOSED on network".to_string(), true),
+            Some("loopback_only") => ("Loopback only".to_string(), false),
+            Some(_) => ("n/a".to_string(), false),
+            None => (dash(), false),
+        };
+        let (ctx_label, ctx_frac) = match self.context {
+            Some((est, win)) if win > 0 => (format!("~{} / {}", fmt_k(est), fmt_k(win)), (est as f32 / win as f32).min(1.0)),
+            _ => (dash(), 0.0),
+        };
+        let model = self.msgs.iter().rev().find_map(|m| (m.role == Role::Assistant && !m.streaming).then(|| m.meta.split(" · ").next().unwrap_or("").to_string()))
+            .filter(|s| !s.is_empty())
+            .or(self.model.clone())
+            .unwrap_or_else(dash);
+
+        let runtime = ui::rsec("Runtime", false)
+            .child(ui::kv("Status", div().flex().items_center().gap(px(6.)).child(ui::dot(status_color)).child(status_text)))
+            .child(ui::kv("Version", h.as_ref().map(|h| format!("{} · {}", h.version, h.milestone)).unwrap_or_else(dash)))
+            .child(ui::kv("Schema", h.as_ref().map(|h| format!("v{}", h.schema_version)).unwrap_or_else(dash)))
+            .child(ui::kv("Uptime", h.as_ref().map(|h| uptime(h.uptime_s)).unwrap_or_else(dash)))
+            .child(ui::kv("Address", h.as_ref().map(|h| h.bind.clone()).unwrap_or_else(dash)))
+            .child(ui::kv("Ollama", ollama))
+            .child(ui::kv("Exposure", div().when(exp_bad, |d| d.text_color(danger())).child(exp_text)));
+        let session = ui::rsec("Session", false)
+            .child(ui::kv("Model", model))
+            .child(ui::kv("Runs on", div().flex().items_center().gap(px(6.)).child(ui::dot(success())).child("Local")))
+            .child(ui::kv("Project", div().flex().items_center().gap(px(6.)).child(ui::icon("folder").text_color(text_strong())).child(project)))
+            .child(
+                div()
+                    .pt(px(6.))
+                    .child(div().flex().justify_between().text_size(fs_12()).text_color(text_subtle()).child("Context").child(ctx_label))
+                    .child(
+                        // `.ctx`: 4px track, accent fill
+                        div().mt(px(6.)).h(px(4.)).rounded_full().bg(bg_selected()).overflow_hidden().child(div().h_full().w(relative(ctx_frac)).bg(accent())),
+                    ),
+            );
+        // The page's Tools, Files and Steps sections are still placeholders with
+        // no runtime behind them (prototypes/NOTES.md); they are shown exactly as there.
+        let tools = ui::rsec("Tools", false)
+            .child(ui::rrow("terminal", "Terminal").child(ui::toggle(true)))
+            .child(ui::rrow("globe", "Web search").child(ui::toggle(true)))
+            .child(ui::rrow("doc", "Files").child(ui::toggle(true)))
+            .child(ui::rrow("branch", "Git").child(ui::toggle(true)));
+        let files = ui::rsec("Files", false)
+            .child(ui::rrow("doc", "router/timeout.ts").child(
+                div().flex().gap(px(4.)).font_family(MONO).text_size(fs_12()).child(div().text_color(success()).child("+6")).child(div().text_color(danger()).child("−2")),
+            ))
+            .child(ui::rrow("table", "evals/runs.csv").child(ui::code_small("read")))
+            .child(ui::rrow("doc", "CHANGELOG.md").child(ui::code_small("read")));
+        let steps = ui::rsec("Steps", true)
+            .child(ui::rrow("search", "Queried eval runs").child(ui::code_small("4s")))
+            .child(ui::rrow("table", "Compared by task type").child(ui::code_small("11s")))
+            .child(ui::rrow("branch", "Matched to a41f9c2").child(ui::code_small("19s")));
+
+        ui::panel()
+            .w(px(300.))
+            .flex_none()
+            .h_full()
+            .child(
+                // `.rhead`: 56px, padding 0 12 0 16
+                div()
+                    .h(px(56.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .pl(px(SP_16))
+                    .pr(px(SP_12))
+                    .border_b_1()
+                    .border_color(border())
+                    .child(div().flex_1().text_size(fs_14()).font_weight(FontWeight::MEDIUM).text_color(text_strong()).child("Details"))
+                    .child(ui::icon_btn("rclose", "sidebar-right", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.details = false;
+                        cx.notify();
+                    }))),
+            )
+            .child(
+                // `.rbody`: padding 8 16 16
+                div()
+                    .id("rbody")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .pt(px(SP_8))
+                    .px(px(SP_16))
+                    .pb(px(SP_16))
+                    .child(runtime)
+                    .child(session)
+                    .child(tools)
+                    .child(files)
+                    .child(steps),
+            )
+            .into_any_element()
+    }
+
+    /// Starting / failed: centred like the page's `.empty` state.
     fn render_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use theme::*;
         let (title, message, detail, failed, code) = match &self.phase {
             Phase::Starting => ("Starting Umbrous…".to_string(), "Starting the local runtime on this Mac.".to_string(), vec![], false, String::new()),
             Phase::Failed(f) => (f.title.clone(), f.message.clone(), f.detail.clone(), true, f.code.clone()),
             Phase::Ready => unreachable!(),
         };
+        let detail: Vec<String> = detail.into_iter().filter(|l| !l.trim().is_empty()).collect();
         let mut col = div()
             .w(px(560.))
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(10.))
-            .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(if failed { theme::bad() } else { theme::text() }).child(title))
-            .child(div().text_color(theme::muted()).text_center().child(message));
-        let detail: Vec<String> = detail.into_iter().filter(|l| !l.trim().is_empty()).collect();
+            .child(ui::icon_sized(if failed { "x" } else { "logo" }, 24.).text_color(if failed { danger() } else { text_strong() }))
+            .child(div().mt(px(16.)).mb(px(4.)).text_size(fs_18()).font_weight(FontWeight::MEDIUM).text_color(text_strong()).child(title))
+            .child(div().text_size(fs_13()).text_color(text_subtle()).text_center().child(message));
         if !detail.is_empty() {
             col = col.child(
                 div()
                     .id("detail")
+                    .mt(px(SP_16))
                     .w_full()
                     .max_h(px(220.))
                     .overflow_y_scroll()
-                    .p(px(10.))
-                    .rounded(px(8.))
-                    .bg(theme::code_bg())
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(R_8))
+                    .bg(bg_raised())
                     .border_1()
-                    .border_color(theme::border())
-                    .font_family(theme::MONO)
-                    .text_size(px(12.))
+                    .border_color(border())
+                    .font_family(MONO)
+                    .text_size(fs_12())
+                    .text_color(text_default())
                     .child(detail.join("\n")),
             );
         }
         if failed {
             col = col.child(
                 div()
+                    .mt(px(SP_16))
                     .flex()
-                    .gap(px(8.))
-                    .child(icon_button("retry", if code == "crashed" { "Restart" } else { "Retry" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.retry(cx))))
-                    .child(icon_button("logs", "Show logs").on_click(|_, _, cx| {
+                    .gap(px(4.))
+                    .child(ui::pill("retry").child(if code == "crashed" { "Restart" } else { "Retry" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.retry(cx))))
+                    .child(ui::pill("logs").child("Show logs").on_click(|_, _, cx| {
                         if let Some(d) = logfile::log_dir() {
                             cx.reveal_path(&d);
                         }
                     }))
-                    .child(icon_button("quit", "Quit").on_click(|_, _, cx| cx.quit())),
+                    .child(ui::pill("quit").child("Quit").on_click(|_, _, cx| cx.quit())),
             );
         }
-        div().size_full().flex().items_center().justify_center().child(col).into_any_element()
+        ui::panel().flex_1().h_full().items_center().justify_center().child(col).into_any_element()
     }
 }
 
+/// Height of the strip that holds the macOS window controls (see docs/desktop.md).
+pub const TITLEBAR: f32 = 28.;
+
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use theme::*;
         let t0 = Instant::now();
+        let wide = window.viewport_size().width >= px(1180.); // the page's @media (max-width:1180px)
         let root = div()
             .id("workspace")
             .key_context("Workspace")
@@ -1391,35 +1660,39 @@ impl Render for Workspace {
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.selection.dragging = false))
             .size_full()
             .flex()
-            .bg(theme::bg())
-            .text_color(theme::text())
-            .font_family(theme::FONT)
-            .text_size(px(14.))
-            .line_height(px(22.));
+            .flex_col()
+            // body: canvas background, 13px/1.5 default text, SF Pro
+            .bg(bg_canvas())
+            .text_color(text_default())
+            .font_family(FONT)
+            .text_size(fs_13())
+            .line_height(px(19.5))
+            // the window controls' strip (the browser drew its own title bar here)
+            .child(div().h(px(TITLEBAR)).flex_none().w_full());
 
         if matches!(self.phase, Phase::Ready) && !self.projects.is_empty() && !self.logged_first_frame {
             self.logged_first_frame = true;
             logfile::event("ui.first_full_frame", &[("ms_since_start", self.started.elapsed().as_millis().to_string())]);
         }
-        let el = if !matches!(self.phase, Phase::Ready) {
-            root.child(self.render_status(cx)).into_any_element()
+        // `.app`: three panels, gap 6, padding 6 (top padding is the strip above)
+        let app = div().flex_1().min_h_0().flex().gap(px(6.)).px(px(6.)).pb(px(6.));
+        let app = if !matches!(self.phase, Phase::Ready) {
+            app.child(self.render_status(cx))
         } else {
-            let main = div()
+            let main = ui::panel()
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .flex()
-                .flex_col()
                 .relative()
                 .child(self.render_header(cx))
-                .child(div().flex_1().min_h_0().flex().flex_col().child(self.render_transcript(cx)))
+                .child(self.render_transcript(cx))
                 .child(self.render_composer(cx))
                 .children(self.render_options_menu(cx));
-            root.when(self.sidebar, |d| d.child(self.render_sidebar(cx)))
+            app.when(self.sidebar, |d| d.child(self.render_sidebar(cx)))
                 .child(main)
-                .when(self.details, |d| d.child(self.render_details(cx)))
-                .into_any_element()
+                .when(self.details && wide, |d| d.child(self.render_details(cx)))
         };
+        let el = root.child(app);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.perf.render_count += 1;
         self.perf.render_ms_total += ms;

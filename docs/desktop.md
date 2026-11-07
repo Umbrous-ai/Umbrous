@@ -126,26 +126,57 @@ deadline are all blocking waits.
 
 ### Interface
 
-Taken from the prototype: sidebar (New chat, Projects with +, Sessions with
-"Show archived (n)"), header with Options (Archive / Restore, Delete greyed out
-as "Not available yet"), transcript, composer with the model menu, and the
-Details panel (Session and Runtime). Archived chats open read-only with Restore.
+The original interface, `prototypes/umbrous-harness.html` (what `bin/umbrous`
+serves), is the visual source of truth. The native views reproduce it:
+
+- `desktop/app/src/theme.rs` holds that file's `:root` tokens unchanged (canvas
+  `#141414`, panels `#1B1B1B`, raised `#222222`, borders `#2A2A2A`/`#353535`,
+  text `#7F7F7F`/`#B5B5B5`/`#F2F2F2`, accent `#8B7CF6`, the 4–48 px spacing and
+  4–12 px radius scales, SF Pro at 400/500, SF Mono).
+- `desktop/app/assets/icons/` are the 41 icons from the page's SVG sprite,
+  extracted unchanged (1 px outlines on a 16 px grid).
+- `desktop/app/src/ui.rs` has one helper per CSS class (`.nav`, `.icon-btn`,
+  `.pill`, `.notice`, `.panel`, `.kv`, `.rsec`, `.row`, `.tg`), and the views name
+  the class they mirror: the three floating panels (300 / flexible / 300, gap 6,
+  radius 12), the sidebar with workspace switcher, New chat ⌘N, collapsible
+  Projects (+ on hover) and Sessions, the 56 px header, the 696 px thread column,
+  `.msg-u` bubbles, `.answer` text at 16/1.6, `.reply-meta`, the composer with
+  attach, model pill, Tools · 4 and the round send button, and the Details panel
+  with Runtime, Session, Tools, Files and Steps. The Details panel hides below
+  1180 px wide, as the page's media query did.
+
+`desktop/e2e/scripts/` and `stress.py seed-reference` reproduce the page's sample
+content (projects, sessions, the "pass rate" reply) as real data so both can be
+screenshotted at the same window size.
+
+Where the native view differs, and why:
+
+| Difference | Reason |
+|---|---|
+| A 28 px strip above the panels | macOS draws the window controls there. In the browser the title bar played that role; putting the controls inside the sidebar would move its contents |
+| Inline code (`tool router v2`) is a flat highlight, without the page's rounded, padded chip and branch icon | GPUI styles runs inside wrapped text with colour, weight and background only; padding, radius and inline icons are not possible inside a text run |
+| Icons inside pills keep their colour on hover | GPUI's SVG element takes an explicit colour, not the parent's current text colour |
+| "Worked for 34s", the metric cards and the action pills from the sample are not shown | They were the prototype's demo content; the runtime does not produce them (the browser page did not show them for real replies either) |
+| Tools, Files and Steps in Details show the page's placeholder rows | Same as the browser page: no runtime behind them yet (prototypes/NOTES.md) |
+| Uptime refreshes every 5 s only while the window is in front | Avoids work while hidden; the page polled continuously |
+
+Replies are still rendered as Markdown, in the page's styles: paragraphs as
+`.answer`, headings as `h3`, lists as `.hl`, inline code as the chip colours,
+code blocks as raised cards in SF Mono.
 
 macOS integration: menu bar (Umbrous, File, Edit, View, Chat, Window, Help),
 standard shortcuts (⌘N new chat, ⌘W close, ⌘Q quit, ⌘H hide, ⌘C/⌘X/⌘V/⌘A,
 ⌘Z/⇧⌘Z in the composer, ⌘. stop reply, ⌃⌘F full screen, ⌘\ sidebar), the
-Services menu, Emoji & Symbols (⌃⌘Space), system clipboard, transparent title
-bar with traffic lights, minimum window size 900×600.
+Services menu, Emoji & Symbols (⌃⌘Space), system clipboard, minimum window size
+900×600.
 
 Text: the composer is a native text field built on GPUI's platform input
-handler: typing, IME marked text and candidate window placement,
-word/line movement and deletion, undo/redo, double/triple click. Enter sends,
-⇧Enter or ⌥Enter adds a line. Transcript text is selectable across blocks and
-messages by dragging (double-click selects a word, triple-click a block, ⇧-click
-extends), and ⌘C copies it as plain text. Replies are rendered as Markdown
-(headings, lists, code blocks, quotes, tables as monospaced text, inline
-bold/italic/code). Model output stays inert: HTML is shown literally and links
-are styled but never opened.
+handler: typing, IME marked text and candidate window placement, word/line
+movement and deletion, undo/redo, double/triple click. Enter sends, ⇧Enter or
+⌥Enter adds a line. Transcript text is selectable across blocks and messages by
+dragging (double-click selects a word, triple-click a block, ⇧-click extends),
+and ⌘C copies it as plain text. Model output stays inert: HTML is shown
+literally and links are styled but never opened.
 
 ### Keeping the UI thread free
 

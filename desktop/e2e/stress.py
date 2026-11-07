@@ -47,6 +47,35 @@ def seed(home: Path, exchanges: int) -> None:
     print(f"seeded {exchanges * 2} messages + one 200 KB message in {home}")
 
 
+def seed_reference(home: Path) -> None:
+    """The original prototype's sample content, as real data, for side-by-side screenshots."""
+    from umbrous.config import make_private_dir
+    from umbrous.history.store import HistoryStore
+    from umbrous.persistence import db
+    make_private_dir(home)
+    db.connect(home / "umbrous.db").close()
+    store = HistoryStore(home / "umbrous.db")
+    eval_harness = None
+    for name in ("Umbrous core", "Eval harness", "Docs site"):
+        p = store.create_project(name)
+        if name == "Eval harness":
+            eval_harness = p
+    for title in ("Clean up sandbox logs", "Summarize nightly eval", "Design a tool approval flow",
+                  "Fix tool router timeout", "Draft the 0.4 changelog"):
+        c = store.create_chat(eval_harness.id)
+        store.append_exchange(c.id, title, "Done.", "umbra-large", "complete", 10, 2)
+    c = store.create_chat(eval_harness.id)
+    store.append_exchange(
+        c.id, "Why did the eval pass rate drop last week?",
+        "The pass rate fell **6.5 points** because tool router v2 made web search time out after 8s. "
+        "Long research tasks fail there.\n\n### Highlights\n\n"
+        "- The drop starts when `tool router v2` reaches 100% of runs on Oct 28.\n"
+        "- Step 3 \u201cfetch sources\u201d fails 14 points more often in v2 than v1.\n"
+        "- Research tasks are 62% of web runs. Their pass rate fell the most.",
+        "umbra-large", "complete", 48000, 120)
+    print(f"seeded reference content in {home}")
+
+
 def fake_ollama(port: int, empty: bool = False) -> None:
     from tests.fake_ollama import FakeModel, FakeOllama
     models = [] if empty else [FakeModel("stress:1b", reply=big_markdown(100), chunk_delay=0.0005)]
@@ -56,7 +85,9 @@ def fake_ollama(port: int, empty: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "seed":
+    if sys.argv[1] == "seed-reference":
+        seed_reference(Path(sys.argv[2]))
+    elif sys.argv[1] == "seed":
         seed(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 1000)
     else:
         fake_ollama(int(sys.argv[2]), empty=sys.argv[1] == "fake-empty")
