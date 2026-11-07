@@ -141,6 +141,18 @@ class ConfinementTests(unittest.TestCase):
         with self.assertRaises(fs.FsError):
             fs.read_file(str(self.base / "wslink"), ("readme.txt",))
 
+    def test_never_both_nofollow_flags(self):
+        """macOS refuses O_NOFOLLOW | O_NOFOLLOW_ANY with EINVAL. Python 3.13 (the
+        app's bundled runtime) has O_NOFOLLOW_ANY and 3.9 does not, so the bug only
+        showed in the app. Check the rule with macOS's value on every platform."""
+        any_ = getattr(os, "O_NOFOLLOW_ANY", 0) or 0x20000000
+        for flags in (fs._FILE_FLAGS, fs._DIR_FLAGS):
+            f = fs.component_flags(flags, any_)
+            self.assertTrue(f & any_)
+            self.assertFalse(f & os.O_NOFOLLOW)
+            self.assertEqual(f & ~any_, flags & ~os.O_NOFOLLOW)   # nothing else changed
+            self.assertEqual(fs.component_flags(flags, 0), flags)  # O_NOFOLLOW kept where ANY is missing
+
     def test_swap_race_never_returns_outside_content(self):
         """While reads run, a thread keeps swapping a workspace file for a symlink
         to an outside file (atomically, with rename). Evidence, not proof."""

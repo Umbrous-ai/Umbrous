@@ -16,6 +16,7 @@ pub fn start(window: WindowHandle<Workspace>, cx: &mut App) {
     let Ok(text) = std::fs::read_to_string(script) else { return };
     let _ = std::fs::remove_file(&out);
     cx.spawn(async move |cx| {
+        let mut failed = false;
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let (cmd, arg) = line.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((line, ""));
             let res = run(cmd, arg, window, cx).await;
@@ -29,12 +30,18 @@ pub fn start(window: WindowHandle<Workspace>, cx: &mut App) {
                     let _ = writeln!(f, "{v}");
                 }
                 if v.get("error").is_some() {
+                    failed = true;
                     break;
                 }
             }
             if cmd == "quit" {
                 break;
             }
+        }
+        if failed {
+            // a failed step skips the script's own `quit`: quit anyway, so a
+            // harness waiting on the app (open -W) gets the failure instead of hanging
+            cx.update(|cx| cx.quit()).ok();
         }
     })
     .detach();

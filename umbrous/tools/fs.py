@@ -159,9 +159,19 @@ def open_root(root: str) -> Iterator[int]:
         os.close(fd)
 
 
+def component_flags(flags: int, nofollow_any: int = _NOFOLLOW_ANY) -> int:
+    """Flags for opening one path component. Where the system has O_NOFOLLOW_ANY
+    (macOS), it REPLACES O_NOFOLLOW: macOS refuses the two together with EINVAL,
+    which made every read fail in the app's bundled Python 3.13. Elsewhere
+    O_NOFOLLOW stays. Either way a symlink is never followed."""
+    if nofollow_any:
+        return (flags & ~os.O_NOFOLLOW) | nofollow_any
+    return flags
+
+
 def _open_component(name: str, parent: int, flags: int) -> int:
     try:
-        return os.open(name, flags | _NOFOLLOW_ANY, dir_fd=parent)
+        return os.open(name, component_flags(flags), dir_fd=parent)
     except FileNotFoundError:
         raise FsError("not_found", "No such file or folder in the workspace.") from None
     except NotADirectoryError:
@@ -334,7 +344,7 @@ def search(root: str, parts: Tuple[str, ...], query: str, deadline_s: float = SE
                 if is_excluded(parts + rel + (name,)):
                     continue
                 try:
-                    fd = os.open(name, _FILE_FLAGS | _NOFOLLOW_ANY, dir_fd=dfd)
+                    fd = os.open(name, component_flags(_FILE_FLAGS), dir_fd=dfd)
                 except OSError:
                     result.skipped += 1  # symlink, vanished, no permission
                     continue
