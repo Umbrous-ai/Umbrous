@@ -4,24 +4,51 @@
 # Needs dist/Umbrous-e2e.app (desktop/scripts/build-native.sh --e2e). Uses a
 # throwaway data folder, a throwaway workspace and a fake Ollama; your real data
 # and Ollama are not touched.
+# Exit status: 0 only if setup worked, every assertion passed, the script reached
+# its end and the app did not panic; 1 otherwise; 2 for a usage error.
 set -u
+[ $# -eq 1 ] && [ -n "$1" ] || { echo "usage: $0 WORKDIR" >&2; exit 2; }
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-W="$1"; mkdir -p "$W"; rm -rf "$W"/h-m3 "$W"/m3-fixture "$W"/m3-access.* "$W"/m3-*.png
-E2E="$W/apps/Umbrous-e2e.app"; mkdir -p "$W/apps"; rm -rf "$E2E"; ditto "$ROOT/dist/Umbrous-e2e.app" "$E2E"
+STATUS=0
+fail() { echo "FAIL: $*"; STATUS=1; }
+FAKE=""
+cleanup() { [ -n "$FAKE" ] && kill "$FAKE" 2>/dev/null; }
+trap cleanup EXIT
+abort() { fail "$*"; echo "m3-access: setup failed, the app was not run"; exit 1; }
+
+W="$1"; mkdir -p "$W" || abort "cannot create $W"
+rm -rf "$W"/h-m3 "$W"/m3-fixture "$W"/m3-access.* "$W"/m3-*.png
+[ -d "$ROOT/dist/Umbrous-e2e.app" ] || abort "dist/Umbrous-e2e.app is missing (desktop/scripts/build-native.sh --e2e)"
+E2E="$W/apps/Umbrous-e2e.app"; mkdir -p "$W/apps"; rm -rf "$E2E"
+ditto "$ROOT/dist/Umbrous-e2e.app" "$E2E" || abort "could not copy the e2e app"
 H="$W/h-m3"; PORT=18559
 python3 "$ROOT/desktop/e2e/stress.py" fake-workspace $PORT >/dev/null 2>&1 & FAKE=$!; sleep 1
-WS=$(python3 "$ROOT/desktop/e2e/stress.py" seed-workspace "$W/m3-fixture")
-mkdir -p "$H"; echo "{\"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json"
+kill -0 "$FAKE" 2>/dev/null || abort "the fake Ollama did not start (port $PORT in use?)"
+WS=$(python3 "$ROOT/desktop/e2e/stress.py" seed-workspace "$W/m3-fixture") && [ -d "$WS" ] || abort "could not create the test workspace"
+mkdir -p "$H" && echo "{\"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json" || abort "could not write $H/config.json"
 U() { PYTHONPATH="$ROOT" python3 -m umbrous --home "$H" "$@"; }
-U probe workspace-reader:3b >/dev/null || echo "FAIL: tool check on the fake model"
-U workspace General "$WS" --profile ask_before_read >/dev/null || echo "FAIL: could not attach the workspace"
-sed -e "s|@OUT@|$W|g" "$ROOT/desktop/e2e/scripts/m3-access.txt" > "$W/m3-access.txt"
-open -n -W --env UMBROUS_HOME="$H" --env UMBROUS_E2E_SCRIPT="$W/m3-access.txt" --env UMBROUS_E2E_OUT="$W/m3-access.jsonl" "$E2E"
-kill $FAKE 2>/dev/null
-echo "== m3-access"; cut -c1-500 "$W/m3-access.jsonl" 2>/dev/null
-grep -q '"error"' "$W/m3-access.jsonl" 2>/dev/null && echo "FAIL: m3-access assertions failed"
-[ "$(tail -1 "$W/m3-access.jsonl" 2>/dev/null | grep -c '"record":"end"')" = 1 ] \
-  && echo "ok   m3-access: all $(grep -c '"ok":true' "$W/m3-access.jsonl") assertions passed" || echo "FAIL: m3-access did not reach its end"
-grep -h '"app.panic"' "$H/logs/desktop.log" 2>/dev/null && echo "FAIL: the app panicked"
+U probe workspace-reader:3b >/dev/null || abort "tool check on the fake model"
+U workspace General "$WS" --profile ask_before_read >/dev/null || abort "could not attach the workspace"
+sed -e "s|@OUT@|$W|g" "$ROOT/desktop/e2e/scripts/m3-access.txt" > "$W/m3-access.txt" || abort "could not write the e2e script"
+
+open -n -W --env UMBROUS_HOME="$H" --env UMBROUS_E2E_SCRIPT="$W/m3-access.txt" --env UMBROUS_E2E_OUT="$W/m3-access.jsonl" "$E2E" \
+  || fail "the app could not be opened"
+cleanup; FAKE=""
+
+OUT="$W/m3-access.jsonl"
+echo "== m3-access"; cut -c1-500 "$OUT" 2>/dev/null
+if [ ! -s "$OUT" ]; then
+  fail "m3-access wrote no results"
+else
+  grep -q '"error"' "$OUT" && fail "m3-access assertions failed"
+  if [ "$(tail -1 "$OUT" | grep -c '"record":"end"')" = 1 ]; then
+    echo "ok   m3-access reached its end: $(grep -c '"ok":true' "$OUT") assertions passed"
+  else
+    fail "m3-access did not reach its end"
+  fi
+fi
+grep -h '"app.panic"' "$H/logs/desktop.log" 2>/dev/null && fail "the app panicked"
 echo "receipts:"; U receipts --last 10
 echo "profile now: $(U workspace General)"
+[ $STATUS -eq 0 ] && echo "m3-access: PASS" || echo "m3-access: FAIL"
+exit $STATUS

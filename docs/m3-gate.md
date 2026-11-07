@@ -213,7 +213,11 @@ throwaway data folder, the M3 fixture and a fake Ollama. The script
    `../outside/secret.txt`, `link.txt` and `notes/.ENV` is still refused, and no
    secret appears.
 
-At the end it lists the receipts.
+At the end it lists the receipts. It exits 0 only when setup worked, every
+assertion passed, the script reached its end and the app didn't panic.
+`validate-native.sh` passes that failure on and exits nonzero if any of its
+own checks printed FAIL. `tests/test_validate_scripts.py` checks both on any
+platform, using stand-ins for `open` and `ditto`.
 
 The native approval cards, Access view and Sources are the next step.
 
