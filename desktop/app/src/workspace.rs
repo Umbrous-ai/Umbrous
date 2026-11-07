@@ -1679,9 +1679,12 @@ impl Workspace {
                     }
                 })
                 .flex_1()
-                .size_full(),
+                .min_h_0()
+                .w_full(),
             )
-            .when(!notices.is_empty(), |d| d.child(notice_col(notices, SP_8)))
+            // the notices take their full height and the list gets what is left, so a
+            // long notice (M5's interrupted task) is never drawn under the composer
+            .when(!notices.is_empty(), |d| d.child(notice_col(notices, SP_8).flex_none()))
             .into_any_element()
     }
 
