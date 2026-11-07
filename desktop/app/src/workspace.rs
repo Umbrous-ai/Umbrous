@@ -502,6 +502,10 @@ impl Workspace {
                 if t.messages.iter().any(|m| m.task_id.is_some()) {
                     if let Ok(list) = api.get::<api::TaskList>(&format!("/api/tasks?chat_id={id}")) {
                         for (m, msg) in t.messages.iter().zip(msgs.iter_mut()) {
+                            // the user's message carries the same task id; the report belongs to the reply only
+                            if m.role == "user" {
+                                continue;
+                            }
                             let Some(tid) = m.task_id.as_deref() else { continue };
                             let rep = list.tasks.iter().find(|x| x.task_id == tid).and_then(|x| x.report.as_ref());
                             if let Some((line, attention)) = rep.and_then(api::report_line) {

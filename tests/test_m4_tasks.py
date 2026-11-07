@@ -402,6 +402,7 @@ class TaskRunTests(unittest.TestCase):
                 self.assertEqual(main(["--home", home, "tasks"]), 0)
                 self.assertEqual(main(["--home", home, "tasks", "--task", tid]), 0)
             self.assertIn(tid, out.getvalue())
+            self.assertIn("steps=4 actions={'completed': 3}", out.getvalue())   # the listing reads the report
             self.assertIn("action.completed", out.getvalue())
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--home", home, "purge", "tasks", "--all"]), 1)   # needs --yes

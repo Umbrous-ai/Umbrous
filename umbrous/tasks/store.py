@@ -207,10 +207,11 @@ class TaskStore:
 
     def latest(self, limit: int = 10) -> List[dict]:
         with self._db() as c:
-            rows = c.execute("SELECT task_id, chat_id, model, status, code, created_at, ended_at FROM tasks "
-                             "ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            rows = c.execute("SELECT t.task_id, t.chat_id, t.model, t.status, t.code, t.created_at, t.ended_at, "
+                             "(SELECT body FROM task_artifacts a WHERE a.task_id = t.task_id AND a.kind = 'report') "
+                             "FROM tasks t ORDER BY t.created_at DESC LIMIT ?", (limit,)).fetchall()
         keys = ("task_id", "chat_id", "model", "status", "code", "created_at", "ended_at")
-        return [dict(zip(keys, r)) for r in reversed(rows)]
+        return [dict(zip(keys, r[:7]), report=json.loads(r[7]) if r[7] else None) for r in reversed(rows)]
 
     def count(self, before: Optional[str] = None) -> int:
         with self._db() as c:

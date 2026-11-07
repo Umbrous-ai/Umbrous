@@ -10,6 +10,7 @@ use gpui::{px, App, AsyncApp, ListOffset, WindowHandle};
 use serde_json::{json, Value};
 
 use crate::workspace::{Phase, Workspace};
+use crate::transcript::Role;
 
 pub fn start(window: WindowHandle<Workspace>, cx: &mut App) {
     let (Ok(script), Ok(out)) = (std::env::var("UMBROUS_E2E_SCRIPT"), std::env::var("UMBROUS_E2E_OUT")) else { return };
@@ -218,6 +219,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "last_meta" => ws.msgs.last().map(|m| m.meta.clone()).unwrap_or_default(),
                 "last_text" => ws.msgs.last().map(|m| m.text.clone()).unwrap_or_default(),
                 "no_text" => (!ws.msgs.iter().any(|m| m.text.contains(val))).to_string(),
+                "user_meta_empty" => ws.msgs.iter().filter(|m| m.role == Role::User).all(|m| m.meta.is_empty()).to_string(),
                 "access" => ws.access.as_ref().and_then(|a| a.workspace.as_ref()).map(|w| w.profile.clone()).unwrap_or_else(|| "none".into()),
                 "ask_notice" => ws.asks_before_read().to_string(),
                 "last_text_len_over" => (ws.msgs.last().map(|m| m.text.len()).unwrap_or(0) > val.parse::<usize>().unwrap_or(0)).to_string(),
@@ -229,7 +231,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             let ok = match what {
                 "chat" if val != "none" => got.contains(val),
                 "last_meta" | "sessions" | "last_text" => got.contains(val),
-                "no_text" => got == "true",
+                "no_text" | "user_meta_empty" => got == "true",
                 "last_text_len_over" => got == "true",
                 _ => got == val,
             };

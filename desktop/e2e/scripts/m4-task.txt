@@ -36,5 +36,7 @@ record limit
 # 4. the report comes back when a stored chat is opened again
 open_chat What is the plan
 expect last_meta Task completed · 4 steps
+# the report belongs to the reply, never to your message
+expect user_meta_empty true
 record end
 quit
