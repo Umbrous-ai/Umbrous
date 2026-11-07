@@ -1,0 +1,12 @@
+#!/bin/sh
+# Opens the Umbrous app. For now this is the front-end prototype.
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PAGE="$DIR/prototypes/umbrous-harness.html"
+# Prefer a standalone app window (no tabs or address bar) if a Chromium browser is installed.
+for APP in "Google Chrome" "Arc" "Brave Browser" "Microsoft Edge" "Chromium"; do
+  if open -Ra "$APP" 2>/dev/null; then
+    open -na "$APP" --args --app="file://$PAGE" --window-size=1440,900
+    exit 0
+  fi
+done
+open "$PAGE"

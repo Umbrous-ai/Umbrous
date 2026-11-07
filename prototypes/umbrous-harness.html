@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Umbrous · Option B</title>
+<style>
+:root{
+  /* Type: SF Pro, 400 + 500 only */
+  --font: "SF Pro Text","SF Pro","SF Pro Display",-apple-system,BlinkMacSystemFont,system-ui,"Inter","Segoe UI",sans-serif;
+  --mono: "SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  --fs-12:12px; --fs-13:13px; --fs-14:14px; --fs-16:16px; --fs-18:18px; --fs-24:24px;
+  --fw-regular:400; --fw-medium:500;
+
+  /* Freddy's light tokens, kept for a future light theme */
+  --light-text-subtle:#7F7F7F; --light-text-default:#5D5D5D; --light-text-strong:#292929;
+  --light-bg-selected:#F5F5F5; --light-border:#F2F2F2;
+
+  /* Dark theme (mapped from the light tokens, palette sampled from reference 1) */
+  --bg-canvas:#141414;     /* behind floating panels */
+  --bg-app:#1B1B1B;        /* window / panels */
+  --bg-raised:#222222;     /* cards, code blocks, composer */
+  --bg-hover:#232323;
+  --bg-selected:#292929;   /* = light bg-selected, inverted */
+  --border:#2A2A2A;        /* = light border, inverted */
+  --border-strong:#353535;
+  --text-subtle:#7F7F7F;   /* same value works on both themes */
+  --text-default:#B5B5B5;  /* = light default (#5D5D5D), inverted */
+  --text-strong:#F2F2F2;   /* = light strong (#292929), inverted */
+
+  /* Not in the spec yet: placeholders */
+  --accent:#8B7CF6;        /* umbral violet */
+  --accent-soft:rgba(139,124,246,.14);
+  --danger:#F26D6D; --success:#5CCB8A; --warning:#F2C14E;
+
+  --r-4:4px; --r-6:6px; --r-8:8px; --r-12:12px; --r-full:999px;
+  --sp-4:4px; --sp-8:8px; --sp-12:12px; --sp-16:16px; --sp-24:24px; --sp-32:32px; --sp-48:48px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg-canvas);color:var(--text-default);font:var(--fw-regular) var(--fs-13)/1.5 var(--font);-webkit-font-smoothing:antialiased;overflow:hidden}
+button,input,textarea{font:inherit;color:inherit;background:none;border:0;outline:0}
+button{cursor:pointer}
+.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.i *{vector-effect:non-scaling-stroke}
+.i.fill-dots circle{fill:currentColor;stroke:none}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:#2c2c2c;border-radius:8px}::-webkit-scrollbar-track{background:transparent}
+textarea:focus-visible,input:focus-visible{outline:none}
+:focus-visible{outline:1px solid var(--accent);outline-offset:2px;border-radius:var(--r-6)}
+
+.app{display:grid;grid-template-columns:300px 1fr 300px;gap:6px;height:100vh;padding:6px;transition:grid-template-columns .2s}
+.app.no-right{grid-template-columns:300px 1fr}
+.app.no-right .rpanel{display:none}
+.panel{background:var(--bg-app);border:1px solid var(--border);border-radius:var(--r-12);min-height:0;display:flex;flex-direction:column}
+/* sidebar */
+.ws{display:flex;align-items:center;gap:8px;padding:var(--sp-16) var(--sp-16) var(--sp-12)}
+.ws-btn{display:flex;align-items:center;gap:8px;height:32px;padding:0 6px;margin-left:-6px;border-radius:var(--r-8);font-size:var(--fs-14);font-weight:var(--fw-medium);color:var(--text-strong)}
+.ws-btn:hover{background:var(--bg-hover)}
+.ws-logo{width:22px;height:22px;color:var(--text-strong);display:grid;place-items:center}
+.ws-logo svg{width:20px;height:20px}
+.ws-btn .i{color:var(--text-subtle)}
+.icon-btn{width:28px;height:28px;display:grid;place-items:center;border-radius:var(--r-6);color:var(--text-subtle)}
+.icon-btn:hover{background:var(--bg-hover);color:var(--text-strong)}
+.ws .icon-btn:first-of-type{margin-left:auto}
+.seg{display:grid;grid-template-columns:1fr 1fr;margin:0 var(--sp-16) var(--sp-12);padding:2px;background:var(--bg-canvas);border:1px solid var(--border);border-radius:var(--r-8)}
+.seg button{height:28px;border-radius:6px;font-size:var(--fs-13);color:var(--text-subtle)}
+.seg button[aria-selected=true]{background:var(--bg-selected);color:var(--text-strong);font-weight:var(--fw-medium);box-shadow:0 0 0 1px var(--border-strong)}
+.side-scroll{flex:1;overflow:auto;padding:0 var(--sp-12) var(--sp-12)}
+.nav{display:flex;align-items:center;gap:10px;width:100%;height:36px;padding:0 10px;border-radius:var(--r-8);color:var(--text-default);font-size:var(--fs-14);text-align:left}
+.nav:hover{background:var(--bg-hover);color:var(--text-strong)}
+.nav[aria-current=true]{background:var(--bg-selected);color:var(--text-strong);font-weight:var(--fw-medium)}
+.nav .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nav.unread{color:var(--text-strong)}
+.nav.muted{color:var(--text-subtle)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none}
+.label{font-size:var(--fs-12);color:var(--text-subtle);padding:0 10px;margin:var(--sp-24) 0 var(--sp-4)}
+.side-foot{display:flex;justify-content:space-between;padding:var(--sp-8) var(--sp-12) var(--sp-12)}
+.section{display:flex;align-items:center;gap:4px;width:100%;height:32px;padding:0 10px;margin-top:var(--sp-24);font-size:var(--fs-13);color:var(--text-subtle);font-weight:var(--fw-medium);border-radius:var(--r-6)}
+.nav[data-new]{color:var(--text-strong);font-weight:var(--fw-medium)}
+.section:hover{color:var(--text-default)}
+.section .chev{width:14px;height:14px;transition:transform .2s}
+.section[aria-expanded=false] .chev{transform:rotate(-90deg)}
+.section .add{margin-left:auto;width:22px;height:22px;display:grid;place-items:center;border-radius:var(--r-6);opacity:0}
+.section:hover .add{opacity:1}.section .add:hover{background:var(--bg-hover);color:var(--text-strong)}
+.sec-body[hidden]{display:none}
+.nav .n{font-size:var(--fs-12);color:var(--text-subtle);font-weight:var(--fw-regular)}
+.nav kbd{font:var(--fs-12) var(--font);color:var(--text-subtle);border:1px solid var(--border);border-radius:var(--r-4);padding:0 5px;font-weight:var(--fw-regular)}
+.side-scroll{padding-top:var(--sp-4)}
+.act{display:flex;gap:10px;padding:10px;border-radius:var(--r-8)}
+.act:hover{background:var(--bg-hover)}
+.act .ic{width:28px;height:28px;border-radius:var(--r-8);border:1px solid var(--border);display:grid;place-items:center;color:var(--text-default);flex:none}
+.act b{display:block;font-weight:var(--fw-medium);color:var(--text-strong);font-size:var(--fs-13);line-height:1.35}
+.act small{font-size:var(--fs-12);color:var(--text-subtle)}
+.act .ok{color:var(--success)}.act .bad{color:var(--danger)}
+/* main */
+.head{display:flex;align-items:center;gap:10px;height:56px;padding:0 var(--sp-16) 0 var(--sp-24);border-bottom:1px solid var(--border);flex:none}
+.head h1{font-size:var(--fs-14);font-weight:var(--fw-medium);color:var(--text-strong)}
+.head .i{color:var(--text-subtle)}
+.head .sp{flex:1}
+.icon-btn[aria-pressed=true]{color:var(--text-strong);background:var(--bg-selected)}
+.rpanel{overflow:hidden}
+.rhead{display:flex;align-items:center;height:56px;padding:0 var(--sp-12) 0 var(--sp-16);border-bottom:1px solid var(--border);flex:none}
+.rhead h2{font-size:var(--fs-14);font-weight:var(--fw-medium);color:var(--text-strong);flex:1}
+.rbody{flex:1;overflow:auto;padding:var(--sp-8) var(--sp-16) var(--sp-16)}
+.rsec{padding:var(--sp-12) 0;border-bottom:1px solid var(--border)}
+.rsec:last-child{border-bottom:0}
+.rsec h4{font-size:var(--fs-12);font-weight:var(--fw-regular);color:var(--text-subtle);margin-bottom:var(--sp-8)}
+.kv{display:flex;align-items:center;gap:8px;height:28px;font-size:var(--fs-13)}
+.kv .k{color:var(--text-subtle);width:72px;flex:none}
+.kv .v{color:var(--text-strong);display:flex;align-items:center;gap:6px}
+.kv .dot{background:var(--success)}
+.row{display:flex;align-items:center;gap:10px;height:32px;padding:0 8px;margin:0 -8px;border-radius:var(--r-6);font-size:var(--fs-13);color:var(--text-default)}
+.row:hover{background:var(--bg-hover)}
+.row .i{color:var(--text-subtle)}
+.row .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row code{font:var(--fs-12) var(--mono);color:var(--text-subtle)}
+.row .add{color:var(--success)}.row .del{color:var(--danger)}
+.tg{width:28px;height:16px;border-radius:var(--r-full);background:var(--bg-selected);position:relative;flex:none;transition:background .15s}
+.tg::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--text-subtle);transition:transform .15s,background .15s}
+.tg[aria-checked=true]{background:var(--accent)}
+.tg[aria-checked=true]::after{transform:translateX(12px);background:#fff}
+.ctx{height:4px;border-radius:var(--r-full);background:var(--bg-selected);overflow:hidden;margin-top:6px}
+.ctx i{display:block;height:100%;width:38%;background:var(--accent)}
+.scroll{flex:1;overflow:auto;min-height:0}
+.thread{max-width:760px;margin:0 auto;padding:var(--sp-48) var(--sp-32) var(--sp-32)}
+.msg-u{margin-left:auto;width:fit-content;max-width:80%;background:var(--bg-raised);border:1px solid var(--border);color:var(--text-strong);padding:10px 16px;border-radius:var(--r-12);font-size:var(--fs-14);margin-bottom:var(--sp-48)}
+.worked{display:flex;align-items:center;gap:10px;font-size:var(--fs-13);color:var(--text-subtle);margin-bottom:var(--sp-16)}
+.worked .i{color:var(--text-strong)}
+.worked button{display:flex;align-items:center;gap:4px;color:var(--text-subtle)}
+.worked button:hover{color:var(--text-strong)}
+.trace{display:none;border-left:1px solid var(--border);margin:-4px 0 var(--sp-16) 7px;padding-left:18px}
+.trace.on{display:block}
+.trace div{display:flex;align-items:center;gap:8px;font-size:var(--fs-12);color:var(--text-subtle);padding:3px 0}
+.trace code{font-family:var(--mono)}
+.answer{font-size:var(--fs-16);line-height:1.6;color:var(--text-default)}
+.answer strong{color:var(--text-strong);font-weight:var(--fw-medium)}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-16);margin:var(--sp-24) 0 var(--sp-48)}
+.metric{border:1px solid var(--border);border-radius:var(--r-12);padding:var(--sp-16) var(--sp-16) var(--sp-16);background:var(--bg-app)}
+.metric .k{font-size:var(--fs-13);color:var(--text-subtle)}
+.metric .v{display:flex;align-items:baseline;gap:8px;margin:8px 0 var(--sp-16)}
+.metric .v b{font-size:var(--fs-24);font-weight:var(--fw-medium);color:var(--text-strong);letter-spacing:-.01em}
+.metric .v code{font:var(--fs-13) var(--mono)}
+.neg{color:var(--danger)}.pos{color:var(--text-subtle)}
+.bars{display:flex;align-items:flex-end;gap:4px;height:56px}
+.bars i{flex:1;background:var(--accent);border-radius:var(--r-full);min-height:8px;transition:height .5s cubic-bezier(.2,.8,.2,1)}
+.bars i.low{opacity:.45}
+h3{font-size:var(--fs-16);font-weight:var(--fw-medium);color:var(--text-strong);margin-bottom:var(--sp-12)}
+.hl{padding-left:20px;font-size:var(--fs-14);line-height:1.6;color:var(--text-default)}
+.hl li{margin-bottom:var(--sp-8);padding-left:4px}
+.hl li::marker{color:var(--text-subtle)}
+.chip{display:inline-flex;align-items:center;gap:5px;vertical-align:-2px;padding:0 6px 0 4px;border-radius:var(--r-6);background:var(--accent-soft);color:var(--text-strong);font-size:var(--fs-13);line-height:22px}
+.chip .i{width:14px;height:14px;color:var(--accent)}
+.actions{display:flex;gap:4px;margin-top:var(--sp-16)}
+.composer-dock{padding:0 var(--sp-24) var(--sp-24);flex:none}
+.composer{max-width:760px;margin:0 auto;border:1px solid var(--border-strong);background:var(--bg-raised);border-radius:var(--r-12);padding:12px}
+.composer textarea{width:100%;resize:none;font-size:var(--fs-14);color:var(--text-strong);min-height:40px}
+.composer textarea::placeholder{color:var(--text-subtle)}
+.bar{display:flex;align-items:center;gap:4px}
+.pill{display:flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--border);border-radius:var(--r-full);font-size:var(--fs-12);color:var(--text-default)}
+.pill:hover{color:var(--text-strong);background:var(--bg-hover)}
+.send{margin-left:auto;width:28px;height:28px;border-radius:var(--r-full);background:var(--text-strong);color:var(--bg-app);display:grid;place-items:center}
+.send:disabled{background:var(--bg-selected);color:var(--text-subtle);cursor:default}
+.step{display:flex;align-items:center;gap:8px;font-size:var(--fs-13);color:var(--text-subtle);padding:3px 0}
+.empty{text-align:center;padding:120px 24px;color:var(--text-subtle)}
+.empty .i{width:24px;height:24px}
+.empty h2{font-size:var(--fs-18);font-weight:var(--fw-medium);color:var(--text-strong);margin:16px 0 4px}
+@media (max-width:1180px){.app{grid-template-columns:300px 1fr}.rpanel{display:none}}
+@media (max-width:860px){.app,.app.no-right{grid-template-columns:1fr}.app>aside{display:none}.metrics{grid-template-columns:1fr}}
+</style></head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+<symbol id="logo" viewBox="0 0 256 256"><g fill="currentColor" stroke="none"><path d="M18 70 A52 52 0 1 0 122 70 A52 52 0 1 0 18 70 Z"/><path d="M225 35.6 A52 52 0 1 0 225 104.4 A52 52 0 0 1 225 35.6 Z"/><path d="M90 138 A52 52 0 1 0 90 234 A52 52 0 0 1 90 138 Z"/><path fill-rule="evenodd" d="M134 186 A52 52 0 1 0 238 186 A52 52 0 1 0 134 186 Z M144 186 A42 42 0 1 1 228 186 A42 42 0 1 1 144 186 Z"/></g></symbol>
+<symbol id="search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></symbol>
+<symbol id="plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+<symbol id="plus-circle" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 5.5v5M5.5 8h5"/></symbol>
+<symbol id="folder" viewBox="0 0 16 16"><path d="M1.5 4.5a1 1 0 0 1 1-1h3.5l1.5 1.5h6a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></symbol>
+<symbol id="sparkle" viewBox="0 0 16 16"><path d="M6.5 2.5 7.6 5.9 11 7 7.6 8.1 6.5 11.5 5.4 8.1 2 7 5.4 5.9z"/><path d="M12.5 10v4M10.5 12h4"/></symbol>
+<symbol id="bot" viewBox="0 0 16 16"><rect x="2.5" y="5" width="11" height="8.5" rx="2"/><path d="M8 2.5V5M1 8.5v2M15 8.5v2M6 8.5v1.5M10 8.5v1.5"/></symbol>
+<symbol id="code" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6.5 6 4.5 8l2 2M9.5 6l2 2-2 2"/></symbol>
+<symbol id="pen" viewBox="0 0 16 16"><path d="M10.5 2.5 13.5 5.5 6 13H3v-3z"/><path d="M9 4l3 3"/></symbol>
+<symbol id="home" viewBox="0 0 16 16"><path d="M2.5 7 8 2.5 13.5 7v6a.5.5 0 0 1-.5.5H10v-4H6v4H3a.5.5 0 0 1-.5-.5z"/></symbol>
+<symbol id="grid" viewBox="0 0 16 16"><rect x="2" y="2" width="4.5" height="4.5" rx="1"/><rect x="9.5" y="2" width="4.5" height="4.5" rx="1"/><rect x="2" y="9.5" width="4.5" height="4.5" rx="1"/><path d="M11.75 9.5v4.5M9.5 11.75H14"/></symbol>
+<symbol id="layers" viewBox="0 0 16 16"><path d="M8 2 14 5 8 8 2 5z"/><path d="M2 8l6 3 6-3M2 11l6 3 6-3"/></symbol>
+<symbol id="plug" viewBox="0 0 16 16"><path d="M6 1.5v3M10 1.5v3M4 4.5h8v3a4 4 0 0 1-8 0zM8 11.5v3"/></symbol>
+<symbol id="check" viewBox="0 0 16 16"><path d="M3 8.5 6.5 12 13 4.5"/></symbol>
+<symbol id="terminal" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6l2 2-2 2M8.5 10.5h3"/></symbol>
+<symbol id="globe" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M1.5 8h13M8 1.5c1.8 1.9 2.6 4 2.6 6.5S9.8 12.6 8 14.5C6.2 12.6 5.4 10.5 5.4 8S6.2 3.4 8 1.5z"/></symbol>
+<symbol id="rocket" viewBox="0 0 16 16"><path d="M9.5 3c2-1.5 5-1.5 5-1.5s0 3-1.5 5L8 11.5 4.5 8z"/><path d="M4.5 8 2 7.5 4 5h3.5M8 11.5l.5 2.5 2.5-2V8.5M4 12l-2 2"/></symbol>
+<symbol id="commit" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5"/><path d="M1.5 8h4M10.5 8h4"/></symbol>
+<symbol id="cpu" viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1.5"/><path d="M6.5 1.5V4M9.5 1.5V4M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5"/></symbol>
+<symbol id="chevrons" viewBox="0 0 16 16"><path d="M5 6l3-3 3 3M5 10l3 3 3-3"/></symbol>
+<symbol id="chevron-down" viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></symbol>
+<symbol id="sidebar" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M5.5 2.5v11"/></symbol>
+<symbol id="sidebar-right" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10.5 2.5v11"/></symbol>
+<symbol id="doc" viewBox="0 0 16 16"><path d="M3.5 2.5a1 1 0 0 1 1-1h4.5l3.5 3.5v8.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1z"/><path d="M9 1.5V5h3.5"/></symbol>
+<symbol id="table" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M1.5 6h13M1.5 9.75h13M5.5 6v7.5"/></symbol>
+<symbol id="chart" viewBox="0 0 16 16"><path d="M1.5 13.5h13M3.5 13.5V8h2.5v5.5M6.75 13.5V3.5h2.5v10M10 13.5V6.5h2.5v7"/></symbol>
+<symbol id="bolt" viewBox="0 0 16 16"><path d="M9 1.5 3 9h4.5L7 14.5 13 7H8.5z"/></symbol>
+<symbol id="wand" viewBox="0 0 16 16"><path d="M2 14 10 6M11.5 1.5v2M11.5 6.5v2M8.5 4.5h2M12.5 4.5h2"/></symbol>
+<symbol id="book" viewBox="0 0 16 16"><path d="M2.5 12.5v-9a2 2 0 0 1 2-2h9v11h-9a2 2 0 0 0-2 2 2 2 0 0 0 2 2h9v-2"/></symbol>
+<symbol id="arrow-up" viewBox="0 0 16 16"><path d="M8 13V3M4 7l4-4 4 4"/></symbol>
+<symbol id="clip" viewBox="0 0 16 16"><path d="M13 7.5 8.2 12.3a3 3 0 0 1-4.3-4.2l5.4-5.4a2 2 0 0 1 2.8 2.8L6.7 10.9a1 1 0 0 1-1.4-1.4L9.8 5"/></symbol>
+<symbol id="clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5"/></symbol>
+<symbol id="sliders" viewBox="0 0 16 16"><path d="M1.5 4.5h8M12.5 4.5h2M1.5 11.5h2M6.5 11.5h8"/><circle cx="11" cy="4.5" r="1.5"/><circle cx="5" cy="11.5" r="1.5"/></symbol>
+<symbol id="asterisk" viewBox="0 0 16 16"><path d="M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2"/></symbol>
+<symbol id="more" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r=".6"/><circle cx="8" cy="8" r=".6"/><circle cx="12.5" cy="8" r=".6"/></symbol>
+<symbol id="copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="9" height="9" rx="1.5"/><path d="M10.5 5.5v-3a1 1 0 0 0-1-1h-7a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h3"/></symbol>
+<symbol id="stop" viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1.5"/></symbol>
+<symbol id="inbox" viewBox="0 0 16 16"><path d="M1.5 9.5 3.5 3a1 1 0 0 1 1-.5h7a1 1 0 0 1 1 .5l2 6.5v3a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/><path d="M1.5 9.5h4l1 1.5h3l1-1.5h4"/></symbol>
+<symbol id="moon" viewBox="0 0 16 16"><path d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7z"/></symbol>
+<symbol id="x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+<symbol id="branch" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="5.5" r="1.5"/><path d="M4.5 5v6M11.5 7c0 3-7 2-7 4"/></symbol>
+</svg>
+
+<div class="app">
+  <aside class="panel">
+    <div class="ws">
+      <button class="ws-btn"><span class="ws-logo"><svg><use href="#logo"/></svg></span>Umbrous<svg class="i"><use href="#chevrons"/></svg></button>
+      <button class="icon-btn" title="Search"><svg class="i"><use href="#search"/></svg></button>
+      <button class="icon-btn" title="Collapse sidebar"><svg class="i"><use href="#sidebar"/></svg></button>
+    </div>
+    <div class="side-scroll">
+      <button class="nav" data-new><svg class="i"><use href="#plus-circle"/></svg><span class="t">New chat</span><kbd>⌘N</kbd></button>
+      <button class="section" aria-expanded="true" data-sec="projects"><span>Projects</span><svg class="i chev"><use href="#chevron-down"/></svg><span class="add" title="New project" data-addproj><svg class="i"><use href="#plus"/></svg></span></button>
+      <div class="sec-body" id="sec-projects">
+        <button class="nav" data-main="empty" data-e="Umbrous core|folder"><svg class="i"><use href="#folder"/></svg><span class="t">Umbrous core</span><span class="n">12</span></button>
+        <button class="nav" data-main="empty" data-e="Eval harness|folder"><svg class="i"><use href="#folder"/></svg><span class="t">Eval harness</span><span class="n">5</span></button>
+        <button class="nav" data-main="empty" data-e="Docs site|folder"><svg class="i"><use href="#folder"/></svg><span class="t">Docs site</span><span class="n">3</span></button>
+      </div>
+      <button class="section" aria-expanded="true" data-sec="sessions"><span>Sessions</span><svg class="i chev"><use href="#chevron-down"/></svg></button>
+      <div class="sec-body" id="sec-sessions">
+        <button class="nav unread" aria-current="true" data-main="thread"><span class="t">Why the pass rate dropped</span><span class="dot"></span></button>
+        <button class="nav" data-main="thread"><span class="t">Draft the 0.4 changelog</span><span class="n">2h</span></button>
+        <button class="nav" data-main="thread"><span class="t">Fix tool router timeout</span><span class="n">5h</span></button>
+        <button class="nav" data-main="thread"><span class="t">Design a tool approval flow</span><span class="n">1d</span></button>
+        <button class="nav" data-main="thread"><span class="t">Summarize nightly eval</span><span class="n">2d</span></button>
+        <button class="nav" data-main="thread"><span class="t">Clean up sandbox logs</span><span class="n">3d</span></button>
+      </div>
+    </div>
+  </aside>
+
+  <section class="panel">
+    <div class="head"><svg class="i"><use href="#plus-circle"/></svg><h1 id="title">Why the pass rate dropped</h1><span class="sp"></span><button class="icon-btn" title="Options"><svg class="i fill-dots"><use href="#more"/></svg></button><button class="icon-btn" id="rtoggle" title="Toggle details" aria-pressed="true"><svg class="i"><use href="#sidebar-right"/></svg></button></div>
+    <div class="scroll" id="scroll">
+      <div class="thread" id="thread">
+        <div class="msg-u">Why did the eval pass rate drop last week?</div>
+        <div class="worked"><svg class="i"><use href="#asterisk"/></svg><button id="trace-btn">Worked for 34s<svg class="i"><use href="#chevron-down"/></svg></button></div>
+        <div class="trace" id="trace">
+          <div><svg class="i"><use href="#search"/></svg>Queried <code>evals/runs</code> for the last 14 days</div>
+          <div><svg class="i"><use href="#table"/></svg>Compared 2,418 runs by task type</div>
+          <div><svg class="i"><use href="#branch"/></svg>Matched the drop to commit <code>a41f9c2</code></div>
+        </div>
+        <p class="answer">The pass rate fell <strong>6.5 points</strong> because tool router v2 made web search time out after 8s. Long research tasks fail there.</p>
+        <div class="metrics">
+          <div class="metric"><div class="k">Web tasks</div><div class="v"><b>61.2%</b><code class="neg">−10.8 pts</code></div><div class="bars" data-b="7,5,8,6,5,8,8,8,5,6,8,7,8,8,7,7,6,4,3,2"></div></div>
+          <div class="metric"><div class="k">Code tasks</div><div class="v"><b>84.1%</b><code class="pos">+0.4 pts</code></div><div class="bars" data-b="7,5,8,6,5,8,8,6,7,8,7,8,8,7,8,7,8,8,7,8"></div></div>
+        </div>
+        <h3>Highlights</h3>
+        <ul class="hl">
+          <li>The drop starts when <span class="chip"><svg class="i"><use href="#branch"/></svg>tool router v2</span> reaches 100% of runs on Oct 28.</li>
+          <li>Step 3 “fetch sources” fails 14 points more often in v2 than v1.</li>
+          <li>Research tasks are 62% of web runs. Their pass rate fell the most.</li>
+        </ul>
+        <div class="actions">
+          <button class="pill"><svg class="i"><use href="#branch"/></svg>Open fix as PR</button>
+          <button class="pill"><svg class="i"><use href="#terminal"/></svg>Rerun eval</button>
+          <button class="icon-btn" title="Copy"><svg class="i"><use href="#copy"/></svg></button>
+        </div>
+      </div>
+      <div class="empty" id="empty" hidden><svg class="i" id="e-icon"><use href="#terminal"/></svg><h2 id="e-title">Runs</h2><p>Prototype placeholder. Nothing here yet.</p></div>
+    </div>
+    <div class="composer-dock">
+      <form class="composer" id="composer">
+        <textarea id="input" rows="2" placeholder="Ask a follow-up…"></textarea>
+        <div class="bar">
+          <button type="button" class="icon-btn" title="Attach"><svg class="i"><use href="#clip"/></svg></button>
+          <button type="button" class="pill"><svg class="i"><use href="#cpu"/></svg>umbra-large<svg class="i"><use href="#chevron-down"/></svg></button>
+          <button type="button" class="pill"><svg class="i"><use href="#sliders"/></svg>Tools · 4</button>
+          <button class="send" id="send" disabled title="Send"><svg class="i"><use href="#arrow-up"/></svg></button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <aside class="panel rpanel" id="rpanel">
+    <div class="rhead"><h2>Details</h2><button class="icon-btn" title="Close" data-rclose><svg class="i"><use href="#sidebar-right"/></svg></button></div>
+    <div class="rbody">
+      <div class="rsec">
+        <h4>Session</h4>
+        <div class="kv"><span class="k">Model</span><span class="v">umbra-large</span></div>
+        <div class="kv"><span class="k">Runs on</span><span class="v"><span class="dot"></span>Local</span></div>
+        <div class="kv"><span class="k">Project</span><span class="v"><svg class="i"><use href="#folder"/></svg>Eval harness</span></div>
+        <div class="kv" style="height:auto;padding-top:6px;display:block"><div style="display:flex;justify-content:space-between;font-size:var(--fs-12);color:var(--text-subtle)"><span>Context</span><span>48k / 128k</span></div><div class="ctx"><i></i></div></div>
+      </div>
+      <div class="rsec">
+        <h4>Tools</h4>
+        <div class="row"><svg class="i"><use href="#terminal"/></svg><span class="t">Terminal</span><button class="tg" role="switch" aria-checked="true"></button></div>
+        <div class="row"><svg class="i"><use href="#globe"/></svg><span class="t">Web search</span><button class="tg" role="switch" aria-checked="true"></button></div>
+        <div class="row"><svg class="i"><use href="#doc"/></svg><span class="t">Files</span><button class="tg" role="switch" aria-checked="true"></button></div>
+        <div class="row"><svg class="i"><use href="#branch"/></svg><span class="t">Git</span><button class="tg" role="switch" aria-checked="true"></button></div>
+      </div>
+      <div class="rsec">
+        <h4>Files</h4>
+        <div class="row"><svg class="i"><use href="#doc"/></svg><span class="t">router/timeout.ts</span><code><span class="add">+6</span> <span class="del">−2</span></code></div>
+        <div class="row"><svg class="i"><use href="#table"/></svg><span class="t">evals/runs.csv</span><code>read</code></div>
+        <div class="row"><svg class="i"><use href="#doc"/></svg><span class="t">CHANGELOG.md</span><code>read</code></div>
+      </div>
+      <div class="rsec">
+        <h4>Steps</h4>
+        <div class="row"><svg class="i"><use href="#search"/></svg><span class="t">Queried eval runs</span><code>4s</code></div>
+        <div class="row"><svg class="i"><use href="#table"/></svg><span class="t">Compared by task type</span><code>11s</code></div>
+        <div class="row"><svg class="i"><use href="#branch"/></svg><span class="t">Matched to a41f9c2</span><code>19s</code></div>
+      </div>
+    </div>
+  </aside>
+</div>
+<script>
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+const icon=n=>`<svg class="i"><use href="#${n}"/></svg>`;
+// bars
+$$('.bars').forEach(b=>{const v=b.dataset.b.split(',').map(Number);b.innerHTML=v.map(()=>'<i style="height:8px"></i>').join('');
+  requestAnimationFrame(()=>setTimeout(()=>[...b.children].forEach((e,i)=>{e.style.height=(v[i]/8*100)+'%';if(v[i]<=4)e.classList.add('low')}),60))});
+$('#trace-btn').onclick=()=>$('#trace').classList.toggle('on');
+// right panel
+const setRight=o=>{document.querySelector('.app').classList.toggle('no-right',!o);$('#rtoggle').setAttribute('aria-pressed',o)};
+$('#rtoggle').onclick=()=>setRight(document.querySelector('.app').classList.contains('no-right'));
+$('[data-rclose]').onclick=()=>setRight(false);
+$$('.tg').forEach(t=>t.onclick=()=>t.setAttribute('aria-checked',t.getAttribute('aria-checked')!='true'));
+// sections
+$$('.section').forEach(b=>b.onclick=e=>{if(e.target.closest('[data-addproj]'))return;const o=b.getAttribute('aria-expanded')=='true';b.setAttribute('aria-expanded',!o);$('#sec-'+b.dataset.sec).hidden=o});
+// nav
+document.addEventListener('click',e=>{const n=e.target.closest('.nav');if(!n||n.hasAttribute('data-new'))return;
+  $$('.nav').forEach(x=>x.removeAttribute('aria-current'));n.setAttribute('aria-current','true');n.classList.remove('unread');n.querySelector('.dot')?.remove();
+  if(n.dataset.main=='thread'){$('#thread').hidden=false;$('#empty').hidden=true;$('#title').textContent=n.querySelector('.t').textContent}
+  else{const [t,ic]=n.dataset.e.split('|');$('#thread').hidden=true;$('#empty').hidden=false;$('#e-title').textContent=t;$('#e-icon').innerHTML=`<use href="#${ic}"/>`;$('#title').textContent=t}
+});
+$('[data-new]').onclick=()=>{$$('.nav').forEach(x=>x.removeAttribute('aria-current'));$('[data-new]').setAttribute('aria-current','true');$('#thread').innerHTML='';$('#thread').hidden=false;$('#empty').hidden=true;$('#title').textContent='New chat';$('#input').placeholder='What should Umbrous do?';$('#input').focus()};
+// composer
+const input=$('#input'),send=$('#send');
+input.addEventListener('input',()=>send.disabled=!input.value.trim());
+input.addEventListener('keydown',e=>{if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();$('#composer').requestSubmit()}});
+$('#composer').onsubmit=e=>{e.preventDefault();const q=input.value.trim();if(!q)return;const t=$('#thread');
+  t.insertAdjacentHTML('beforeend','<div class="msg-u" style="margin-top:48px"></div>');t.lastElementChild.textContent=q;input.value='';send.disabled=true;
+  t.insertAdjacentHTML('beforeend',`<div class="worked">${icon('asterisk')}<span id="w">Working…</span></div><div id="live"></div>`);
+  const live=$('#live'),steps=[['search','Reading workspace'],['terminal','Running in sandbox'],['check','Checking result']];let s=0;const t0=Date.now();
+  steps.forEach((x,i)=>setTimeout(()=>live.insertAdjacentHTML('beforeend',`<div class="step">${icon(x[0])}${x[1]}…</div>`),i*600));
+  setTimeout(()=>{live.outerHTML='<p class="answer">This is a front-end prototype, so no agent ran. In the real app the answer and result cards stream in here.</p>';$('#w').textContent='Worked for 2s';$('#w').removeAttribute('id');$('#scroll').scrollTop=1e6},2100);
+  $('#scroll').scrollTop=1e6;};
+</script>
+</body></html>

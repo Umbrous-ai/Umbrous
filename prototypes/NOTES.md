@@ -1,0 +1,32 @@
+# Umbrous agent harness (front-end prototype)
+
+Open `umbrous-harness.html` in a browser. It is self-contained (no build, no network).
+
+Layout: floating sidebar and main panels. The sidebar has the workspace switcher, **New chat**, a collapsible **Projects** dropdown, and a collapsible **Sessions** list. The main panel is a chat with result cards. Sending a message plays a fake agent run.
+
+## How your tokens were mapped to dark
+
+| Your token (light) | Dark value used | Note |
+|---|---|---|
+| text subtle `#7F7F7F` | `#7F7F7F` | Mid gray reads fine on both themes |
+| text default `#5D5D5D` | `#B5B5B5` | Inverted |
+| text strong `#292929` | `#F2F2F2` | Inverted |
+| bg-selected `#F5F5F5` | `#292929` | Inverted |
+| border `#F2F2F2` | `#2A2A2A` | Inverted |
+
+Your light values are kept as `--light-*` variables in the CSS for a future light theme.
+
+## Things the spec was missing (placeholders I picked)
+
+- **Backgrounds**: canvas `#141414`, app `#1B1B1B`, raised/cards `#222222`, hover `#232323` (sampled from reference 1).
+- **Accent**: violet `#8B7CF6` (badges, unread dots, charts). Swap for your brand color.
+- **Status colors**: danger `#F26D6D`, success `#5CCB8A`, warning `#F2C14E`.
+- **Radius**: 4 / 6 / 8 / 12 / full.
+- **Spacing**: 4 / 8 / 12 / 16 / 24 / 32 / 48.
+- **Mono font**: SF Mono, for commands and code.
+- **Line height**: 1.5 for UI text, 1.6 for chat answers.
+
+## Fonts and icons
+
+- SF Pro via the system font stack, so it renders as SF Pro on a Mac. Only weights 400 and 500 are used.
+- Icons are hand-drawn Nucleo-style outlines on a 16px grid at a 1px stroke. Nucleo is a paid set, so swap them for your licensed files; the names are in the SVG sprite at the top of each file.
