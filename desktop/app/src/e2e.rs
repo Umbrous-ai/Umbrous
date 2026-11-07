@@ -160,6 +160,55 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             wait_until(cx, window, 10, "project added", move |ws| ws.projects.iter().any(|p| p.name == n)).await?;
             sleep(cx, 300).await;
         }
+        "select_model" => {
+            let name = arg.to_string();
+            wait_until(cx, window, 15, "models", |ws| ws.models.is_some()).await?;
+            window.update(cx, |ws, _, cx| { ws.model = Some(name.clone()); cx.notify(); }).ok();
+        }
+        "open_chat_nowait" => {
+            // click a chat and do not wait for it (to race it against the next step)
+            wait_until(cx, window, 10, "chat listed", |ws| ws.chats.iter().any(|c| c.title.contains(arg))).await?;
+            let id = window.update(cx, |ws, _, _| ws.chats.iter().find(|c| c.title.contains(arg)).map(|c| c.id.clone())).ok().flatten().ok_or("no such chat")?;
+            window.update(cx, |ws, _, cx| ws.open_chat(id, cx)).ok();
+        }
+        "wait_streaming" => {
+            // until the reply has visible text and is still streaming
+            wait_until(cx, window, 120, "streaming text", |ws| {
+                ws.is_running() && ws.msgs.last().map(|m| m.streaming && m.text.len() > 20).unwrap_or(false)
+            }).await?;
+        }
+        "wait_idle" => {
+            wait_until(cx, window, arg.parse().unwrap_or(60), "no reply running", |ws| !ws.is_running()).await?;
+        }
+        "expect" => {
+            let (what, val) = arg.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((arg, ""));
+            let got: String = window.update(cx, |ws, _, _| match what {
+                "messages" => ws.msgs.len().to_string(),
+                "chat" => ws.chat.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "none".into()),
+                "running" => ws.is_running().to_string(),
+                "last_meta" => ws.msgs.last().map(|m| m.meta.clone()).unwrap_or_default(),
+                "last_text_len_over" => (ws.msgs.last().map(|m| m.text.len()).unwrap_or(0) > val.parse::<usize>().unwrap_or(0)).to_string(),
+                "phase" => match &ws.phase { Phase::Ready => "ready".into(), Phase::Starting => "starting".into(), Phase::Failed(f) => f.code.clone() },
+                "sessions" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),
+                _ => "?".into(),
+            }).map_err(|_| "window gone".to_string())?;
+            let ok = match what {
+                "chat" if val != "none" => got.contains(val),
+                "last_meta" | "sessions" => got.contains(val),
+                "last_text_len_over" => got == "true",
+                _ => got == val,
+            };
+            return Ok(Some(if ok { json!({"expect": arg, "ok": true}) } else { json!({"step": format!("expect {arg}"), "error": format!("got {got:?}")}) }));
+        }
+        "hover" => {
+            // move the pointer (window points from the top left) so hover styles can be
+            // screenshotted: an NSMouseMoved event sent to our own window, in-process.
+            let mut it = arg.split_whitespace().map(|v| v.parse::<f64>().unwrap_or(0.));
+            let (x, y) = (it.next().unwrap_or(0.), it.next().unwrap_or(0.));
+            mouse_moved(x, y);
+            sleep(cx, 50).await;
+            next_frame(window, cx).await;
+        }
         "kill_backend" => {
             let pid = window.update(cx, |ws, _, _| ws.backend.pid()).ok().flatten().ok_or("no backend")?;
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };
@@ -274,5 +323,32 @@ pub fn screenshot(path: &str) -> Result<(), String> {
         CFRelease(url);
         CFRelease(img);
         if ok { Ok(()) } else { Err("png write failed".into()) }
+    }
+}
+
+fn mouse_moved(x: f64, y_from_top: f64) {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NSPoint { x: f64, y: f64 }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NSRect { x: f64, y: f64, w: f64, h: f64 }
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let windows: *mut Object = msg_send![app, windows];
+        let win: *mut Object = msg_send![windows, firstObject];
+        if win.is_null() { return; }
+        let view: *mut Object = msg_send![win, contentView];
+        let frame: NSRect = msg_send![view, frame];
+        let num: isize = msg_send![win, windowNumber];
+        let p = NSPoint { x, y: frame.h - y_from_top };
+        let ev: *mut Object = msg_send![class!(NSEvent), mouseEventWithType: 5u64 /* NSEventTypeMouseMoved */
+            location: p modifierFlags: 0u64 timestamp: 0f64 windowNumber: num context: std::ptr::null::<Object>()
+            eventNumber: 0isize clickCount: 0isize pressure: 0f32];
+        if !ev.is_null() {
+            let _: () = msg_send![win, sendEvent: ev];
+        }
     }
 }

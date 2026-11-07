@@ -261,7 +261,10 @@ impl Backend {
         thread::Builder::new().name("backend-deadline".into()).spawn(move || {
             thread::sleep(STARTUP_TIMEOUT);
             let mut inner = me.inner.lock().unwrap();
-            if inner.generation != generation || inner.ready || inner.shutting_down {
+            // Only if nothing else happened: not ready, not reported, not exited, not quitting.
+            if inner.generation != generation || inner.ready || inner.shutting_down || inner.reported_error
+                || inner.running.is_none()
+            {
                 return;
             }
             inner.reported_error = true;

@@ -1,7 +1,7 @@
 //! Small building blocks matching the original interface's CSS classes
 //! (prototypes/umbrous-harness.html). Each helper names the class it mirrors.
 
-use gpui::{div, prelude::*, px, radians, svg, Div, Hsla, Stateful, Svg, Transformation};
+use gpui::{div, prelude::*, px, radians, svg, Div, Hsla, SharedString, Stateful, Svg, Transformation};
 
 use crate::theme::*;
 
@@ -20,11 +20,22 @@ pub fn chevron(open: bool) -> Svg {
     if open { s } else { s.with_transformation(Transformation::rotate(radians(-std::f32::consts::FRAC_PI_2))) }
 }
 
-/// `.icon-btn`: 28×28, radius 6, subtle; hover raises the colour.
-pub fn icon_btn(id: impl Into<gpui::ElementId>, name: &str, pressed: bool) -> Stateful<Div> {
+/// An icon that follows its row's colour: `color` normally, `hover` while the
+/// pointer is over the element that declared `group` (CSS: the icon inherits
+/// `currentColor`, which `:hover` changes; GPUI icons take an explicit colour).
+pub fn hover_icon(name: &str, group: &SharedString, color: impl Into<Hsla>, hover: impl Into<Hsla>) -> Svg {
+    let hover: Hsla = hover.into();
+    icon(name).text_color(color.into()).group_hover(group.clone(), move |s| s.text_color(hover))
+}
+
+/// `.icon-btn`: 28×28, radius 6, subtle; `:hover` hover background and strong
+/// colour; `[aria-pressed=true]` selected background and strong colour, also on hover.
+pub fn icon_btn(id: &'static str, name: &str, pressed: bool) -> Stateful<Div> {
     let color: Hsla = if pressed { text_strong().into() } else { text_subtle().into() };
+    let group = SharedString::from(id);
     div()
         .id(id)
+        .group(group.clone())
         .size(px(28.))
         .flex_none()
         .flex()
@@ -34,14 +45,17 @@ pub fn icon_btn(id: impl Into<gpui::ElementId>, name: &str, pressed: bool) -> St
         .cursor_pointer()
         .text_color(color)
         .when(pressed, |d| d.bg(bg_selected()))
-        .hover(|s| s.bg(bg_hover()).text_color(text_strong()))
-        .child(icon(name).text_color(color))
+        .hover(move |s| s.bg(if pressed { bg_selected() } else { bg_hover() }).text_color(text_strong()))
+        .child(hover_icon(name, &group, color, text_strong()))
 }
 
-/// `.nav`: 36px row, padding 0 10, gap 10, radius 8, 14px.
-pub fn nav(id: impl Into<gpui::ElementId>, current: bool) -> Stateful<Div> {
+/// `.nav`: 36px row, padding 0 10, gap 10, radius 8, 14px. Its id is also its
+/// hover group, so icons inside can use `hover_icon(…, &id, …)`.
+pub fn nav(id: impl Into<SharedString>, current: bool) -> Stateful<Div> {
+    let id: SharedString = id.into();
     div()
-        .id(id)
+        .id(gpui::ElementId::Name(id.clone()))
+        .group(id)
         .flex()
         .items_center()
         .gap(px(10.))
@@ -66,10 +80,12 @@ pub fn nav_count(text: impl Into<gpui::SharedString>) -> Div {
     div().flex_none().text_size(fs_12()).text_color(text_subtle()).font_weight(gpui::FontWeight::NORMAL).child(text.into())
 }
 
-/// `.pill`: 28px, padding 0 10, full radius, 12px, default colour.
-pub fn pill(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
+/// `.pill`: 28px, padding 0 10, full radius, 12px, default colour; `:hover`
+/// hover background and strong colour. Icons inside: `hover_icon(…, &"<id>".into(), …)`.
+pub fn pill(id: &'static str) -> Stateful<Div> {
     div()
         .id(id)
+        .group(id)
         .flex()
         .items_center()
         .gap(px(6.))

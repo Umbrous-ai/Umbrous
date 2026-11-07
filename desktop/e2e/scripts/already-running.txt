@@ -1,0 +1,8 @@
+# A runtime started from a terminal owns the data: the app must say so, keep
+# saying so (the 45 s startup deadline must not replace it), and leave it alone.
+wait_failed 30
+expect phase already_running
+sleep 50000
+expect phase already_running
+record end
+quit

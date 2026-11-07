@@ -168,6 +168,15 @@ struct Started(backend::Backend, futures::channel::mpsc::UnboundedSender<backend
                futures::channel::mpsc::UnboundedReceiver<backend::BackendEvent>);
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        // Location and the start of the message only: a message can quote text.
+        let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        let msg: String = msg.split('`').next().unwrap_or("").chars().take(120).collect();
+        let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        logfile::event("app.panic", &[("at", at), ("message", msg)]);
+    }));
     let _lock = single_instance();
     logfile::event("app.started", &[("version", VERSION.to_string())]);
     // Start Python first: it boots in parallel with GPUI's window and Metal setup.

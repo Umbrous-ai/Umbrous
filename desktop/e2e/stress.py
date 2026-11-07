@@ -78,7 +78,11 @@ def seed_reference(home: Path) -> None:
 
 def fake_ollama(port: int, empty: bool = False) -> None:
     from tests.fake_ollama import FakeModel, FakeOllama
-    models = [] if empty else [FakeModel("stress:1b", reply=big_markdown(100), chunk_delay=0.0005)]
+    models = [] if empty else [
+        FakeModel("stress:1b", reply=big_markdown(100), chunk_delay=0.0005),
+        # streams for ~30 s: time to switch chats, projects or archive mid-reply
+        FakeModel("slow:1b", reply=big_markdown(20), chunk_delay=0.01),
+    ]
     fake = FakeOllama(port=port, models=models).start()
     print(f"fake Ollama on 127.0.0.1:{fake.port}", flush=True)
     threading.Event().wait()

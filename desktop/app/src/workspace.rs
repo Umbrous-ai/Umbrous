@@ -36,6 +36,10 @@ pub enum Phase {
 }
 
 struct Run {
+    /// unique per send; stream events carry it, and only the current run's are applied
+    token: u64,
+    /// index of the reply message in `msgs` (valid while `view` is unchanged)
+    msg_ix: usize,
     chat_id: String,
     run_id: Option<String>,
     stop: Arc<AtomicBool>,
@@ -84,6 +88,18 @@ pub struct Workspace {
     focus: FocusHandle,
     parse_in_flight: bool,
     loading_chat: bool,
+    /// Bumped whenever the transcript is replaced (new chat, open chat, other project).
+    /// Every stream, parse and transcript response remembers the view it was made
+    /// for and is dropped if the view has changed since: this is what keeps a
+    /// late reply from writing into another chat.
+    view: u64,
+    /// The chat a still-loading `open_chat` is for (a second click is ignored).
+    opening: Option<String>,
+    run_seq: u64,
+    /// newest request per list; older responses are dropped
+    projects_seq: u64,
+    chats_seq: u64,
+    models_seq: u64,
     pub started: Instant,
     logged_first_frame: bool,
     window_active: bool,
@@ -209,6 +225,12 @@ impl Workspace {
             focus: cx.focus_handle(),
             parse_in_flight: false,
             loading_chat: false,
+            view: 0,
+            opening: None,
+            run_seq: 0,
+            projects_seq: 0,
+            chats_seq: 0,
+            models_seq: 0,
             started: Instant::now(),
             logged_first_frame: false,
             window_active: true,
@@ -314,7 +336,12 @@ impl Workspace {
 
     // ---------- projects and chats ----------
     pub fn load_projects(&mut self, select: Option<String>, cx: &mut Context<Self>) {
+        self.projects_seq += 1;
+        let seq = self.projects_seq;
         self.api_call(cx, |api| api.get::<api::Projects>("/api/projects"), move |this, r, cx| {
+            if seq != this.projects_seq {
+                return; // a newer request is on its way
+            }
             if let Ok(p) = r {
                 this.projects = p.projects;
                 let keep = select.or(this.project_id.clone()).filter(|id| this.projects.iter().any(|p| &p.id == id));
@@ -330,6 +357,9 @@ impl Workspace {
     pub fn load_chats(&mut self, cx: &mut Context<Self>) {
         let Some(pid) = self.project_id.clone() else { return };
         let show_archived = self.show_archived;
+        self.chats_seq += 1;
+        let seq = self.chats_seq;
+        let for_project = pid.clone();
         self.api_call(
             cx,
             move |api| {
@@ -341,7 +371,11 @@ impl Workspace {
                 };
                 Ok((active.chats, archived))
             },
-            |this, r, _| {
+            move |this, r, _| {
+                // drop it if another project was selected or a newer list was asked for
+                if seq != this.chats_seq || this.project_id.as_deref() != Some(for_project.as_str()) {
+                    return;
+                }
                 if let Ok((a, b)) = r {
                     // keep the open chat's title and state in step with the list
                     if let Some(cur) = this.chat.as_mut() {
@@ -365,8 +399,35 @@ impl Workspace {
         }
     }
 
+    /// Replace the transcript: stop following any reply that is streaming (the
+    /// runtime saves what arrived as "stopped"), and invalidate every pending
+    /// stream, parse or transcript response made for the old view.
+    fn begin_view(&mut self, cx: &mut Context<Self>) -> u64 {
+        self.detach_run(cx);
+        self.view += 1;
+        self.parse_in_flight = false;
+        self.opening = None;
+        self.loading_chat = false;
+        self.selection = Selection::default();
+        self.options_menu = false;
+        self.view
+    }
+
+    /// Stop a running reply and forget it. Its stream thread ends at its next
+    /// event, which closes the connection; the runtime then stops the model
+    /// and keeps the partial reply.
+    fn detach_run(&mut self, cx: &mut Context<Self>) {
+        if let Some(run) = self.run.take() {
+            run.stop.store(true, Ordering::SeqCst);
+            if let Some(run_id) = run.run_id.clone() {
+                self.api_call(cx, move |api| api.post::<Value>("/api/chat/cancel", json!({ "run_id": run_id })), |_, _, _| {});
+            }
+            logfile::event("ui.run_detached", &[]);
+        }
+    }
+
     pub fn new_chat(&mut self, cx: &mut Context<Self>) {
-        self.stop_reply(cx);
+        self.begin_view(cx);
         self.chat = None;
         self.context = None;
         self.msgs.clear();
@@ -379,12 +440,17 @@ impl Workspace {
     }
 
     pub fn open_chat(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.chat.as_ref().map(|c| c.id == id).unwrap_or(false) {
+        self.open_chat_inner(id, false, cx)
+    }
+
+    fn open_chat_inner(&mut self, id: String, force: bool, cx: &mut Context<Self>) {
+        let showing = self.chat.as_ref().map(|c| c.id == id).unwrap_or(false) && self.run.is_none();
+        if !force && (showing || self.opening.as_deref() == Some(id.as_str())) {
             return;
         }
-        self.stop_reply(cx);
+        let view = self.begin_view(cx);
+        self.opening = Some(id.clone());
         self.loading_chat = true;
-        self.options_menu = false;
         let t0 = Instant::now();
         // fetch and parse every message off the UI thread
         self.api_call(
@@ -395,7 +461,11 @@ impl Workspace {
                 Ok((t.chat, msgs))
             },
             move |this, r, cx| {
+                if view != this.view {
+                    return; // you went somewhere else meanwhile
+                }
                 this.loading_chat = false;
+                this.opening = None;
                 match r {
                     Ok((chat, msgs)) => {
                         let archived = chat.archived;
@@ -437,9 +507,11 @@ impl Workspace {
             },
             move |this, r, cx| match r {
                 Ok(one) => {
-                    let archived = one.chat.archived;
-                    this.chat = Some(one.chat);
-                    this.composer.update(cx, |c, cx| c.set_disabled(archived, cx));
+                    if this.chat.as_ref().map(|c| c.id == one.chat.id).unwrap_or(false) {
+                        let archived = one.chat.archived;
+                        this.chat = Some(one.chat);
+                        this.composer.update(cx, |c, cx| c.set_disabled(archived, cx));
+                    }
                     this.load_projects(None, cx);
                 }
                 Err(e) => this.notice = Some((e.message, MetaKind::Bad, false)),
@@ -476,7 +548,12 @@ impl Workspace {
 
     // ---------- models ----------
     pub fn load_models(&mut self, open_menu: bool, cx: &mut Context<Self>) {
+        self.models_seq += 1;
+        let seq = self.models_seq;
         self.api_call(cx, |api| api.get::<api::Models>("/api/models"), move |this, r, _| {
+            if seq != this.models_seq {
+                return;
+            }
             let m = r.unwrap_or_else(|e| api::Models { reachable: false, version: None, error: Some(e.message), models: vec![] });
             if !m.reachable {
                 this.notice = Some((m.error.clone().unwrap_or_else(|| "Ollama is not running.".into()), MetaKind::Warn, true));
@@ -521,6 +598,7 @@ impl Workspace {
         let model = self.model.clone().unwrap();
         let project_id = self.project_id.clone().unwrap_or_else(|| "prj_general".into());
         let existing = self.chat.as_ref().map(|c| c.id.clone());
+        let existing_for_ui = existing.clone();
         self.composer.update(cx, |c, cx| c.set_text("", cx));
         self.notice = None;
         // show the message and an empty reply at once; the runtime saves both together
@@ -547,7 +625,9 @@ impl Workspace {
         self.append_rows(n);
         self.append_rows(n + 1);
         let stop = Arc::new(AtomicBool::new(false));
-        self.run = Some(Run { chat_id: existing.clone().unwrap_or_default(), run_id: None, stop: stop.clone() });
+        self.run_seq += 1;
+        let token = self.run_seq;
+        self.run = Some(Run { token, msg_ix: n + 1, chat_id: existing.clone().unwrap_or_default(), run_id: None, stop: stop.clone() });
         cx.notify();
 
         let Some(api) = self.api.clone() else { return };
@@ -582,6 +662,7 @@ impl Workspace {
             .expect("thread");
 
         // Apply events in batches: wait for one, take everything queued, then pause ~33 ms.
+        let mut stream_chat = existing_for_ui;
         cx.spawn(async move |this, cx| {
             loop {
                 let Some(first) = rx.next().await else { break };
@@ -590,7 +671,24 @@ impl Workspace {
                     batch.push(more);
                 }
                 let ended = batch.iter().any(|m| matches!(m, StreamMsg::Ended(_)));
-                if this.update(cx, |this, cx| this.apply_stream(batch, cx)).is_err() || ended {
+                for m in &batch {
+                    if let StreamMsg::Event(ev) = m {
+                        if let Some(id) = ev.pointer("/chat/id").and_then(Value::as_str) {
+                            stream_chat = Some(id.to_string());
+                        }
+                    }
+                }
+                let chat_of_run = stream_chat.clone();
+                let applied = this.update(cx, |this, cx| {
+                    if this.run.as_ref().map(|r| r.token) == Some(token) {
+                        this.apply_stream(batch, cx);
+                    } else if ended {
+                        // A reply you left. The runtime has saved what arrived; refresh
+                        // the lists, and the transcript if you are looking at that chat.
+                        this.stale_run_ended(chat_of_run, cx);
+                    }
+                });
+                if applied.is_err() || ended {
                     break;
                 }
                 cx.background_executor().timer(STREAM_BATCH).await;
@@ -602,7 +700,7 @@ impl Workspace {
     fn apply_stream(&mut self, batch: Vec<StreamMsg>, cx: &mut Context<Self>) {
         let t0 = Instant::now();
         self.perf.stream_batches += 1;
-        let ix = self.msgs.len().saturating_sub(1);
+        let Some(ix) = self.run.as_ref().map(|r| r.msg_ix).filter(|&ix| ix < self.msgs.len()) else { return };
         let mut ended = false;
         let mut refresh_lists = false;
         for m in batch {
@@ -610,7 +708,7 @@ impl Workspace {
                 StreamMsg::Event(ev) => {
                     self.perf.stream_events += 1;
                     let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
-                    let msg = &mut self.msgs[ix];
+                    let Some(msg) = self.msgs.get_mut(ix) else { return };
                     match ty {
                         "chat_created" => {
                             if let Ok(c) = serde_json::from_value::<api::ChatInfo>(ev["chat"].clone()) {
@@ -670,7 +768,7 @@ impl Workspace {
                 }
                 StreamMsg::Ended(err) => {
                     ended = true;
-                    let msg = &mut self.msgs[ix];
+                    let Some(msg) = self.msgs.get_mut(ix) else { return };
                     if let Some(e) = err {
                         if msg.meta.ends_with('…') {
                             msg.meta = e.message;
@@ -716,6 +814,7 @@ impl Workspace {
             return;
         }
         self.parse_in_flight = true;
+        let view = self.view;
         let text = m.text.clone();
         let task = cx.background_spawn(async move {
             let t = Instant::now();
@@ -725,6 +824,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let (blocks, len, ms) = task.await;
             this.update(cx, |this, cx| {
+                if view != this.view {
+                    return; // parsed for a transcript that has been replaced
+                }
                 this.parse_in_flight = false;
                 this.perf.parse_runs += 1;
                 this.perf.parse_ms_total += ms;
@@ -744,6 +846,20 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    fn stale_run_ended(&mut self, run_chat: Option<String>, cx: &mut Context<Self>) {
+        self.load_projects(None, cx);
+        let showing = self.chat.as_ref().map(|c| c.id.clone());
+        if run_chat.is_some() && showing == run_chat && self.run.is_none() && !self.loading_chat {
+            // you came back to that chat while its stopped reply was being saved
+            self.open_chat_inner(showing.unwrap(), true, cx);
+        }
+    }
+
+    #[cfg(feature = "e2e")]
+    pub fn is_running(&self) -> bool {
+        self.run.is_some()
     }
 
     pub fn stop_reply(&mut self, cx: &mut Context<Self>) {
@@ -915,10 +1031,11 @@ impl Workspace {
         for p in &self.projects {
             let current = self.project_id.as_deref() == Some(&p.id);
             let id = p.id.clone();
+            let row_id = SharedString::from(format!("p-{}", p.id));
             projects = projects.child(
-                ui::nav(SharedString::from(format!("p-{}", p.id)), current)
+                ui::nav(row_id.clone(), current)
                     .font_weight(FontWeight::NORMAL)
-                    .child(ui::icon("folder").text_color(if current { text_strong() } else { text_default() }))
+                    .child(ui::hover_icon("folder", &row_id, if current { text_strong() } else { text_default() }, text_strong()))
                     .child(ui::nav_title(p.name.clone()))
                     .when(p.chats > 0, |d| d.child(ui::nav_count(p.chats.to_string())))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.select_project(id.clone(), cx))),
@@ -1009,7 +1126,7 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|s| s.text_color(text_default()))
                 .child(label)
-                .child(ui::chevron(open).text_color(text_subtle()))
+                .child(ui::chevron(open).text_color(text_subtle()).group_hover(id, |s| s.text_color(text_default())))
         };
         let projects_open = self.projects_open;
         let sessions_open = self.sessions_open;
@@ -1091,6 +1208,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .id("add-project")
+                                    .group("add-project")
                                     .ml_auto()
                                     .size(px(22.))
                                     .flex()
@@ -1100,7 +1218,7 @@ impl Workspace {
                                     .invisible()
                                     .group_hover("sec-projects", |s| s.visible())
                                     .hover(|s| s.bg(bg_hover()).text_color(text_strong()))
-                                    .child(ui::icon("plus").text_color(text_subtle()))
+                                    .child(ui::hover_icon("plus", &"add-project".into(), text_subtle(), text_strong()))
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                         cx.stop_propagation();
                                         this.begin_add_project(window, cx);
@@ -1318,6 +1436,10 @@ impl Workspace {
         };
         let running = self.run.is_some();
         let can_send = self.can_send() && !self.composer.read(cx).text().trim().is_empty();
+        // the pill turns warning-coloured while Ollama is down; otherwise `.pill` colours
+        let ollama_down = !up && self.models.is_some();
+        let pill_color = if ollama_down { warning() } else { text_default() };
+        let pill_hover = if ollama_down { warning() } else { text_strong() };
 
         let mut menu = None;
         if self.model_menu {
@@ -1439,10 +1561,10 @@ impl Workspace {
                             .child(ui::icon_btn("attach", "clip", false))
                             .child(
                                 ui::pill("model-pill")
-                                    .when(!up && self.models.is_some(), |d| d.text_color(warning()))
-                                    .child(ui::icon("cpu").text_color(if !up && self.models.is_some() { warning() } else { text_default() }))
+                                    .when(ollama_down, |d| d.text_color(warning()).hover(|s| s.bg(bg_hover()).text_color(warning())))
+                                    .child(ui::hover_icon("cpu", &"model-pill".into(), pill_color, pill_hover))
                                     .child(pill_label)
-                                    .child(ui::icon("chevron-down").text_color(text_default()))
+                                    .child(ui::hover_icon("chevron-down", &"model-pill".into(), pill_color, pill_hover))
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                         if this.model_menu {
                                             this.model_menu = false;
@@ -1452,7 +1574,7 @@ impl Workspace {
                                         }
                                     })),
                             )
-                            .child(ui::pill("tools-pill").child(ui::icon("sliders").text_color(text_default())).child("Tools · 4"))
+                            .child(ui::pill("tools-pill").child(ui::hover_icon("sliders", &"tools-pill".into(), text_default(), text_strong())).child("Tools · 4"))
                             .child(send)
                             .children(menu),
                     ),

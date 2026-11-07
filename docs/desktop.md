@@ -155,10 +155,15 @@ Where the native view differs, and why:
 |---|---|
 | A 28 px strip above the panels | macOS draws the window controls there. In the browser the title bar played that role; putting the controls inside the sidebar would move its contents |
 | Inline code (`tool router v2`) is a flat highlight, without the page's rounded, padded chip and branch icon | GPUI styles runs inside wrapped text with colour, weight and background only; padding, radius and inline icons are not possible inside a text run |
-| Icons inside pills keep their colour on hover | GPUI's SVG element takes an explicit colour, not the parent's current text colour |
 | "Worked for 34s", the metric cards and the action pills from the sample are not shown | They were the prototype's demo content; the runtime does not produce them (the browser page did not show them for real replies either) |
 | Tools, Files and Steps in Details show the page's placeholder rows | Same as the browser page: no runtime behind them yet (prototypes/NOTES.md) |
 | Uptime refreshes every 5 s only while the window is in front | Avoids work while hidden; the page polled continuously |
+
+Hover states follow the page's CSS: `.nav:hover`, `.icon-btn:hover` (and
+`[aria-pressed]` keeping its background), `.pill:hover`, `.section:hover` with
+its `+`, `.mm-row`, `.opt-menu` and `.row`. In CSS an icon inherits the colour
+`:hover` sets; GPUI icons take an explicit colour, so each icon declares the same
+colour change against its row's hover group (`ui::hover_icon`).
 
 Replies are still rendered as Markdown, in the page's styles: paragraphs as
 `.answer`, headings as `h3`, lists as `.hl`, inline code as the chip colours,
@@ -177,6 +182,22 @@ movement and deletion, undo/redo, double/triple click. Enter sends, ⇧Enter or
 dragging (double-click selects a word, triple-click a block, ⇧-click extends),
 and ⌘C copies it as plain text. Model output stays inert: HTML is shown
 literally and links are styled but never opened.
+
+### Navigation while a reply streams
+
+Every reply, Markdown parse and transcript load remembers the view it was made
+for (`Workspace::view`, bumped by New chat, opening a chat or changing project)
+and is dropped if you have moved on. Leaving a chat while its reply streams
+detaches the reply: the app stops reading it, the runtime stops the model and
+saves what arrived as "stopped", and the lists refresh when it is saved (the
+transcript too, if you went back to that chat). Lists and model checks keep a
+request number, so an older response never overwrites a newer one.
+
+Before this, a reply's late updates were applied to whatever transcript was on
+screen: into another chat's last message, or, in an empty new chat, an
+out-of-range index that crashed the app (panic in `apply_stream`). Panics are
+now written to `desktop.log` as `app.panic` with their source location (no
+message text beyond its first words).
 
 ### Keeping the UI thread free
 
@@ -246,6 +267,8 @@ Run on a MacBook Pro (Apple Silicon, macOS 26.6.2, 120 Hz display), Ollama
 | App force-killed | Runtime exited on its own within 0.4 s |
 | Ollama not running | Pill "Ollama not running", notice with Retry, Send disabled |
 | No models installed | Pill "No models installed", menu tells you `ollama pull`, Send disabled |
+| Leave a streaming reply (regression, `nav-stream.txt`) | 7 scenarios with a slow fake model, 15 assertions: New chat, another chat, another project, archive while streaming; a chat clicked then abandoned; two quick clicks. All pass, no panic logged. The previous build crashed on the first scenario (`panicked at src/workspace.rs:613`, SIGABRT) |
+| Already running, after the startup deadline (regression, `already-running.txt`) | Still "already running" after 50 s (previously replaced by "took too long to start" at 45 s); the terminal runtime kept running |
 | Bad config (`host: 0.0.0.0`) | Error screen "Umbrous settings are invalid", no runtime left |
 | Already running from a terminal | With your real `bin/umbrous` (pid 89154) on your real data: "Umbrous is already running … started from a terminal"; that runtime kept running and `umbrous.db` was unchanged (checksum) |
 | Existing data | A copy of real M2 data opened: General with its saved chat listed |

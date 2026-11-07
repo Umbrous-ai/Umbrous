@@ -28,6 +28,10 @@ e2e() { # name script home [extra env]
   open -n -W --env UMBROUS_HOME="$home" --env UMBROUS_E2E_SCRIPT="$W/$name.txt" --env UMBROUS_E2E_OUT="$W/$name.jsonl" "$@" "$E2E"
   wait_gone "$E2E"
   echo "== $name"; cat "$W/$name.jsonl" 2>/dev/null | cut -c1-700
+  if [ "$name" = already-running ]; then  # the terminal runtime's runtime.json must stay
+    alive "$E2E" && echo "FAIL $name: app still running" || echo "ok   $name: app exited"
+    return
+  fi
   check_clean "$E2E" "$home" "$name"
 }
 
@@ -61,5 +65,20 @@ e2e no-ollama states.txt "$W/h-noollama"
 python3 "$ROOT/desktop/e2e/stress.py" fake-empty 18557 >/dev/null 2>&1 & FAKE=$!; sleep 1
 mkdir -p "$W/h-nomodels"; echo '{"ollama_url": "http://127.0.0.1:18557"}' > "$W/h-nomodels/config.json"
 e2e no-models states.txt "$W/h-nomodels"; kill $FAKE
+
+echo "### regression: navigation while a reply streams, stale responses"
+python3 "$ROOT/desktop/e2e/stress.py" fake-ollama 18558 >/dev/null 2>&1 & FAKE=$!; sleep 1
+python3 "$ROOT/desktop/e2e/stress.py" seed-reference "$W/h-nav" >/dev/null
+echo '{"ollama_url": "http://127.0.0.1:18558"}' > "$W/h-nav/config.json"
+e2e nav-stream nav-stream.txt "$W/h-nav"; kill $FAKE
+if grep -q '"error"' "$W"/*.jsonl 2>/dev/null; then echo "FAIL: e2e assertions failed:"; grep -h '"error"' "$W"/*.jsonl; fi
+grep -h '"app.panic"' "$W"/h-*/logs/desktop.log && echo "FAIL: the app panicked" || echo "ok   no panics logged"
+[ "$(tail -1 "$W/nav-stream.jsonl" | grep -c '"record":"end"')" = 1 ] && echo "ok   nav-stream: all $(grep -c '"ok":true' "$W/nav-stream.jsonl") assertions passed" || echo "FAIL: nav-stream did not reach its end"
+echo "### a runtime started from a terminal is reported and left running"
+mkdir -p "$W/h-cli"
+PYTHONPATH="$ROOT" python3 -m umbrous --home "$W/h-cli" serve --no-open --port 0 >/dev/null 2>&1 & CLI=$!; sleep 2
+e2e already-running already-running.txt "$W/h-cli"
+kill -0 $CLI 2>/dev/null && echo "ok   terminal runtime $CLI still running" || echo "FAIL: terminal runtime was stopped"
+kill -INT $CLI; wait $CLI 2>/dev/null
 mkdir -p "$W/h-badconfig"; echo '{"host": "0.0.0.0"}' > "$W/h-badconfig/config.json"
 e2e bad-config failure.txt "$W/h-badconfig"
