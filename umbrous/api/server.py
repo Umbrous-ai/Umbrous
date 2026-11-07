@@ -300,7 +300,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(201, {"chat": chat.as_dict()})
             return 201, "chat_created"
         archive = match.group(2) == "/archive"
-        chat = hist.set_archived(match.group(1), archive)
+        chat_id = hist.get_chat(match.group(1)).id  # raises for an unknown chat
+        # Archiving takes the same per-chat lock as a reply. While a reply is
+        # running the archive is refused, so the reply is always saved first
+        # (the page stops the reply, waits for it to end, then archives).
+        lock = self.runtime.chat_locks.get(chat_id)
+        if not lock.acquire(blocking=False):
+            self._send_json(409, {"error": "chat_busy", "message": "A reply is still running in this chat. "
+                                  "Stop it or let it finish, then archive."})
+            return 409, "chat_busy"
+        try:
+            chat = hist.set_archived(chat_id, archive)
+        finally:
+            lock.release()
         log_event(log, "history.chat_archived" if archive else "history.chat_unarchived", chat_id=chat.id)
         self._send_json(200, {"chat": chat.as_dict()})
         return 200, "archived" if archive else "unarchived"

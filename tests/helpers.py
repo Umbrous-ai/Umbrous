@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -81,18 +82,20 @@ class RunningRuntime:
     def new_chat(self, project_id: str = "prj_general") -> str:
         status, _, body = self.post_json("/api/chats", {"project_id": project_id})
         assert status == 201, (status, body)
-        return json.loads(body)["chat"]["id"]
+        cid = json.loads(body)["chat"]["id"]
+        return cid
 
     def get_json(self, path: str) -> Tuple[int, dict]:
         return self.json("GET", path, token=self.policy.session_token)
 
-    def chat(self, chat_id: str, model: str, message: str) -> list:
+    def chat(self, chat_id: str, model: str, message: str, create: bool = True) -> list:
         """Send a chat message and return the streamed events.
 
         Since M2 chats are created by the runtime. A name that is not a real
         chat id yet (tests use readable ones like "chat_testtest01") gets a new
-        chat in General on first use, and the same chat after that."""
-        if chat_id not in self._aliases and chat_id.startswith("chat_testtest"):
+        chat in General on first use, and the same chat after that, unless
+        create=False (to test an unknown id)."""
+        if create and chat_id not in self._aliases and not re.fullmatch(r"chat_[0-9a-f]{24}", chat_id):
             self._aliases[chat_id] = self.new_chat()
         chat_id = self._aliases.get(chat_id, chat_id)
         status, _, body = self.post_json("/api/chat", {"chat_id": chat_id, "model": model, "message": message})

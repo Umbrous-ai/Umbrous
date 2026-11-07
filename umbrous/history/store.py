@@ -22,6 +22,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import threading
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -48,6 +49,12 @@ class HistoryError(ValueError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def name_key(name: str) -> str:
+    """What makes two project names "the same": Unicode-normalised (NFKC) and
+    fully case-folded, so "École", "école" and "E\u0301cole" all collide."""
+    return unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", name).casefold())
 
 
 def make_title(first_message: str) -> str:
@@ -127,7 +134,7 @@ class HistoryStore:
                        COALESCE(SUM(ch.id IS NOT NULL AND ch.archived_at IS NULL), 0),
                        COALESCE(SUM(ch.archived_at IS NOT NULL), 0)
                 FROM projects p LEFT JOIN chats ch ON ch.project_id = p.id
-                GROUP BY p.id ORDER BY p.id = ? DESC, p.name COLLATE NOCASE""", (DEFAULT_PROJECT_ID,)).fetchall()
+                GROUP BY p.id ORDER BY p.id = ? DESC, p.name_key""", (DEFAULT_PROJECT_ID,)).fetchall()
         return [Project(*r) for r in rows]
 
     def get_project(self, project_id: str) -> Project:
@@ -139,13 +146,14 @@ class HistoryStore:
     def create_project(self, name: str) -> Project:
         if not isinstance(name, str):
             raise HistoryError("A project needs a name.", "bad_project_name")
-        name = " ".join(name.split())
+        name = unicodedata.normalize("NFC", " ".join(name.split()))
         if not name or len(name) > MAX_PROJECT_NAME:
             raise HistoryError(f"Project names are 1 to {MAX_PROJECT_NAME} characters.", "bad_project_name")
         pid = "prj_" + secrets.token_hex(8)
         with self._write_lock, self._db() as c:
             try:
-                c.execute("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)", (pid, name, _now()))
+                c.execute("INSERT INTO projects (id, name, name_key, created_at) VALUES (?, ?, ?, ?)",
+                          (pid, name, name_key(name), _now()))
             except sqlite3.IntegrityError:
                 raise HistoryError(f"A project called {name!r} already exists.", "project_exists") from None
         return self.get_project(pid)
@@ -198,6 +206,8 @@ class HistoryStore:
         """Store one message and its reply together, in one transaction."""
         if status not in STATUSES:
             raise HistoryError(f"unknown status {status!r}")
+        if not reply_text.strip():  # an empty reply is an error, never a saved answer
+            raise HistoryError("A reply with no text is not saved.", "empty_reply")
         now = _now()
         with self._write_lock, self._db() as c:
             c.execute("BEGIN IMMEDIATE")

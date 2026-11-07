@@ -97,9 +97,17 @@ const out = {};
     // archive the rose chat and leave it archived, for the restart check
     await page.click('#sec-sessions [data-chat-id]:has-text("roses")');
     await page.waitForFunction(() => document.getElementById('title').textContent.includes('roses'));
+    // archive it WHILE a slow reply is streaming: the reply is stopped, saved, then archived
+    await page.click('#model-pill');
+    await page.click('.mm-pick:has-text("slow-model:7b")');
+    await page.fill('#input', 'Tell me slowly about compost');
+    await page.press('#input', 'Enter');
+    await page.waitForFunction(() => { const a = document.querySelectorAll('#thread .reply .answer'); return a.length === 2 && a[1].textContent.length > 5; });
     await page.click('#chat-options');
     await page.click('#opt-menu [data-act="archive"]');
     await page.waitForSelector('#archived-notice');
+    out.archivedMidReplyUser = await page.$$eval('#thread .msg-u', (n) => n.map((x) => x.textContent));
+    out.archivedMidReplyMeta = await page.$$eval('#thread .reply .reply-meta', (n) => n.map((x) => x.textContent));
   } else {
     out.projects = await projects();
     await clickProject('Garden');

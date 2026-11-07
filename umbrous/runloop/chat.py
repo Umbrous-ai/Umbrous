@@ -182,7 +182,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                            "ms": int((time.monotonic() - started) * 1000), "done_reason": piece.done_reason}
         except ModelError as exc:
             outcome = exc.code
-            partial = bool(text_parts)
+            partial = bool("".join(text_parts).strip())
             if partial:
                 failed = keep(PARTIAL_STATUS.get(exc.code, "error"), model.name)
                 if failed:
@@ -193,7 +193,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             # what arrived, as if the person had pressed stop.
             cancel.cancel()
             outcome = Cancelled.code
-            if text_parts:
+            if "".join(text_parts).strip():
                 keep("stopped", model.name)
             raise
     finally:

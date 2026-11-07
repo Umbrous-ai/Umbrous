@@ -419,7 +419,11 @@
 
   async function setArchived(archive) {
     if (!chatId) return;
-    if (run) await stop();
+    if (run) {  // stop the reply and wait until it has ended and been saved; the runtime refuses to archive before that
+      const r = run;
+      await stop();
+      for (let i = 0; i < 100 && run === r; i++) await new Promise((ok) => setTimeout(ok, 50));
+    }
     try { await getJson('/api/chats/' + encodeURIComponent(chatId) + (archive ? '/archive' : '/unarchive'), { json: {} }); }
     catch (e) { notice('Could not ' + (archive ? 'archive' : 'restore') + ' this chat: ' + e.message, 'bad'); return; }
     if (archive) showArchived = true;  // keep it visible in the list, marked archived

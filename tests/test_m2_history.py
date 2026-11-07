@@ -3,6 +3,8 @@
 import json
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -43,6 +45,27 @@ class StoreTests(unittest.TestCase):
         for bad in ("", "   ", "x" * 61, None, 5):
             with self.assertRaises(HistoryError):
                 self.h.create_project(bad)
+
+    def test_project_names_are_unique_across_unicode_case_and_forms(self):
+        self.h.create_project("École")
+        for clash in ("école", "ÉCOLE", "E\u0301cole", "e\u0301cole"):   # also the decomposed form
+            with self.assertRaises(HistoryError, msg=clash) as e:
+                self.h.create_project(clash)
+            self.assertEqual(e.exception.code, "project_exists")
+        self.h.create_project("Straße")
+        with self.assertRaises(HistoryError):
+            self.h.create_project("STRASSE")                              # full case folding, not just lower()
+        with self.assertRaises(HistoryError):
+            self.h.create_project("GENERAL")
+        self.assertEqual(self.h.create_project("Ecole").name, "Ecole")    # without the accent it is different
+
+    def test_empty_reply_is_never_saved(self):
+        c = self.h.create_chat("prj_general")
+        for empty in ("", "  \n "):
+            with self.assertRaises(HistoryError) as e:
+                self.h.append_exchange(c.id, "hi", empty, "m:1b", "complete")
+            self.assertEqual(e.exception.code, "empty_reply")
+        self.assertEqual(self.h.messages(c.id), [])
 
     def test_chat_needs_an_existing_project(self):
         with self.assertRaises(HistoryError) as e:
@@ -118,7 +141,9 @@ class StoreTests(unittest.TestCase):
 class HistoryApiTests(unittest.TestCase):
     def setUp(self):
         self.fake = FakeOllama(models=[FakeModel("qwen2.5:3b", context_length=4096),
-                                       FakeModel("dies:1b", behavior="die_midstream", reply="partial " * 10)]).start()
+                                       FakeModel("dies:1b", behavior="die_midstream", reply="partial " * 10),
+                                       FakeModel("drip:1b", chunk_delay=0.1, reply="drip " * 10),
+                                       FakeModel("empty:1b", reply="")]).start()
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name) / "home"
 
@@ -189,6 +214,58 @@ class HistoryApiTests(unittest.TestCase):
             self.assertEqual(rt.chat(cid, "qwen2.5:3b", "one more")[-1]["type"], "done")
             self.assertEqual(rt.get_json(f"/api/chats/{cid}")[1]["chat"]["messages"], 4)
 
+    def start_slow_reply(self, rt, cid):
+        """Start a slow reply in a thread; return (thread, result, run_id) once text has streamed."""
+        result = {}
+        t = threading.Thread(target=lambda: result.update(ev=rt.chat(cid, "drip:1b", "go slowly")))
+        t.start()
+        run_id, deadline = None, time.time() + 5
+        while run_id is None and time.time() < deadline:
+            with rt.runtime.runs._lock:
+                run_id = next(iter(rt.runtime.runs._runs), None)
+            time.sleep(0.02)
+        time.sleep(0.3)                                                  # some text has streamed by now
+        return t, result, run_id
+
+    def test_archive_while_a_reply_runs_is_refused_and_the_reply_is_saved(self):
+        with self.rt() as rt:
+            cid = rt.new_chat()
+            t, result, _ = self.start_slow_reply(rt, cid)
+            status, _, body = rt.post_json(f"/api/chats/{cid}/archive", {})
+            self.assertEqual((status, json.loads(body)["error"]), (409, "chat_busy"))
+            t.join(10)
+            self.assertEqual(result["ev"][-1]["type"], "done")
+            _, full = rt.get_json(f"/api/chats/{cid}")
+            self.assertEqual([(m["role"], m["status"]) for m in full["messages"]],
+                             [("user", "complete"), ("assistant", "complete")])
+            self.assertFalse(full["chat"]["archived"])
+            self.assertEqual(rt.post_json(f"/api/chats/{cid}/archive", {})[0], 200)   # once it has ended
+
+    def test_stop_then_archive_keeps_the_partial_reply(self):
+        with self.rt() as rt:
+            cid = rt.new_chat()
+            t, _, run_id = self.start_slow_reply(rt, cid)
+            rt.post_json("/api/chat/cancel", {"run_id": run_id})
+            t.join(10)
+            self.assertEqual(rt.post_json(f"/api/chats/{cid}/archive", {})[0], 200)
+            msgs = rt.get_json(f"/api/chats/{cid}")[1]["messages"]
+            self.assertEqual(msgs[1]["status"], "stopped")
+            self.assertTrue(msgs[1]["content"].startswith("drip"))
+
+    def test_empty_answer_is_an_error_and_not_saved(self):
+        with self.rt() as rt:
+            cid = rt.new_chat()
+            ev = rt.chat(cid, "empty:1b", "hello")
+            self.assertEqual((ev[-1]["type"], ev[-1]["code"]), ("error", "empty_response"))
+            self.assertEqual(rt.get_json(f"/api/chats/{cid}")[1]["messages"], [])
+            self.assertIs(self.chat_requests()[-1]["think"], False)
+
+    def test_unicode_project_names_through_the_api(self):
+        with self.rt() as rt:
+            self.assertEqual(rt.post_json("/api/projects", {"name": "École"})[0], 201)
+            status, _, body = rt.post_json("/api/projects", {"name": "école"})
+            self.assertEqual((status, json.loads(body)["error"]), (409, "project_exists"))
+
     def test_there_is_no_way_to_delete(self):
         with self.rt() as rt:
             cid = rt.new_chat()
@@ -205,7 +282,7 @@ class HistoryApiTests(unittest.TestCase):
 
     def test_unknown_chats_and_projects(self):
         with self.rt() as rt:
-            ev = rt.chat("chat_doesnotexist1", "qwen2.5:3b", "hi")
+            ev = rt.chat("chat_doesnotexist1", "qwen2.5:3b", "hi", create=False)
             self.assertEqual([e["code"] for e in ev], ["no_such_chat"])
             self.assertEqual(self.chat_requests(), [])
             self.assertEqual(rt.get_json("/api/chats/chat_doesnotexist1")[0], 404)

@@ -8,7 +8,7 @@ yet, on purpose (see "Deleting is not available yet" below). Builds on M1.
 
 ```sh
 bin/umbrous            # chat as before; the sidebar now lists real projects and chats
-bin/umbrous test       # 128 tests; no Ollama needed
+bin/umbrous test       # 136 tests; no Ollama needed
 ```
 
 Quit with Ctrl-C, start again, and your projects and chats are still there.
@@ -46,7 +46,9 @@ sidebar refreshes; the title is the start of the first message
 ```
 
 Message and reply are written together, so a crash can never leave a question
-saved without its answer. As in M1, if no reply text arrived the message is not
+saved without its answer. An answer with no text (for example a model that
+spent its whole budget thinking) is an error and is never saved; Umbrous also
+asks Ollama not to think (`think: false`). As in M1, if no reply text arrived the message is not
 kept, so pressing Send again does not duplicate it. If the page closes
 mid-reply, the model is stopped and what arrived is kept as "stopped".
 
@@ -69,11 +71,11 @@ more copy of your text in one more place.
 | Route | Does |
 |---|---|
 | `GET /api/projects` | Projects with counts of active and archived chats |
-| `POST /api/projects {name}` | Add a project (1 to 60 characters, unique ignoring case) |
+| `POST /api/projects {name}` | Add a project (1 to 60 characters, unique ignoring case in any language) |
 | `GET /api/chats?project_id=…[&archived=1]` | One project's chats, newest first; archived ones only when asked |
 | `POST /api/chats {project_id}` | Start a chat |
 | `GET /api/chats/<id>` | The chat and its full transcript |
-| `POST /api/chats/<id>/archive` · `/unarchive` | Archive or restore |
+| `POST /api/chats/<id>/archive` · `/unarchive` | Archive or restore. Refused (409) while a reply is running in that chat |
 
 Ids are checked against strict patterns before they reach SQL, and every query
 uses `?` parameters, so a crafted id is refused, never interpreted.
@@ -86,6 +88,10 @@ uses `?` parameters, so a crafted id is refused, never interpreted.
   new chat in it. Session ▸ Project in the Details panel names it.
 - **Sessions**: the chats of the selected project. Click one to load its
   transcript. "Show archived (n)" lists archived chats, marked *archived*.
+- **Project names** are compared the way people read them: Unicode-normalised
+  and fully case-folded (a separate `name_key` column holds that form), so
+  "École", "école" and "STRASSE"/"Straße" count as the same name. SQLite's own
+  `NOCASE` only folds A to Z, which is why it is not used.
 - **Options** (⋯ in the header): Archive chat, or Restore chat when it is
   archived, and a greyed-out **Delete chat**: "Not available yet".
 - An archived chat opens read-only: a notice with a **Restore** button, and the
@@ -93,6 +99,11 @@ uses `?` parameters, so a crafted id is refused, never interpreted.
   chat is refused before any model is called.
 - Switching chats while a reply is streaming stops it (what arrived is kept,
   marked stopped).
+- Archiving while a reply is streaming first stops it and waits until the
+  partial reply is saved, then archives. The runtime enforces the order:
+  archive takes the same per-chat lock as a reply, so it is refused while a
+  reply is running (for example from a second tab) and can never slip in
+  between the reply and its save.
 
 ## Where copies of your chats exist
 
@@ -173,5 +184,5 @@ an unknown status. (Read only: don't edit the file while Umbrous is running.)
 
 | File | Covers |
 |---|---|
-| `tests/test_m2_history.py` | General exists; project names (unique ignoring case, length); chats need a real project; order, title, model and token counts saved; long titles cut; projects kept apart (also in what the model is sent); archive round trip with identical row counts; archived chats refused before the model is called; no delete method, route or verb (405/404); unknown ids and injection-shaped ids refused; partial replies saved with their status; history needs the credential and the right Origin; no content or names in logs; an M1 database upgrades keeping its data; **restart persistence in the right project**, and a continued chat sends the saved turns |
-| `tests/test_browser_m2.py` | Headless Chromium across a real restart: add a project, duplicate refused, chats listed and titled, projects separate, transcript reload, saved HTML reply still inert, Options menu with disabled Delete, archived chat read-only, restore and continue, after restart the archived chat is hidden behind "Show archived (1)". Skipped without Node + Playwright |
+| `tests/test_m2_history.py` | General exists; project names (unique across Unicode case and forms, length); empty replies never saved; archive refused while a reply runs and the reply is saved; stop then archive keeps the partial reply; chats need a real project; order, title, model and token counts saved; long titles cut; projects kept apart (also in what the model is sent); archive round trip with identical row counts; archived chats refused before the model is called; no delete method, route or verb (405/404); unknown ids and injection-shaped ids refused; partial replies saved with their status; history needs the credential and the right Origin; no content or names in logs; an M1 database upgrades keeping its data; **restart persistence in the right project**, and a continued chat sends the saved turns |
+| `tests/test_browser_m2.py` | Headless Chromium across a real restart: add a project, duplicate refused, chats listed and titled, projects separate, transcript reload, saved HTML reply still inert, Options menu with disabled Delete, archived chat read-only, restore and continue, archive while a reply streams (stopped, saved, then archived), after restart the archived chat is hidden behind "Show archived (1)". Skipped without Node + Playwright |

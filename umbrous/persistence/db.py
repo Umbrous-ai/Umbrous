@@ -58,7 +58,11 @@ MIGRATIONS = (
     """
     CREATE TABLE projects (
         id          TEXT PRIMARY KEY,
-        name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        name        TEXT NOT NULL,
+        -- uniqueness key made in Python (history/store.py name_key): Unicode NFKC
+        -- plus full case folding. SQLite's NOCASE only folds ASCII A-Z, so it
+        -- would let "École" and "école" both exist.
+        name_key    TEXT NOT NULL UNIQUE,
         created_at  TEXT NOT NULL
     );
     CREATE TABLE chats (
@@ -84,8 +88,8 @@ MIGRATIONS = (
         created_at    TEXT NOT NULL,
         UNIQUE (chat_id, seq)
     );
-    INSERT INTO projects (id, name, created_at)
-        VALUES ('prj_general', 'General', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    INSERT INTO projects (id, name, name_key, created_at)
+        VALUES ('prj_general', 'General', 'general', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)

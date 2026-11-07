@@ -58,6 +58,9 @@ class BrowserHistoryTests(unittest.TestCase):
         self.assertEqual(first["transcriptAfterRestore"], ["When should I plant tulips?", "And daffodils?",
                                                            "And tulips in pots?"])
 
+        self.assertEqual(first["archivedMidReplyUser"], ["Best soil for roses", "Tell me slowly about compost"])
+        self.assertIn("Stopped by you", first["archivedMidReplyMeta"][1])   # the partial reply was saved first
+
         self.assertEqual(again["projects"], ["General", "Garden"])
         self.assertEqual(again["sessions"], ["When should I plant tulips?"])     # the archived one is hidden
         self.assertEqual(again["toggle"], "Show archived (1)")
