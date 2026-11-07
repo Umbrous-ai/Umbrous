@@ -389,7 +389,8 @@ def memory_command(config: Config, action: str, rest: List[str], project: Option
             print("Run again with --yes to delete it. Chats that already used it keep their text.")
             return 1
         mem.delete(item.id)
-        print(f"Deleted {item.id}. Future replies cannot use it. Old chats are unchanged and may still mention it.")
+        print(f"Deleted {item.id}. It will not be retrieved for later replies. Chats that used it keep their text, "
+              "and in those chats that text still goes back to the model as history.")
         return 0
     except MemoryError_ as exc:
         print(exc.message, file=sys.stderr)

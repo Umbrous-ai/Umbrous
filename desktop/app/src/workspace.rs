@@ -57,6 +57,9 @@ struct Run {
     chat_id: String,
     run_id: Option<String>,
     stop: Arc<AtomicBool>,
+    /// M6: the memory items this reply was given (from `start`), so a reply
+    /// that is stopped or fails part way still names them
+    memory_ids: Vec<String>,
 }
 
 /// What the Memory section's inline field is for (M6).
@@ -871,7 +874,7 @@ impl Workspace {
         let stop = Arc::new(AtomicBool::new(false));
         self.run_seq += 1;
         let token = self.run_seq;
-        self.run = Some(Run { token, msg_ix: n + 1, chat_id: existing.clone().unwrap_or_default(), run_id: None, stop: stop.clone() });
+        self.run = Some(Run { token, msg_ix: n + 1, chat_id: existing.clone().unwrap_or_default(), run_id: None, stop: stop.clone(), memory_ids: vec![] });
         cx.notify();
 
         let Some(api) = self.api.clone() else { return };
@@ -965,6 +968,9 @@ impl Workspace {
                         "start" => {
                             if let Some(run) = self.run.as_mut() {
                                 run.run_id = ev.get("run_id").and_then(Value::as_str).map(str::to_string);
+                                run.memory_ids = ev.pointer("/memory/used").and_then(Value::as_array)
+                                    .map(|a| a.iter().filter_map(|m| m.get("id").and_then(Value::as_str)).map(str::to_string).collect())
+                                    .unwrap_or_default();
                             }
                             if let Some(m) = ev.get("model_requested").and_then(Value::as_str) {
                                 let again = if ev.get("resume_of").map(|v| !v.is_null()).unwrap_or(false) { " again (resumed)" } else { "" };
@@ -1027,6 +1033,14 @@ impl Workspace {
                             if let Some((line, _)) = api::report_line(&ev["report"]) {
                                 msg.meta = format!("{} {line}.", msg.meta.trim_end());
                             }
+                            // M6: a partial reply is stored with the memory it was given; say so now,
+                            // not only when the chat is opened again
+                            if partial {
+                                let ids = self.run.as_ref().map(|r| r.memory_ids.clone()).unwrap_or_default();
+                                if let Some(n) = api::memory_note(&ids) {
+                                    msg.meta = format!("{} · {n}", msg.meta.trim_end());
+                                }
+                            }
                             if code == "ollama_unreachable" {
                                 self.notice = Some((text, MetaKind::Warn, true));
                                 if let Some(m) = self.models.as_mut() {
@@ -1049,6 +1063,13 @@ impl Workspace {
                     } else if msg.meta.ends_with('…') {
                         msg.meta = "Stopped.".into();
                         msg.meta_kind = MetaKind::Warn;
+                        // the runtime keeps text that had arrived, with its memory ids
+                        if !msg.text.trim().is_empty() {
+                            let ids = self.run.as_ref().map(|r| r.memory_ids.clone()).unwrap_or_default();
+                            if let Some(n) = api::memory_note(&ids) {
+                                msg.meta = format!("Stopped. · {n}");
+                            }
+                        }
                     }
                 }
             }
@@ -1854,7 +1875,7 @@ impl Workspace {
         if let Some(err) = &self.memory_error {
             col = col.child(div().px(px(20.)).py(px(4.)).text_size(fs_12()).text_color(danger()).child(err.clone()));
         }
-        col = col.child(note("Deleting an item stops later replies from using it. Old chats keep their text.".into()));
+        col = col.child(note("Off or deleted means not retrieved again. Earlier replies that repeat an item still reach the model as chat history; compare in a new chat.".into()));
         col.into_any_element()
     }
 

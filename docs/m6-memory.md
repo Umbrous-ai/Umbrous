@@ -25,7 +25,7 @@ bin/umbrous memory add personal "At Garden I am the tech lead" --scope Garden
 bin/umbrous memory add project "We deploy on Thursdays" --project General --kind decision
 bin/umbrous memory edit mem_… "We deploy on Wednesdays"
 bin/umbrous memory delete mem_… --yes
-bin/umbrous test                                          # 275 tests; no Ollama needed
+bin/umbrous test                                          # 277 tests; no Ollama needed
 ```
 
 In the browser page: Details › **Memory** lists Personal and This project, with
@@ -64,10 +64,24 @@ So:
 
 - memory influences a reply only because its text is in **that** reply's
   prompt. Details shows exactly which items were there;
-- turning memory off for a reply (the switch, or `use_memory: false`) sends
-  none, and the same model answers as if you had never saved them;
-- deleting an item means it is not put in any later prompt. There is nothing
-  to "unlearn", because nothing was learned.
+- turning memory off for a reply (the switch, or `use_memory: false`) means
+  no memory item is **retrieved** for it: the memory block is not sent;
+- deleting an item means it is never retrieved again. There is nothing to
+  "unlearn", because nothing was learned.
+
+### History carries what memory once added
+
+Memory is not the only way text reaches a prompt. Every reply also gets the
+chat's recent messages (M1, `recent_turns`), and an earlier reply may have
+repeated a memory item ("The release branch is called ship"). That reply is
+now part of the conversation, so it goes back to the model with the next
+message, with memory off or after the item was deleted, until it falls out of
+the recent-turns window. Your own messages are carried the same way.
+
+So the promise is exactly this: **no further retrieval.** It is not "the
+model will not see this fact again in this chat". To compare a reply with and
+without memory, or to check that a deleted item is gone, ask in a **new
+chat**: it has no history that could carry the fact.
 
 ## How an item reaches a reply
 
@@ -115,7 +129,7 @@ are separate. **Deleting from one never deletes from another.**
 
 | You delete… | Gone | Not touched |
 |---|---|---|
-| a memory item | its row in `personal_memory` or `project_memory`; it is never retrieved again, for any later reply | every chat, including replies that used it; task records; receipts; the other memory items |
+| a memory item | its row in `personal_memory` or `project_memory`; it is never retrieved again, for any later reply | every chat, including replies that used it (which keep going back to the model as recent messages of their chat, above); task records; receipts; the other memory items |
 | a chat (not possible yet, M2) | — | memory. No memory column points at a chat, and no memory row is removed with one |
 
 ### Why deleting a memory item does not rewrite old chats
@@ -131,7 +145,8 @@ back and edit what the model answered, for three reasons:
   the model would have written anyway;
 - the fact may also be in your own messages, which are yours.
 
-So **old conversations can still contain the same fact.** If you need it gone
+So **old conversations can still contain the same fact**, and while they do,
+their later replies can still be shaped by it through the chat history. If you need it gone
 from those too, that is a chat deletion, which is still blocked pending the
 deletion decision (docs/m2-history.md). The old reply still lists the deleted
 item's id under it; the id now points at nothing, which is itself the record
@@ -146,6 +161,8 @@ that the item was used and later deleted.
 - **Backups** of the data folder (Time Machine): outside Umbrous's control,
   as for chats (docs/m2-history.md).
 - **The model**: nowhere. It was never trained on it.
+- **Prompts of chats that already used it**: through their history, until
+  the replies that repeated it fall out of the recent-turns window (above).
 - **Logs**: never there in the first place. Logs record `memory.added`,
   `memory.edited` and `memory.deleted` with ids and stores only, never text.
 
@@ -182,7 +199,8 @@ The right panel (the header's panel button) has a **Memory** section under
 Sources:
 
 - **Used in replies** / **Off for the next replies**: click to switch, to
-  compare a reply with and without memory;
+  compare a reply with and without memory (compare in a new chat: the
+  current chat's history may already repeat a memory item);
 - **Personal** and **This project: NAME**, each with its items (text, then
   id and kind; a personal item that does not apply to this project says so),
   and a **+** that opens a field: type, Enter;
@@ -190,7 +208,9 @@ Sources:
   deletes; Escape cancels either.
 
 Each reply's meta line ends with `memory mem_…, mem_…` when it was given
-memory, also for stored replies when you open a chat.
+memory: as soon as the reply starts, for a reply that is stopped or fails
+part way, and for stored replies when you open a chat. The browser page does
+the same under the reply (`Memory used:`).
 
 The app adds personal items as `fact` for all projects and project items as
 `decision`. Choosing another kind or a narrower scope, and seeing an item's
@@ -208,10 +228,17 @@ Validation (`desktop/e2e/validate-m6.sh WORKDIR`, also part of
 5. reopen the chat: six messages, the first reply unchanged and still naming
    the deleted id;
 6. add another project: no project memory there, the preference applies, and
-   the reply has no trace of the decision.
+   the reply has no trace of the decision;
+7. a reply that breaks off part way (`memory-dies:3b`): its meta line still
+   names the memory it was given.
+
+Steps 3 and 4 ask in the same chat on purpose, to check the switch and the
+deletion mechanically; the fake model ignores history. With a real model,
+compare in a new chat (see "History carries what memory once added").
 
 Then it checks the database from outside: one personal item (edited, scope
-all), no project item, the ids stored with each of the four replies, the
+all), no project item, the ids stored with each of the five replies (the
+partial one too), the
 first reply still holding the canary, and no memory text in any log.
 
 ## The pieces
@@ -241,13 +268,18 @@ bin/umbrous --home /tmp/u6 serve --no-open &         # note the URL; open it; pi
    "I like answers in British English" (preference) and, under This project,
    "We deploy on Thursdays" (decision).
 2. **Compare.** Ask "When do we deploy?". The reply repeats both lines and
-   lists their ids. Untick Use memory and ask again: "I was given no memory".
-   Same model, same question; the only difference is the prompt.
-   With a real model such as `qwen2.5:3b`, the first answer should say
-   Thursday and the second can only guess.
-3. **Delete one.** Delete the decision; ask again: it is gone from the
-   answer. Scroll up: the first reply still says Thursday. Open
-   `bin/umbrous --home /tmp/u6 memory`: the item is gone from the store.
+   lists their ids. Untick Use memory, start a **new chat**, and ask again:
+   "I was given no memory". Same model, same question; the only difference
+   is the prompt. With a real model such as `qwen2.5:3b`, the first answer
+   should say Thursday and the second can only guess. (Asking again in the
+   first chat instead is not a fair comparison: its first reply, which says
+   Thursday, goes back to the model as history. The fake model ignores
+   history, so it hides this; a real one will not.)
+3. **Delete one.** Delete the decision; ask in a new chat: it is gone from
+   the answer, and from the prompt. Go back to the first chat: its reply
+   still says Thursday, and a question asked there can still be answered from
+   that reply. Open `bin/umbrous --home /tmp/u6 memory`: the item is gone
+   from the store.
 4. **Isolation.** Add a project, ask the same question there: no decision,
    and Details shows the preference applies (scope all), unless you added it
    with "only General".
@@ -269,9 +301,9 @@ Try it before reading `RetrievalTests.test_cross_project_isolation`:
 |---|---|
 | `test_m6_memory.StoreTests` (8) | the fields, two tables, validation (secrets refused), edit, delete removes only that item and no transcript row, transcript changes (including removing a chat's rows) leave memory as it was, no link from memory to chats, the memory code touches no chat table |
 | `RetrievalTests` (9) | cross-project isolation, the second isolation check, personal scope, approved only, a deleted item is never retrieved, the two limits, ranking by shared words, the labelled block, memory dropped before the message |
-| `ApiTests` (6) | a reply visibly changes with memory and records the ids; memory off; delete stops retrieval and leaves the old reply (and its ids); archive leaves memory; another project gets nothing; edit and error codes; no memory text in logs |
+| `ApiTests` (8) | a reply visibly changes with memory and records the ids; memory off; delete stops retrieval and leaves the old reply (and its ids); with memory off or the item deleted, the fact still reaches the prompt through the chat's history, and a new chat has none of it; a partial reply names its memory in its last event; archive leaves memory; another project gets nothing; edit and error codes; no memory text in logs |
 | `SchemaTests` | schema 6 → 7 keeps messages |
-| `test_browser_m6` | the Memory section, add/edit/delete, the switch, `Memory used:` under replies, another project |
+| `test_browser_m6` | the Memory section, add/edit/delete, the switch, `Memory used:` under replies (also under a reply that broke off), another project |
 | `test_validate_scripts` (M6 cases) | `validate-m6.sh` fails on any app failure or wrong records |
 | `api.rs` `memory_view_and_ids_parse` | the app reads `/api/memory` and `memory_ids` |
 

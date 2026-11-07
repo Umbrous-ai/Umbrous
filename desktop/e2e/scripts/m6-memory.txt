@@ -1,7 +1,7 @@
 # M6 in the app: add a personal fact and a project decision, see a reply use
 # them (and name their ids), compare with memory off, edit one, delete one,
 # reopen the chat (the old reply is unchanged), and check another project.
-# Data: an empty data folder (validate-m6.sh); Ollama: stress.py fake-memory (memory-aware:3b).
+# Data: an empty data folder (validate-m6.sh); Ollama: stress.py fake-memory (memory-aware:3b, memory-dies:3b).
 wait_ready 30
 wait_models
 card open
@@ -55,5 +55,11 @@ send What is the release branch?
 wait_reply 30
 expect last_text_lacks ZEBRA-SHIP-731
 expect last_text kept short
+# 7. a reply that breaks off part way still names the memory it was given
+select_model memory-dies:3b
+send Which answers do I like?
+wait_reply 30
+expect last_meta memory mem_
+screenshot @OUT@/m6-partial.png
 record end
 quit

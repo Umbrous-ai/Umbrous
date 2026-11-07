@@ -693,7 +693,7 @@
       if (b.dataset.armed) { memoryPost('/api/memory/' + m.id + '/delete', {}, err); return; }
       b.dataset.armed = '1';
       b.textContent = 'Delete?';
-      b.title = 'Click again to delete. Future replies will not use it; old chats keep their text.';
+      b.title = 'Click again to delete. It will not be retrieved for later replies. Chats that already used it keep their text, and in those chats that text still goes back to the model as history.';
       b.classList.add('danger');
     });
     row.append(text, edit, del);
@@ -759,7 +759,8 @@
     box.appendChild(err);
     box.appendChild(el('div', 'acc-note', `Each reply is given at most ${v.limits.max_items} items (about ` +
       `${v.limits.max_tokens} tokens), picked by shared words. Project memory never reaches another project. ` +
-      'Deleting an item does not change old chats, which may still mention it.'));
+      'Turning memory off or deleting an item stops retrieval only: in a chat whose earlier replies repeat an ' +
+      'item, those replies still go back to the model as history. To compare, use a new chat.'));
   }
 
   // ---------- history: the open chat ----------
@@ -959,6 +960,7 @@
     run = { runId: null, controller };
     syncSend();
     let finished = false;
+    let memEl = null;   // M6: the memory ids this reply was given, shown from its start
     const mine = view;
     try {
       if (!chatId) {  // the chat is created on the first message, in the selected project
@@ -990,7 +992,11 @@
             showContext(ev.context);
             const notes = ev.context.notices.slice();
             if (ev.tools && ev.tools.off_reason) notes.push(ev.tools.off_reason);
-            if (ev.memory) showMemoryUsed(ev.memory);
+            if (ev.memory) {
+              showMemoryUsed(ev.memory);
+              memEl = memoryLine(ev.memory.used.map((m) => m.id));
+              if (memEl) meta.after(memEl);
+            }
             if (notes.length) { ctxNote.textContent = notes.join(' '); ctxNote.hidden = false; }
           } else if (ev.type === 'tool_call') {
             const row = stepRow(ev.tool, stepLabel(ev.tool, ev.args));
@@ -1024,8 +1030,9 @@
             const sm = $('#sess-model'); if (sm) sm.textContent = ev.model;
             const src = sourcesLine(ev.evidence);
             if (src) reply.appendChild(src);
-            const ml = memoryLine(ev.memory_ids);
-            if (ml) reply.appendChild(ml);
+            if (memEl) memEl.remove();
+            memEl = memoryLine(ev.memory_ids);
+            if (memEl) reply.appendChild(memEl);
             const tr = taskReport(ev.report);
             if (tr) reply.appendChild(tr);
           } else if (ev.type === 'error') {
@@ -1034,6 +1041,8 @@
             if (ev.code === 'cancelled') meta.textContent = 'Stopped by you.' + (ev.partial ? ' The text above is incomplete.' : '');
             else meta.textContent = (ev.partial ? 'Incomplete: ' : 'Not answered: ') + ev.message;
             meta.classList.add(ev.code === 'cancelled' ? 'warn' : 'bad');
+            // a partial reply is stored with its memory ids; one with no text is not stored at all
+            if (memEl && !(ev.memory_ids && ev.memory_ids.length)) { memEl.remove(); memEl = null; }
             if (ev.code === 'ollama_unreachable') ollamaDown(ev.message);  // Retry button, same as at start
             if (ev.code === 'chat_archived') { chatArchived = true; archivedNotice(); setComposer(); }
             if (ev.report) {  // a task that ended early still reports what it did
@@ -1045,7 +1054,9 @@
         }
       }
       if (!finished) { meta.textContent = 'The connection to the runtime ended before the reply finished.'; meta.classList.add('bad'); }
+      if (!finished && memEl && !answer.textContent.trim()) memEl.remove();
     } catch (e) {
+      if (!finished && memEl && !answer.textContent.trim()) memEl.remove();   // nothing was kept
       if (!finished) {
         meta.textContent = controller.signal.aborted ? 'Stopped.' : 'Could not reach the Umbrous runtime (' + e.message + ').';
         meta.classList.add(controller.signal.aborted ? 'warn' : 'bad');

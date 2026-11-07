@@ -164,7 +164,7 @@ class NativeValidationExitStatus(unittest.TestCase):
 
     def test_m6_checks_the_records(self):
         for kind in ("not-deleted", "used-after-delete", "used-when-off", "no-ids", "old-reply-rewritten",
-                     "same-project"):
+                     "same-project", "partial-no-ids"):
             r = self.run_script("validate-m6.sh", MEMORY=kind)
             self.assertEqual(r.returncode, 1, (kind, r.stdout + r.stderr))
             self.assertIn("FAIL memory records", r.stdout, kind)
@@ -336,6 +336,8 @@ def seed_memory(db_path: str, kind: str) -> None:
                             memory_ids=[pref.id, dec.id] if kind == "used-after-delete" else [pref.id])
     chat2 = history.create_chat("prj_general" if kind == "same-project" else other).id
     history.append_exchange(chat2, "What is the release branch?", "kept short", "m", "complete", memory_ids=[pref.id])
+    history.append_exchange(chat2, "Which answers do I like?", "You asked", "m", "error",
+                            memory_ids=None if kind == "partial-no-ids" else [pref.id])
     if kind == "logged":
         logs = Path(db_path).parent / "logs"
         logs.mkdir(exist_ok=True)

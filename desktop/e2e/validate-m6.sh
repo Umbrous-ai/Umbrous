@@ -42,19 +42,20 @@ print("personal:", personal); print("project:", project)
 assert len(personal) == 1 and personal[0][2].endswith("kept short") and personal[0][3] == "all", personal
 assert project == [], project                                   # the decision was deleted
 pid = personal[0][0]
-replies = c.execute("SELECT m.chat_id, ch.project_id, m.content, m.memory_ids FROM messages m JOIN chats ch "
+replies = c.execute("SELECT m.chat_id, ch.project_id, m.content, m.memory_ids, m.status FROM messages m JOIN chats ch "
                     "ON ch.id = m.chat_id WHERE m.role = 'assistant' ORDER BY m.created_at, m.seq").fetchall()
 ids = [json.loads(r[3]) if r[3] else [] for r in replies]
 print("memory ids per reply:", ids)
-assert len(replies) == 4, replies
+assert len(replies) == 5, replies
 assert len(ids[0]) == 2 and pid in ids[0], ids[0]                # both items, by id
 deleted = next(i for i in ids[0] if i != pid)
 assert "ZEBRA-SHIP-731" in replies[0][2]                         # the old reply still says it
 assert ids[1] == [], ids[1]                                      # memory off
 assert ids[2] == [pid] and ids[3] == [pid], ids                  # after the delete; and in the other project
-assert replies[3][1] != replies[0][1], "the last reply should be in the other project"
+assert replies[3][1] != replies[0][1], "the fourth reply should be in the other project"
+assert replies[4][4] != "complete" and ids[4] == [pid], (replies[4][4], ids[4])   # the partial reply keeps its ids
 assert c.execute("SELECT COUNT(*) FROM personal_memory WHERE id = ?", (deleted,)).fetchone()[0] == 0
-print("ok   two stores; ids stored with each reply; the deleted item is gone and no later reply used it; the old reply kept its text")
+print("ok   two stores; ids stored with each reply (also the partial one); the deleted item is gone and no later reply used it; the old reply kept its text")
 PY
 grep -q "ZEBRA-SHIP-731" "$H"/logs/*.log 2>/dev/null && fail "memory text reached a log file" || echo "ok   logs hold no memory text"
 [ $STATUS -eq 0 ] && echo "m6-memory: PASS" || echo "m6-memory: FAIL"

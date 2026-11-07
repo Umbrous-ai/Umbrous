@@ -57,6 +57,8 @@ class BrowserMemoryTests(unittest.TestCase):
         self.assertIn(decision, first["memory"])        # and still lists the deleted item's id
         self.assertEqual(out["other"]["items"], [personal])
         self.assertNotIn("release branch is called ship", out["otherReply"]["answer"])
+        self.assertTrue(out["partialMeta"].startswith("Incomplete"), out["partialMeta"])
+        self.assertEqual(out["partial"]["memory"], "Memory used: " + personal)
         self.assertEqual(out["pageErrors"], [])
         self.assertEqual(out["cspErrors"], [])
 

@@ -19,9 +19,10 @@ writes need your approval first. Only `approved` items are ever retrieved.
 
 Deleting an item removes its row (secure_delete on, so the freed pages are
 overwritten). There is no index, embedding or cache of memory anywhere:
-retrieval reads the table each time, so a deleted item cannot come back in a
-later reply. Replies already written (and the transcript that holds them) are
-not changed; they keep the memory ids they used, as a reference.
+retrieval reads the table each time, so a deleted item is never retrieved
+again. Replies already written (and the transcript that holds them) are not
+changed; they keep the memory ids they used, as a reference, and their text
+still goes back to the model as history in their own chat (docs/m6-memory.md).
 """
 
 from __future__ import annotations

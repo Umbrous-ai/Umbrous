@@ -103,7 +103,9 @@ def task_models():
 def fake_ollama(port: int, empty: bool = False, workspace: bool = False, tasks: bool = False,
                 memory: bool = False) -> None:
     from tests.fake_ollama import FakeModel, FakeOllama, memory_answer, workspace_agent
-    models = [FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer)] if memory else \
+    models = [FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer),
+              FakeModel("memory-dies:3b", tools="unsupported", behavior="die_midstream", chunk_delay=0.02,
+                        answer=memory_answer)] if memory else \
         task_models() if tasks else [FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02)] if workspace else [] if empty else [
         FakeModel("stress:1b", reply=big_markdown(100), chunk_delay=0.0005),
         # streams for ~30 s: time to switch chats, projects or archive mid-reply

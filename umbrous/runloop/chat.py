@@ -507,7 +507,9 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                 if failed:
                     partial = False
             final = end_task("cancelled" if exc.code == Cancelled.code else "failed", exc.code)
-            yield {"type": "error", "code": exc.code, "message": exc.message, "partial": partial, "report": final}
+            # M6: a partial reply is stored with the memory ids it was given; say so here too
+            yield {"type": "error", "code": exc.code, "message": exc.message, "partial": partial, "report": final,
+                   "memory_ids": memory_used if partial else []}
         except GeneratorExit:
             # The page went away mid-reply: stop the model call too, and keep
             # what arrived, as if the person had pressed stop.

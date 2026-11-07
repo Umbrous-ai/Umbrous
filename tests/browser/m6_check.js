@@ -82,6 +82,11 @@ const out = {};
   out.other = await page.$eval('#memory-body', (b) => ({
     items: [...b.querySelectorAll('.mem-item')].map((x) => x.dataset.memId), text: b.textContent }));
   out.otherReply = await ask('What is the release branch?');
+  // a reply that breaks off part way still names the memory it was given
+  await page.click('#model-pill');
+  await page.locator('.mm-row', { hasText: 'memory-dies:3b' }).locator('.mm-pick').click();
+  out.partial = await ask('What is the release branch?');
+  out.partialMeta = await page.$eval('#thread .reply:last-child .reply-meta', (m) => m.textContent);
   Object.assign(out, { pageErrors, cspErrors });
   await browser.close();
   console.log(JSON.stringify(out));

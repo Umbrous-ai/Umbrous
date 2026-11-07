@@ -28,7 +28,8 @@ from umbrous.persistence import db
 
 
 def models():
-    return [FakeModel("memory-aware:3b", tools="unsupported", answer=memory_answer)]
+    return [FakeModel("memory-aware:3b", tools="unsupported", answer=memory_answer),
+            FakeModel("memory-dies:3b", tools="unsupported", behavior="die_midstream", answer=memory_answer)]
 
 
 class StoreBase(unittest.TestCase):
@@ -281,6 +282,46 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(mem["project"], [])
         status, _, _ = self.rt.post_json(f"/api/memory/{dec['id']}/delete", {})
         self.assertEqual(status, 404)
+
+    def prompt(self):
+        """The last request's system message, and the rest (history and the new message)."""
+        msgs = self.fake.requests[-1]["body"]["messages"]
+        return msgs[0]["content"], "\n".join(m["content"] for m in msgs[1:])
+
+    def test_off_and_delete_stop_retrieval_but_history_still_carries_the_fact(self):
+        """The promise is no further retrieval. An earlier reply that repeated the
+        item is chat history, and goes back to the model in that chat; a new chat
+        has no such history. (The fake model ignores history, so this is checked
+        on the prompt itself, not on its answer.)"""
+        dec = self.add(store="project", project_id="prj_general", text="Deploy day is ZEBRA-THURSDAY")
+        chat = self.rt.new_chat()
+        self.send(chat, "When do we deploy?")
+        self.send(chat, "When do we deploy?", use_memory=False)
+        system, rest = self.prompt()
+        self.assertNotIn("ZEBRA-THURSDAY", system)          # not retrieved
+        self.assertIn("ZEBRA-THURSDAY", rest)               # but in the history: the first reply said it
+        self.rt.post_json(f"/api/memory/{dec['id']}/delete", {})
+        self.send(chat, "When do we deploy?")
+        system, rest = self.prompt()
+        self.assertNotIn("ZEBRA-THURSDAY", system)
+        self.assertIn("ZEBRA-THURSDAY", rest)
+        fresh = self.rt.new_chat()                          # how to compare: a new chat
+        self.send(fresh, "When do we deploy?")
+        system, rest = self.prompt()
+        self.assertNotIn("ZEBRA-THURSDAY", system + rest)
+
+    def test_a_partial_reply_names_its_memory_in_its_last_event(self):
+        item = self.add(store="personal", text="I like tea")
+        chat = self.rt.new_chat()
+        status, _, body = self.rt.post_json("/api/chat", {"chat_id": chat, "model": "memory-dies:3b",
+                                                          "message": "Which drink do I like?"})
+        events = [json.loads(x) for x in body.decode().splitlines() if x.strip()]
+        start, last = events[0], events[-1]
+        self.assertEqual([u["id"] for u in start["memory"]["used"]], [item["id"]])
+        self.assertEqual((last["type"], last["partial"]), ("error", True))
+        self.assertEqual(last["memory_ids"], [item["id"]])
+        _, view = self.rt.get_json(f"/api/chats/{chat}")
+        self.assertEqual(view["messages"][1]["memory_ids"], [item["id"]])
 
     def test_archiving_a_chat_leaves_memory(self):
         item = self.add(store="personal", text="I like tea")
