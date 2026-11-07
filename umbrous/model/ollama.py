@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
 from umbrous.model.base import (
-    CancelToken, Cancelled, ChatDelta, ChatDone, Deadlines, ModelError, ModelInfo, ModelNotInstalled,
+    CancelToken, Cancelled, ChatDelta, ChatDone, ChatToolCalls, Deadlines, ModelError, ModelInfo, ModelNotInstalled,
     ModelTimeout, ProviderError, ProviderUnavailable, StreamInterrupted, ToolsUnsupported,
 )
 
@@ -48,6 +48,19 @@ def _abort(conn: http.client.HTTPConnection) -> None:
             sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
+
+
+def _tool_call(raw: dict) -> tuple:
+    """Ollama's {"function": {"name", "arguments"}} → (name, arguments). Arguments may
+    arrive as an object or as JSON text; anything else is passed on for the gate to refuse."""
+    fn = raw.get("function") or {}
+    args = fn.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            pass
+    return (fn.get("name"), args if args is not None else {})
 
 
 class OllamaAdapter:
@@ -176,7 +189,8 @@ class OllamaAdapter:
 
     def chat_stream(self, model: str, messages: List[dict], options: Optional[dict] = None,
                     cancel: Optional[CancelToken] = None,
-                    deadlines: Optional[Deadlines] = None) -> Iterator[Union[ChatDelta, ChatDone]]:
+                    deadlines: Optional[Deadlines] = None,
+                    tools: Optional[List[dict]] = None) -> Iterator[Union[ChatDelta, ChatToolCalls, ChatDone]]:
         """Yield ChatDelta pieces as they arrive, then one ChatDone.
 
         Raises Cancelled, ModelTimeout, StreamInterrupted, ProviderUnavailable,
@@ -226,6 +240,8 @@ class OllamaAdapter:
             # M1 displays answers only; do not spend its reply budget on hidden thinking.
             body = {"model": model, "messages": messages, "stream": True,
                     "think": False, "options": options or {}}
+            if tools:
+                body["tools"] = tools
             try:
                 conn.request("POST", "/api/chat", body=json.dumps(body).encode(),
                              headers={"Content-Type": "application/json"})
@@ -280,9 +296,13 @@ class OllamaAdapter:
                 if "error" in chunk:
                     raise ProviderError(f"Ollama reported an error mid-reply: {self._error_text(chunk)}")
                 got_first = True
-                text = (chunk.get("message") or {}).get("content") or ""
+                message = chunk.get("message") or {}
+                text = message.get("content") or ""
                 if text:
                     yield ChatDelta(text)
+                calls = message.get("tool_calls")
+                if calls:
+                    yield ChatToolCalls(tuple(_tool_call(c) for c in calls if isinstance(c, dict)))
                 if chunk.get("done"):
                     yield ChatDone(
                         model=str(chunk.get("model") or model),

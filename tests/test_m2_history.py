@@ -130,7 +130,7 @@ class StoreTests(unittest.TestCase):
         db.save_probe(conn, "q:3b", "sha256:1", True, "passed", "ok", 10)
         conn.close()
         conn = db.connect(path)
-        self.assertEqual(db.schema_version(conn), 3)
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
         self.assertEqual(db.launch_count(conn), 1)
         self.assertIn(("q:3b", "sha256:1"), db.load_probes(conn))
         conn.close()

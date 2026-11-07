@@ -7,6 +7,10 @@
     bin/umbrous purge logs      delete the runtime's log files (asks for --yes)
     bin/umbrous models          list installed Ollama models, probe results and the exposure check
     bin/umbrous probe MODEL     run the tool-call probe on one model (or --all)
+    bin/umbrous workspace [PROJECT [FOLDER]] [--profile P] [--detach]
+                                show or set which folder a project may read (M3)
+    bin/umbrous receipts        recent tool receipts (--chat ID, --task ID for full records)
+    bin/umbrous purge receipts --all|--before DATE   delete receipts (asks for --yes)
     bin/umbrous prototype       open the static prototype file, as before M0 (handled in bin/umbrous)
     bin/umbrous version
 """
@@ -193,6 +197,88 @@ def purge_logs(config: Config, yes: bool) -> int:
 
 
 
+def _stores(config: Config):
+    from umbrous.gate.access import AccessStore
+    from umbrous.history.store import HistoryStore
+    from umbrous.persistence import db
+    from umbrous.receipts.store import ReceiptStore
+    make_private_dir(config.home)
+    db.connect(config.db_path).close()  # make sure the schema is current
+    return HistoryStore(config.db_path), AccessStore(config.db_path, config.home), ReceiptStore(config.db_path)
+
+
+def _find_project(history, name_or_id: str):
+    from umbrous.history.store import name_key
+    for p in history.list_projects():
+        if p.id == name_or_id or name_key(p.name) == name_key(name_or_id):
+            return p
+    return None
+
+
+def workspace_command(config: Config, project: Optional[str], root: Optional[str], profile: Optional[str],
+                      detach: bool) -> int:
+    """Show or change which folder each project may read (the access view, in a terminal)."""
+    from umbrous.gate.access import AccessError, PROFILES
+    history, access, _ = _stores(config)
+    if not project:
+        for p in history.list_projects():
+            view = access.view(p.id)
+            ws = view["workspace"]
+            print(f"{p.name} ({p.id})")
+            print(f"  workspace: {ws['root'] + '  profile: ' + ws['profile_label'] if ws else 'none'}")
+            for g in view["grants"]:
+                print(f"  grant {g['id']}: {g['capability']} since {g['granted_at']}")
+        return 0
+    p = _find_project(history, project)
+    if p is None:
+        print(f"No project called {project!r}.", file=sys.stderr)
+        return 2
+    try:
+        if detach:
+            access.detach(p.id)
+            print(f"{p.name}: workspace detached and its grants revoked. Nothing in the folder was touched.")
+        elif root:
+            ws = access.attach(p.id, root, profile or "workspace_read")
+            print(f"{p.name}: workspace {ws.root} with the {PROFILES[ws.profile]['label']} profile.")
+            print("Reminder: this is not an OS sandbox. Use a small test folder with no real secrets.")
+        elif profile:
+            ws = access.set_profile(p.id, profile)
+            print(f"{p.name}: profile is now {PROFILES[ws.profile]['label']}.")
+        else:
+            ws = access.workspace(p.id)
+            print(f"{p.name}: {ws.root + ' (' + PROFILES[ws.profile]['label'] + ')' if ws else 'no workspace'}")
+    except AccessError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+    return 0
+
+
+def receipts_command(config: Config, chat: Optional[str], task: Optional[str], last: int) -> int:
+    import json as _json
+    _, _, receipts = _stores(config)
+    records = receipts.for_task(task) if task else receipts.for_chat(chat) if chat else receipts.latest(last)
+    for r in records:
+        print(_json.dumps(r, indent=2) if (task or chat) else
+              f"{r['started_at']}  {r['decision']:<9} {r['action']:<10} {r['scope']}  ({r['reason']})")
+    if not records:
+        print("No receipts.")
+    return 0
+
+
+def purge_receipts(config: Config, before: Optional[str], purge_all: bool, yes: bool) -> int:
+    _, _, receipts = _stores(config)
+    if not before and not purge_all:
+        print("Say what to purge: --all, or --before YYYY-MM-DD.", file=sys.stderr)
+        return 2
+    n = receipts.count(before)
+    print(f"{n} receipt(s) {'started before ' + before if before else 'in total'}.")
+    if not yes:
+        print("Run again with --yes to delete them. Receipts are the record of what tools did; this cannot be undone.")
+        return 1
+    print(f"Deleted {receipts.purge(before)} receipt(s).")
+    return 0
+
+
 def models_command(config: Config, command: str, names: List[str], probe_all: bool) -> int:
     from umbrous.model.base import Deadlines, ModelError
     from umbrous.model.exposure import check_exposure
@@ -253,8 +339,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                          help="started by the desktop app: JSON lines on stdout, commands on stdin (umbrous/desktop.py)")
     sub.add_parser("test", help="run the test suite")
     p_purge = sub.add_parser("purge", help="delete stored records")
-    p_purge.add_argument("what", choices=["logs"], help="what to purge (receipts arrive in M3)")
+    p_purge.add_argument("what", choices=["logs", "receipts"], help="what to purge")
     p_purge.add_argument("--yes", action="store_true", help="really delete")
+    p_purge.add_argument("--all", dest="purge_all", action="store_true", help="receipts: all of them")
+    p_purge.add_argument("--before", help="receipts: those started before this date (YYYY-MM-DD)")
+    p_ws = sub.add_parser("workspace", help="show or set a project's workspace folder and access profile")
+    p_ws.add_argument("project", nargs="?", help="project name or id (omit to list all)")
+    p_ws.add_argument("root", nargs="?", help="folder to attach")
+    p_ws.add_argument("--profile", choices=["workspace_read", "ask_before_read"])
+    p_ws.add_argument("--detach", action="store_true", help="forget the folder and revoke its grants")
+    p_rc = sub.add_parser("receipts", help="show tool receipts")
+    p_rc.add_argument("--chat", help="all receipts of one chat (chat_…)")
+    p_rc.add_argument("--task", help="all receipts of one task (tsk_…)")
+    p_rc.add_argument("--last", type=int, default=20, help="how many recent receipts (default 20)")
     sub.add_parser("version")
     sub.add_parser("models", help="list Ollama models, probe results and the exposure check")
     p_probe = sub.add_parser("probe", help="run the tool-call probe")
@@ -282,7 +379,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     if command == "purge":
+        if args.what == "receipts":
+            return purge_receipts(config, args.before, args.purge_all, args.yes)
         return purge_logs(config, args.yes)
+    if command == "workspace":
+        return workspace_command(config, args.project, args.root, args.profile, args.detach)
+    if command == "receipts":
+        return receipts_command(config, args.chat, args.task, args.last)
     if command in ("models", "probe"):
         return models_command(config, command, getattr(args, "model", []), getattr(args, "all", False))
     desktop = args.command == "serve" and args.desktop

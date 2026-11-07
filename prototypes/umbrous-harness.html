@@ -131,6 +131,27 @@ textarea:focus-visible,input:focus-visible{outline:none}
 .mm-check:hover{color:var(--text-strong)}
 .mm-empty,.mm-foot{font-size:var(--fs-12);color:var(--text-subtle);padding:8px}
 .mm-foot{border-top:1px solid var(--border);margin-top:4px}
+/* M3: tools, approvals, access */
+.rsec[hidden]{display:none}
+.tool-steps{margin:0 0 var(--sp-12)}
+.step .i{width:14px;height:14px;flex:none}
+.step.denied,.step.failed,.step.uncertain{color:var(--warning)}
+.step .why{color:var(--text-subtle);font-size:var(--fs-12)}
+.approval{border:1px solid var(--accent);border-radius:var(--r-12);padding:12px 14px;margin:var(--sp-8) 0 var(--sp-16);font-size:var(--fs-13);color:var(--text-default)}
+.approval .ttl{color:var(--text-strong);font-weight:var(--fw-medium);margin-bottom:4px}
+.approval code{font:var(--fs-12) var(--mono);color:var(--text-strong)}
+.approval .acts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.approval .acts button{border:1px solid var(--border-strong);border-radius:var(--r-full);padding:3px 12px;color:var(--text-strong)}
+.approval .acts button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.approval.done{border-color:var(--border);opacity:.8}
+.sources{font-size:var(--fs-12);color:var(--text-subtle);margin-top:6px}
+.sources code{font:var(--fs-12) var(--mono);color:var(--text-default)}
+.acc-root{font:var(--fs-12) var(--mono);color:var(--text-strong);overflow-wrap:anywhere;margin-bottom:6px}
+.acc-row{display:flex;align-items:center;gap:8px;font-size:var(--fs-13);margin:6px 0}
+.acc-row select,.acc-row input{flex:1;min-width:0;height:28px;padding:0 8px;border:1px solid var(--border-strong);border-radius:var(--r-6);background:var(--bg-raised);color:var(--text-strong);font:inherit;font-size:var(--fs-13)}
+.acc-row button{border:1px solid var(--border-strong);border-radius:var(--r-full);padding:2px 10px;font-size:var(--fs-12);color:var(--text-strong);white-space:nowrap}
+.acc-note{font-size:var(--fs-12);color:var(--text-subtle);margin-top:6px}
+.acc-err{font-size:var(--fs-12);color:var(--danger)}
 /* M2: history */
 .nav.archived .t{color:var(--text-subtle);font-style:italic}
 .nav.toggle-archived{height:30px;font-size:var(--fs-12);color:var(--text-subtle)}
@@ -335,6 +356,10 @@ h3{font-size:var(--fs-16);font-weight:var(--fw-medium);color:var(--text-strong);
         <div class="kv"><span class="k">Runs on</span><span class="v"><span class="dot"></span>Local</span></div>
         <div class="kv"><span class="k">Project</span><span class="v"><svg class="i"><use href="#folder"/></svg><span id="sess-project">Eval harness</span></span></div>
         <div class="kv" id="ctx-row" style="height:auto;padding-top:6px;display:block"><div style="display:flex;justify-content:space-between;font-size:var(--fs-12);color:var(--text-subtle)"><span>Context</span><span id="ctx-label">48k / 128k</span></div><div class="ctx"><i id="ctx-bar"></i></div></div>
+      </div>
+      <div class="rsec" id="access" hidden>
+        <h4>Access</h4>
+        <div id="access-body"></div>
       </div>
       <div class="rsec">
         <h4>Tools</h4>

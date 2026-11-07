@@ -12,7 +12,9 @@ Versions so far:
   1 (M0)  `meta` key/value table and `launches`, one row per start and stop.
   2 (M1)  `model_probes`, the result of the tool-call probe per model digest.
   3 (M2)  `projects`, `chats`, `messages`: the chat history store.
-Receipts arrive in M3, task state in M4.
+  4 (M3)  `workspaces`, `access_policy`, `grants` (the access profile store),
+          `receipts` (one per tool attempt), and `messages.task_id`.
+Task state arrives in M4.
 """
 
 from __future__ import annotations
@@ -90,6 +92,46 @@ MIGRATIONS = (
     );
     INSERT INTO projects (id, name, name_key, created_at)
         VALUES ('prj_general', 'General', 'general', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    """,
+    # version 4 (M3): workspaces, access profiles, grants and receipts. Each
+    # project has at most one workspace folder and one profile. policy_version
+    # goes up whenever the workspace or profile changes, which makes every
+    # approval given under the old policy stale. Receipts are their own store:
+    # never memory, never shown to the model.
+    """
+    CREATE TABLE workspaces (
+        project_id  TEXT PRIMARY KEY REFERENCES projects(id),
+        root        TEXT NOT NULL,
+        profile     TEXT NOT NULL CHECK (profile IN ('workspace_read', 'ask_before_read')),
+        attached_at TEXT NOT NULL
+    );
+    CREATE TABLE access_policy (
+        project_id  TEXT PRIMARY KEY REFERENCES projects(id),
+        version     INTEGER NOT NULL
+    );
+    CREATE TABLE grants (
+        id          TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL REFERENCES projects(id),
+        capability  TEXT NOT NULL,
+        policy_version INTEGER NOT NULL,
+        granted_at  TEXT NOT NULL,
+        revoked_at  TEXT
+    );
+    CREATE INDEX grants_active ON grants (project_id, capability, revoked_at);
+    CREATE TABLE receipts (
+        receipt_id  TEXT PRIMARY KEY,
+        task_id     TEXT NOT NULL,
+        action_id   TEXT NOT NULL,
+        project_id  TEXT,
+        chat_id     TEXT,
+        action      TEXT NOT NULL,
+        decision    TEXT NOT NULL CHECK (decision IN ('allowed', 'denied', 'failed', 'uncertain')),
+        started_at  TEXT NOT NULL,
+        record      TEXT NOT NULL
+    );
+    CREATE INDEX receipts_by_task ON receipts (task_id);
+    CREATE INDEX receipts_by_chat ON receipts (chat_id, started_at);
+    ALTER TABLE messages ADD COLUMN task_id TEXT;
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)

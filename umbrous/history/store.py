@@ -107,6 +107,7 @@ class Message:
     prompt_tokens: Optional[int]
     reply_tokens: Optional[int]
     created_at: str
+    task_id: Optional[str] = None   # M3: links a reply to its tool receipts
 
     def as_dict(self) -> dict:
         return dict(self.__dict__)
@@ -193,8 +194,8 @@ class HistoryStore:
     def messages(self, chat_id: str) -> List[Message]:
         self.get_chat(chat_id)
         with self._db() as c:
-            rows = c.execute("""SELECT seq, role, content, model, status, prompt_tokens, reply_tokens, created_at
-                                FROM messages WHERE chat_id = ? ORDER BY seq""", (chat_id,)).fetchall()
+            rows = c.execute("""SELECT seq, role, content, model, status, prompt_tokens, reply_tokens, created_at,
+                                       task_id FROM messages WHERE chat_id = ? ORDER BY seq""", (chat_id,)).fetchall()
         return [Message(*r) for r in rows]
 
     def turns(self, chat_id: str) -> List[Turn]:
@@ -202,7 +203,8 @@ class HistoryStore:
         return [Turn(m.role, m.content) for m in self.messages(chat_id)]
 
     def append_exchange(self, chat_id: str, user_text: str, reply_text: str, model: str, status: str,
-                        prompt_tokens: Optional[int] = None, reply_tokens: Optional[int] = None) -> None:
+                        prompt_tokens: Optional[int] = None, reply_tokens: Optional[int] = None,
+                        task_id: Optional[str] = None) -> None:
         """Store one message and its reply together, in one transaction."""
         if status not in STATUSES:
             raise HistoryError(f"unknown status {status!r}")
@@ -219,11 +221,11 @@ class HistoryStore:
                 archived_at, title, last = row
                 if archived_at is not None:
                     raise HistoryError("This chat is archived. Restore it to continue.", "chat_archived")
-                c.execute("INSERT INTO messages (chat_id, seq, role, content, model, status, created_at) "
-                          "VALUES (?, ?, 'user', ?, NULL, 'complete', ?)", (chat_id, last + 1, user_text, now))
+                c.execute("INSERT INTO messages (chat_id, seq, role, content, model, status, created_at, task_id) "
+                          "VALUES (?, ?, 'user', ?, NULL, 'complete', ?, ?)", (chat_id, last + 1, user_text, now, task_id))
                 c.execute("INSERT INTO messages (chat_id, seq, role, content, model, status, prompt_tokens, "
-                          "reply_tokens, created_at) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?)",
-                          (chat_id, last + 2, reply_text, model, status, prompt_tokens, reply_tokens, now))
+                          "reply_tokens, created_at, task_id) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
+                          (chat_id, last + 2, reply_text, model, status, prompt_tokens, reply_tokens, now, task_id))
                 new_title = make_title(user_text) if last == 0 else title
                 c.execute("UPDATE chats SET updated_at = ?, title = ? WHERE id = ?", (now, new_title, chat_id))
                 c.execute("COMMIT")
