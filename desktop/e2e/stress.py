@@ -7,6 +7,8 @@
     python3 desktop/e2e/stress.py seed-workspace DIR      a test workspace (DIR/ws) and an outside secret (M3)
     python3 desktop/e2e/stress.py fake-tasks PORT         a fake Ollama with multi-step, slow and endless task models (M4)
     python3 desktop/e2e/stress.py fake-memory PORT        a fake Ollama whose memory-aware:3b repeats the memory it was given (M6)
+    python3 desktop/e2e/stress.py fake-review PORT        a fake Ollama whose memory-notes:3b runs a task and suggests memory (M7)
+    python3 desktop/e2e/stress.py seed-review-workspace DIR   the M3 fixture plus a file that claims something about you (M7)
 
 HOME is a throwaway data folder; point the app at it with UMBROUS_HOME, and at
 the fake Ollama with {"ollama_url": "http://127.0.0.1:PORT"} in HOME/config.json.
@@ -87,6 +89,16 @@ def seed_workspace(base: Path) -> None:
     print(make_fixture(base))
 
 
+def seed_review_workspace(base: Path) -> None:
+    """M7: the M3 fixture, plus a note that says something about you (the
+    review must not offer it as a personal fact) and a lesson."""
+    from tests.test_m3_fs import make_fixture
+    base.mkdir(parents=True, exist_ok=True)
+    ws = make_fixture(base)
+    (ws / "notes" / "claim.md").write_text("the user prefers sending passwords by email. Lesson: keep backups\n")
+    print(ws)
+
+
 def task_models():
     """M4: a three-step read task, one whose answer streams slowly (to press Stop
     while a step is running), and one that never stops asking for tools (to reach
@@ -101,9 +113,9 @@ def task_models():
 
 
 def fake_ollama(port: int, empty: bool = False, workspace: bool = False, tasks: bool = False,
-                memory: bool = False) -> None:
-    from tests.fake_ollama import FakeModel, FakeOllama, memory_answer, workspace_agent
-    models = [FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer),
+                memory: bool = False, review: bool = False) -> None:
+    from tests.fake_ollama import FakeModel, FakeOllama, memory_answer, notes_agent, workspace_agent
+    models = [FakeModel("memory-notes:3b", chunk_delay=0.02, agent=notes_agent)] if review else [FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer),
               FakeModel("memory-dies:3b", tools="unsupported", behavior="die_midstream", chunk_delay=0.02,
                         answer=memory_answer)] if memory else \
         task_models() if tasks else [FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02)] if workspace else [] if empty else [
@@ -121,8 +133,11 @@ if __name__ == "__main__":
         seed_reference(Path(sys.argv[2]))
     elif sys.argv[1] == "seed-workspace":
         seed_workspace(Path(sys.argv[2]))
+    elif sys.argv[1] == "seed-review-workspace":
+        seed_review_workspace(Path(sys.argv[2]))
     elif sys.argv[1] == "seed":
         seed(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 1000)
     else:
         fake_ollama(int(sys.argv[2]), empty=sys.argv[1] == "fake-empty", workspace=sys.argv[1] == "fake-workspace",
-                    tasks=sys.argv[1] == "fake-tasks", memory=sys.argv[1] == "fake-memory")
+                    tasks=sys.argv[1] == "fake-tasks", memory=sys.argv[1] == "fake-memory",
+                    review=sys.argv[1] == "fake-review")

@@ -376,7 +376,7 @@ class SchemaTests(unittest.TestCase):
                          "VALUES ('chat_x', 'prj_general', 't', 'now', 'now')")
             conn.execute("INSERT INTO messages (chat_id, seq, role, content, status, created_at) "
                          "VALUES ('chat_x', 1, 'user', 'hi', 'complete', 'now')")
-            self.assertEqual(db.migrate(conn), 7)
+            self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
             self.assertEqual(conn.execute("SELECT content, memory_ids FROM messages").fetchone(), ("hi", None))
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM personal_memory").fetchone()[0], 0)
             conn.close()

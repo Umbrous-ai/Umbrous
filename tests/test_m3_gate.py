@@ -9,7 +9,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tests.fake_ollama import FakeModel, FakeOllama, scripted, workspace_agent
+from tests.fake_ollama import SUGGEST_MARK, FakeModel, FakeOllama, scripted, workspace_agent
 from tests.helpers import RunningRuntime
 from tests.test_m3_fs import SECRET, make_fixture
 from umbrous.gate.access import AccessError, AccessStore
@@ -229,7 +229,9 @@ class ToolChatTests(unittest.TestCase):
             self.assertEqual(rt.post_json("/api/models/probe", {"model": m})[0], 200)
 
     def ollama_chat_bodies(self):
-        return [r["body"] for r in self.fake.requests if r["path"] == "/api/chat" and r["body"].get("stream", True)]
+        """The reply's model calls (not M7's memory suggestion call after it)."""
+        return [r["body"] for r in self.fake.requests if r["path"] == "/api/chat" and r["body"].get("stream", True)
+                and SUGGEST_MARK not in (r["body"]["messages"][0].get("content") or "")]
 
     def test_answers_from_a_workspace_file_and_names_its_evidence(self):
         with self.rt() as rt:

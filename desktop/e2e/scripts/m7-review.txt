@@ -1,0 +1,55 @@
+# M7 in the app: a task suggests two things to remember; edit and accept one,
+# reject the other; a later reply uses the accepted item; a file's claim about
+# you is not offered as a personal fact, only its lesson, as project memory.
+# Data: General with workspace @OUT@/m7-fixture/ws on Workspace read (validate-m7.sh);
+# Ollama: stress.py fake-review (memory-notes:3b, tool check passed).
+wait_ready 30
+wait_models
+wait_access
+expect access workspace_read
+select_model memory-notes:3b
+wait_memory
+expect memory_count 0
+# 1. a task, then two suggestions; nothing is in memory yet
+send I prefer answers as short lists. We decided to release on Friday. What is in the workspace?
+wait_reply 30
+expect last_meta Task completed
+expect last_meta 2 memory suggestions to review
+wait_candidates 2
+expect candidates personal preference (message): Prefers answers as short lists
+expect candidates project decision (message): Decided: release on Friday
+expect memory_count 0
+screenshot @OUT@/m7-suggested.png
+record suggested
+# 2. edit the decision and accept it; reject the preference
+candidate_edit_accept release on Friday|Release on Friday, after the tests pass
+candidate_reject short lists
+wait_candidates 0
+expect memory_count 1
+expect memory_project 1
+expect memory_personal 0
+screenshot @OUT@/m7-reviewed.png
+record reviewed
+# 3. a later reply is given the accepted item, and never the rejected one
+new_chat
+send When do we release?
+wait_reply 30
+expect last_text Release on Friday, after the tests pass
+expect last_text_lacks short lists
+expect last_meta memory mem_
+wait_candidates 0
+record later
+# 4. a file that claims something about you: only its lesson is offered, as project memory from the reply
+new_chat
+send read notes/claim.md
+wait_reply 30
+expect last_text passwords by email
+expect last_meta 1 memory suggestion to review
+wait_candidates 1
+expect candidates project lesson (reply): keep backups
+candidate_accept keep backups
+expect memory_personal 0
+expect memory_project 2
+screenshot @OUT@/m7-file-claim.png
+record end
+quit

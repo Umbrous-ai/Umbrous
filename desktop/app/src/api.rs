@@ -201,6 +201,48 @@ pub struct MemoryView {
     pub project_id: Option<String>,
     pub personal: Vec<MemoryItem>,
     pub project: Vec<MemoryItem>,
+    /// M7: suggestions from tasks, waiting for review (never retrieved until accepted)
+    #[serde(default)]
+    pub candidates: Vec<Candidate>,
+}
+
+/// One suggestion for memory after a task (umbrous/memory/review.py, M7).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Candidate {
+    pub id: String,
+    pub store: String,
+    pub kind: String,
+    pub text: String,
+    pub quote: String,
+    /// "message" (your own words) or "reply"
+    pub basis: String,
+    /// personal: "all" or a list of project ids; project: the project id
+    pub scope: Value,
+}
+
+impl Candidate {
+    /// Where accepting it writes it, as the panel shows it.
+    pub fn destination(&self, project_name: &str) -> String {
+        if self.store == "project" {
+            return format!("this project · {}", self.kind);
+        }
+        let where_ = if self.scope.as_str() == Some("all") { "all projects".to_string() } else { project_name.to_string() };
+        format!("personal {} · {}", self.kind, where_)
+    }
+
+    pub fn source(&self) -> String {
+        let from = if self.basis == "message" { "your message" } else { "the reply" };
+        format!("From {from}: “{}”", self.quote)
+    }
+}
+
+/// The reply's meta line says how many suggestions wait for review (M7).
+pub fn suggestion_note(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some("1 memory suggestion to review".into()),
+        n => Some(format!("{n} memory suggestions to review")),
+    }
 }
 
 /// The reply's meta line names the memory items it was given (M6).
@@ -355,6 +397,23 @@ mod tests {
     }
 
     #[test]
+    fn candidates_parse() {
+        let v: MemoryView = serde_json::from_value(json!({"project_id": "prj_general", "personal": [], "project": [],
+            "candidates": [
+                {"id": "cand_1", "store": "personal", "kind": "preference", "text": "Prefers lists",
+                 "quote": "I prefer lists", "basis": "message", "scope": ["prj_general"], "status": "pending"},
+                {"id": "cand_2", "store": "project", "kind": "lesson", "text": "Keep backups",
+                 "quote": "Lesson: keep backups", "basis": "reply", "scope": "prj_general", "status": "pending"}]}))
+            .unwrap();
+        assert_eq!(v.candidates[0].destination("General"), "personal preference · General");
+        assert_eq!(v.candidates[1].destination("General"), "this project · lesson");
+        assert_eq!(v.candidates[0].source(), "From your message: “I prefer lists”");
+        assert_eq!(v.candidates[1].source(), "From the reply: “Lesson: keep backups”");
+        assert_eq!(suggestion_note(0), None);
+        assert_eq!(suggestion_note(2).unwrap(), "2 memory suggestions to review");
+    }
+
+    #[test]
     fn memory_view_and_ids_parse() {
         let v: MemoryView = serde_json::from_value(json!({"project_id": "prj_general", "limits": {},
             "personal": [{"id": "mem_0123456789abcdef", "store": "personal", "kind": "preference", "text": "tea",
@@ -372,6 +431,7 @@ mod tests {
             "status": "complete", "prompt_tokens": null, "reply_tokens": null, "memory_ids": null})).unwrap();
         assert!(old.memory_ids.is_none());
         assert_eq!(memory_note(&[]), None);
+        assert!(v.candidates.is_empty());   // an M6 runtime sends none
     }
 
     #[test]

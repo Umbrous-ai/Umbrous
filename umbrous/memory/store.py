@@ -12,10 +12,12 @@ never deletes from another.
                     used only in chats of that project, never in another.
 
 Every item has an id (mem_…), its store, its scope, a kind, its text, a
-source (how it got here: typed by you, or later proposed from a chat), times,
-and an approval state. In M6 every item is entered by you, so it is
-`approved`; `proposed` and `rejected` are reserved for M7, where proposed
-writes need your approval first. Only `approved` items are ever retrieved.
+source (how it got here: typed by you, or a task's suggestion you accepted,
+M7), times, and an approval state. Only `approved` items are ever retrieved.
+M7 keeps suggestions out of these tables altogether: they wait in their own
+queue (memory/review.py) and an item is written here, `approved`, only when
+you accept one. So `proposed` and `rejected` are never written; the column
+and the retrieval filter stay as a second line of defence.
 
 Deleting an item removes its row (secure_delete on, so the freed pages are
 overwritten). There is no index, embedding or cache of memory anywhere:
@@ -71,7 +73,7 @@ class MemoryItem:
     kind: str
     text: str
     scope: object                   # personal: "all" or [project ids]; project: the project id
-    source: dict                    # {"type": "manual"} (M6); M7 adds {"type": "chat", "chat_id", "task_id"}
+    source: dict                    # {"type": "manual"} (M6); M7: {"type": "task", task_id, chat_id, candidate_id, basis, …}
     approval: str
     created_at: str
     updated_at: str
@@ -152,13 +154,20 @@ class PersonalMemory(_Repo):
         text, kind, sc = check_text(text), self._kind(kind), self._scope(scope, project_exists)
         if approval not in APPROVALS:
             raise MemoryError_("bad approval state", "bad_approval")
-        item_id, now = new_memory_id(), _now()
         with self._lock, self._db() as c:
-            if c.execute("SELECT COUNT(*) FROM personal_memory").fetchone()[0] >= MAX_ITEMS:
-                raise MemoryError_(f"Personal memory holds at most {MAX_ITEMS} items.", "memory_full")
-            c.execute(f"INSERT INTO personal_memory ({self._cols}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                      (item_id, kind, text, sc, json.dumps(source or {"type": "manual"}), approval, now, now))
+            item_id = self.insert(c, text, kind, sc, source, approval)
         return self.get(item_id)
+
+    def insert(self, c: sqlite3.Connection, text: str, kind: str, scope_json: str, source: Optional[dict],
+               approval: str = "approved") -> str:
+        """Write one already validated item on an open connection (M7 uses
+        this inside its own transaction, so accepting a candidate is one write)."""
+        if c.execute("SELECT COUNT(*) FROM personal_memory").fetchone()[0] >= MAX_ITEMS:
+            raise MemoryError_(f"Personal memory holds at most {MAX_ITEMS} items.", "memory_full")
+        item_id, now = new_memory_id(), _now()
+        c.execute(f"INSERT INTO personal_memory ({self._cols}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                  (item_id, kind, text, scope_json, json.dumps(source or {"type": "manual"}), approval, now, now))
+        return item_id
 
     def get(self, item_id: str) -> Optional[MemoryItem]:
         with self._db() as c:
@@ -201,15 +210,21 @@ class ProjectMemory(_Repo):
         text, kind = check_text(text), self._kind(kind)
         if approval not in APPROVALS:
             raise MemoryError_("bad approval state", "bad_approval")
-        item_id, now = new_memory_id(), _now()
         with self._lock, self._db() as c:
-            if c.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
-                raise MemoryError_("That project does not exist.", "no_such_project")
-            if c.execute("SELECT COUNT(*) FROM project_memory WHERE project_id = ?", (project_id,)).fetchone()[0] >= MAX_ITEMS:
-                raise MemoryError_(f"A project's memory holds at most {MAX_ITEMS} items.", "memory_full")
-            c.execute(f"INSERT INTO project_memory ({self._cols}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                      (item_id, project_id, kind, text, json.dumps(source or {"type": "manual"}), approval, now, now))
+            item_id = self.insert(c, project_id, text, kind, source, approval)
         return self.get(item_id)
+
+    def insert(self, c: sqlite3.Connection, project_id: str, text: str, kind: str, source: Optional[dict],
+               approval: str = "approved") -> str:
+        """Write one already validated item on an open connection (see PersonalMemory.insert)."""
+        if c.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
+            raise MemoryError_("That project does not exist.", "no_such_project")
+        if c.execute("SELECT COUNT(*) FROM project_memory WHERE project_id = ?", (project_id,)).fetchone()[0] >= MAX_ITEMS:
+            raise MemoryError_(f"A project's memory holds at most {MAX_ITEMS} items.", "memory_full")
+        item_id, now = new_memory_id(), _now()
+        c.execute(f"INSERT INTO project_memory ({self._cols}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                  (item_id, project_id, kind, text, json.dumps(source or {"type": "manual"}), approval, now, now))
+        return item_id
 
     def get(self, item_id: str) -> Optional[MemoryItem]:
         with self._db() as c:

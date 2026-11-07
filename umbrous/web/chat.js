@@ -731,6 +731,96 @@
     wrap.append(r, r2);
     return wrap;
   }
+  // ---------- M7: suggestions to review ----------
+  // After a task, the model may suggest things to remember. They wait for you
+  // in a queue the retrieval never reads; only Accept writes one to memory.
+  const DROP_LABEL = {
+    not_your_words: 'only in the reply, not your own words (so not personal, and not a decision)',
+    duplicate: 'already in memory or waiting', rejected_before: 'rejected before', not_grounded: 'no matching quote',
+    looks_secret: 'looked like a secret', bad_store: 'not valid', bad_kind: 'not valid', bad_text: 'not valid',
+    too_many: 'over the limit', queue_full: 'too many waiting', unreadable: 'the model answer was not readable',
+    model_error: 'the model call failed', stopped: 'stopped', error: 'an error',
+  };
+  function droppedLine(dropped) {
+    const parts = Object.entries(dropped || {}).map(([k, n]) => `${n} ${DROP_LABEL[k] || k}`);
+    return parts.length ? el('div', 'acc-note', 'Not offered: ' + parts.join('; ') + '.') : null;
+  }
+  function destination(c) {
+    if (c.store === 'project') return `this project · ${c.kind}`;
+    const where = c.scope === 'all' ? 'all projects' : c.scope.map(projectName).join(', ');
+    return `personal ${c.kind} · ${where}`;
+  }
+  function candidateRow(c) {
+    const row = el('div', 'mem-cand');
+    row.dataset.candId = c.id;
+    const err = el('div', 'acc-err');
+    err.hidden = true;
+    const settle = (text, cls) => { row.textContent = ''; row.appendChild(el('div', 'acc-note' + (cls ? ' ' + cls : ''), text)); loadMemory(); };
+    async function send(action, body) {
+      try {
+        const j = await getJson('/api/memory/candidates/' + c.id + action, { json: body || {} });
+        if (action === '/accept') settle(`Saved as ${j.item.id} (${destination(j.item)}).`, 'ok');
+        else settle('Rejected. It was never in memory, its text is not kept, and it will not be suggested again here.');
+      } catch (e) { err.textContent = e.message; err.hidden = false; }
+    }
+    function view() {
+      row.textContent = '';
+      const text = el('div', 'mem-text', c.text);
+      text.appendChild(el('span', 'mem-tag', '→ ' + destination(c)));
+      const src = el('div', 'mem-src', `From ${c.basis === 'message' ? 'your message' : 'the reply'}: “${c.quote}”`);
+      src.title = `Suggested by task ${c.task_id} in chat ${c.chat_id}` + (c.basis === 'reply' ?
+        '. Words that are only in the reply (which may repeat a file) can only become project state or a lesson.' : '');
+      const r = el('div', 'acc-row');
+      r.append(memButton('Accept', () => send('/accept')), memButton('Edit', edit), memButton('Reject', () => send('/reject')));
+      row.append(text, src, r, err);
+    }
+    function edit() {
+      row.textContent = '';
+      const input = stopKeys(el('input'));
+      input.value = c.text;
+      input.setAttribute('aria-label', 'Suggestion text');
+      const sel = el('select');
+      sel.setAttribute('aria-label', 'Kind');
+      const kinds = c.store === 'personal' ? ['fact', 'preference'] : (c.basis === 'reply' ? ['state', 'lesson'] : ['decision', 'state', 'lesson']);
+      for (const k of kinds) { const o = el('option', '', k); o.value = k; o.selected = k === c.kind; sel.appendChild(o); }
+      sel.addEventListener('click', (e) => e.stopPropagation());
+      const r2 = el('div', 'acc-row');
+      r2.appendChild(sel);
+      let all = null;
+      if (c.store === 'personal') {
+        const lab = el('label', 'acc-note');
+        all = el('input');
+        all.type = 'checkbox';
+        all.checked = c.scope === 'all';
+        lab.append(all, document.createTextNode(' all projects'));
+        lab.style.margin = '0';
+        r2.appendChild(lab);
+      }
+      const r3 = el('div', 'acc-row');
+      r3.append(memButton('Accept', () => {
+        const body = { text: input.value, kind: sel.value };
+        if (all) body.scope = all.checked ? 'all' : [c.project_id];
+        send('/accept', body);
+      }), memButton('Cancel', view));
+      const r1 = el('div', 'acc-row');
+      r1.appendChild(input);
+      row.append(r1, r2, r3, err);
+      input.focus();
+    }
+    view();
+    return row;
+  }
+  function suggestionCard(cands, dropped) {
+    if (!cands.length && !Object.keys(dropped || {}).length) return null;
+    const box = el('div', 'mem-suggest');
+    box.appendChild(el('div', 'mem-h', cands.length ? 'Suggested for memory' : 'Nothing suggested for memory'));
+    if (cands.length) box.appendChild(el('div', 'acc-note', 'Nothing is saved unless you accept it. Also in Details › Memory.'));
+    for (const c of cands) box.appendChild(candidateRow(c));
+    const d = droppedLine(dropped);
+    if (d) box.appendChild(d);
+    return box;
+  }
+
   function renderMemory(v) {
     const box = $('#memory-body');
     box.textContent = '';
@@ -748,6 +838,11 @@
     used.id = 'mem-used';
     box.appendChild(used);
     if (lastMemory) showMemoryUsed(lastMemory);
+    if (v.candidates && v.candidates.length) {   // M7
+      box.appendChild(el('div', 'mem-h', `Waiting for review (${v.candidates.length})`));
+      box.appendChild(el('div', 'acc-note', 'Suggested after tasks. Not in memory and never retrieved until you accept.'));
+      for (const c of v.candidates) box.appendChild(candidateRow(c));
+    }
     box.appendChild(el('div', 'mem-h', 'Personal'));
     if (!v.personal.length) box.appendChild(el('div', 'acc-note', 'Nothing saved.'));
     for (const m of v.personal) box.appendChild(memItem(m, err, m.applies));
@@ -1020,6 +1115,8 @@
           } else if (ev.type === 'delta') {
             answer.appendChild(document.createTextNode(ev.text));
             scrollDown();
+          } else if (ev.type === 'suggesting') {   // M7: the reply is saved; looking for things to remember
+            meta.textContent = 'Looking for things to remember…';
           } else if (ev.type === 'done') {
             finished = true;
             linkify(answer);
@@ -1035,6 +1132,8 @@
             if (memEl) reply.appendChild(memEl);
             const tr = taskReport(ev.report);
             if (tr) reply.appendChild(tr);
+            const sc = suggestionCard(ev.candidates || [], ev.candidates_dropped);   // M7
+            if (sc) { reply.appendChild(sc); loadMemory(); }
           } else if (ev.type === 'error') {
             finished = true;
             if (answer.textContent) linkify(answer);

@@ -10,8 +10,9 @@ Events (one JSON object per line on the wire):
     start  {run_id, model_requested, context, task_id, tools}
     delta  {text}
     tool_call / tool_result / approval_required     (M3; tool_call carries action_id since M4)
+    suggesting {}                                   (M7: looking for things to remember, after the reply)
     done   {model, prompt_tokens, reply_tokens, estimated_prompt_tokens, ms, done_reason, task_id,
-            tool_rounds, evidence, report}
+            tool_rounds, evidence, report, memory_ids, candidates, candidates_dropped}
     error  {code, message, partial, report}
 
 M4: a reply that may use tools is a task (tasks/). Its steps, actions, limits
@@ -58,6 +59,7 @@ from typing import Dict, Iterator, List, Optional
 from umbrous.config import Config
 from umbrous.context.assemble import MessageTooLong, assemble, estimate_tokens
 from umbrous.memory.retrieve import Selection, select
+from umbrous.memory.review import Review, parse, propose_messages
 from umbrous.memory.store import Memory
 from umbrous.gate.gate import APPROVAL_UNAVAILABLE, Call, Gate, Outcome, ollama_tools
 from umbrous.history.store import HistoryError, HistoryStore
@@ -152,7 +154,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
              chat_id: str, model_name: str, message: str, gate: Optional[Gate] = None,
              approvals: bool = False, tasks: Optional[TaskStore] = None,
              resume_task: Optional[str] = None, memory: Optional[Memory] = None,
-             use_memory: bool = True) -> Iterator[dict]:
+             use_memory: bool = True, review: Optional[Review] = None) -> Iterator[dict]:
     """`approvals`: the client can show approval cards and answer them (the
     browser page says so). Without it, a read that needs approval is refused at
     once with `approval_unavailable` instead of waiting for an answer that
@@ -164,7 +166,14 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
     `memory` (M6): the memory stores. Approved items in this chat's scope are
     retrieved for the message (bounded, see umbrous/memory/retrieve.py) and
     added to the system message; their ids go out in `start` and `done` and
-    are stored with the reply. `use_memory=False` sends none, to compare."""
+    are stored with the reply. `use_memory=False` sends none, to compare.
+
+    `review` (M7): after a task completes and its reply is saved, Observe +
+    Verify asks the model once for things worth remembering, and the review
+    queue checks them (memory/review.py). The ones that pass go out in `done`
+    as `candidates`, waiting for you; nothing is written to memory here. Not
+    with `use_memory=False`, not when `memory_suggestions` is off, and never
+    after a reply that did not complete. A failure here never fails the reply."""
     if resume_task is not None:
         if not isinstance(resume_task, str) or not TASK_ID_RE.match(resume_task) or tasks is None:
             yield {"type": "error", "code": "no_such_task", "message": "That task does not exist.", "partial": False}
@@ -236,6 +245,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
     report: Optional[dict] = None
     pending_done = False      # M5: the waiting message was stored with its reply
     memory_used: List[str] = []   # M6: ids of the memory items sent with this message
+    complete = False              # M7: the whole reply was saved (suggestions may still be running)
 
     def end_task(status: str, code: Optional[str]) -> Optional[dict]:
         nonlocal report
@@ -484,16 +494,30 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             # The exchange is stored first, then the report (M5: a crash in
             # between leaves the reply saved, and recovery says so).
             failed = keep("complete", piece.model, piece.prompt_tokens, piece.reply_tokens)
-            final = end_task("completed", None)
             if failed:
                 outcome = failed["code"]
-                yield dict(failed, report=final)
+                yield dict(failed, report=end_task("completed", None))
                 return
+            complete = True
+            # M7: Observe + Verify suggests things to remember. They only wait
+            # for review; nothing is written to memory here.
+            queued: list = []
+            dropped: Dict[str, int] = {}
+            if (trun is not None and review is not None and use_memory and config.memory_suggestions
+                    and not cancel.cancelled):
+                yield {"type": "suggesting"}
+                queued, dropped = _suggest(router, review, config, model.name, chat_info.project_id, chat_id,
+                                           task_id, message, "".join(text_parts), trun.evidence, cancel,
+                                           plan.window)
+                trun.memory_suggestions = {"queued": [{"id": c.id, "store": c.store, "kind": c.kind,
+                                                       "basis": c.basis} for c in queued], "dropped": dropped}
+            final = end_task("completed", None)
             yield {"type": "done", "model": piece.model, "prompt_tokens": piece.prompt_tokens,
                    "reply_tokens": piece.reply_tokens, "estimated_prompt_tokens": plan.estimated_tokens,
                    "ms": int((time.monotonic() - started) * 1000), "done_reason": piece.done_reason,
                    "task_id": task_id, "tool_rounds": rounds, "evidence": _dedupe(evidence), "report": final,
-                   "memory_ids": memory_used}
+                   "memory_ids": memory_used, "candidates": [c.as_dict() for c in queued],
+                   "candidates_dropped": dropped}
         except ModelError as exc:
             if exc.code == Cancelled.code and time_up.is_set():
                 # the task's own time limit cancelled it, not you
@@ -514,8 +538,12 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             # The page went away mid-reply: stop the model call too, and keep
             # what arrived, as if the person had pressed stop.
             cancel.cancel()
+            if complete:
+                # M7: the reply was complete and saved; only the suggestions were cut short
+                end_task("completed", None)
+                raise
             outcome = Cancelled.code
-            if "".join(text_parts).strip():
+            if "".join(text_parts).strip() and not pending_done:
                 keep("stopped", model.name)
             end_task("cancelled", "client_gone")
             raise
@@ -534,6 +562,40 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
         lock.release()
         log_event(log, "run.end", run_id=run_id, chat_id=chat_id, outcome=outcome,
                   reply_chars=sum(len(t) for t in text_parts), ms=int((time.monotonic() - started) * 1000))
+
+
+def _suggest(router: ModelRouter, review: Review, config: Config, model_name: str, project_id: str, chat_id: str,
+             task_id: str, message: str, reply: str, evidence: list, cancel: CancelToken,
+             window: int) -> "tuple[list, Dict[str, int]]":
+    """M7: one model call for memory suggestions, then the review queue's
+    checks. Never raises: the reply is already saved, and a failure here only
+    means no suggestions (counted under `dropped`)."""
+    parts: List[str] = []
+    try:
+        for piece in router.adapter.chat_stream(model_name, propose_messages(message, reply),
+                                                options={"num_ctx": window, "num_predict": 400}, cancel=cancel,
+                                                deadlines=deadlines_from(config), tools=None):
+            if isinstance(piece, ChatDelta):
+                parts.append(piece.text)
+    except ModelError as exc:
+        log_event(log, "memory.suggest_failed", task_id=task_id, code=exc.code)
+        return [], {"stopped" if exc.code == Cancelled.code else "model_error": 1}
+    except Exception as exc:
+        log_event(log, "memory.suggest_failed", level=logging.WARNING, task_id=task_id,
+                  error=exc.__class__.__name__)
+        return [], {"model_error": 1}
+    raw = parse("".join(parts))
+    try:
+        queued, dropped = review.propose(project_id, chat_id, task_id, message, reply, raw, evidence)
+    except Exception as exc:
+        log_event(log, "memory.suggest_failed", level=logging.WARNING, task_id=task_id,
+                  error=exc.__class__.__name__)
+        return [], {"error": 1}
+    if not raw and "".join(parts).strip() and not re.search(r'"candidates"\s*:\s*\[\s*\]', "".join(parts)):
+        dropped["unreadable"] = 1
+    log_event(log, "memory.suggested", task_id=task_id, queued=len(queued), dropped=sum(dropped.values()),
+              reasons=sorted(dropped))   # ids and counts only, never the text
+    return queued, dropped
 
 
 def _dedupe(evidence: list) -> list:

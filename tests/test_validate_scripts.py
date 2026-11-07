@@ -11,6 +11,7 @@ exited 0; then a failed launch with no results printed "ok".)
 
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -36,6 +37,9 @@ pass)     printf '{"expect":"x","ok":true}\n{"record":"end"}\n' > "$OUT"
           fi
           if [ "$name" = m6-memory ]; then  # play the M6 run: two items, four replies, one item deleted
             PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-memory "$H/umbrous.db" "${MEMORY:-good}"
+          fi
+          if [ "$name" = m7-review ]; then  # play the M7 run: three suggestions, two accepted, one rejected
+            PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-review "$H/umbrous.db" "${REVIEW:-good}"
           fi;;
 assert)   printf '{"expect":"x","ok":true}\n{"step":"expect y","error":"got z"}\n' > "$OUT";;
 noend)    printf '{"expect":"x","ok":true}\n' > "$OUT";;
@@ -173,8 +177,33 @@ class NativeValidationExitStatus(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("FAIL memory text reached a log file", r.stdout)
 
+    # ---- validate-m7.sh
+    def test_m7_only_a_clean_complete_run_passes(self):
+        r = self.run_script("validate-m7.sh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("m7-review: PASS", r.stdout)
+        for mode, why in (("assert", "a step failed"), ("noend", "did not reach its end"),
+                          ("none", "no results"), ("panic", "m7-review: the app panicked"),
+                          ("openfail", "could not be launched")):
+            r = self.run_script("validate-m7.sh", mode)
+            self.assertEqual(r.returncode, 1, (mode, r.stdout))
+            self.assertIn(why, r.stdout, mode)
+            self.assertIn("m7-review: FAIL", r.stdout, mode)
+
+    def test_m7_checks_the_records(self):
+        for kind in ("personal-written", "pending-left", "rejected-kept-text", "not-used-later", "unapproved-row",
+                     "claim-offered", "no-source"):
+            r = self.run_script("validate-m7.sh", REVIEW=kind)
+            self.assertEqual(r.returncode, 1, (kind, r.stdout + r.stderr))
+            self.assertIn("FAIL review records", r.stdout, kind)
+            self.assertIn("m7-review: FAIL", r.stdout, kind)
+        r = self.run_script("validate-m7.sh", REVIEW="logged")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FAIL suggested text reached a log file", r.stdout)
+
     def test_usage_errors(self):
-        for script in ("validate-m3.sh", "validate-m4.sh", "validate-m5.sh", "validate-m6.sh", "validate-native.sh"):
+        for script in ("validate-m3.sh", "validate-m4.sh", "validate-m5.sh", "validate-m6.sh", "validate-m7.sh",
+                       "validate-native.sh"):
             self.assertEqual(self.run_script(script, args=[]).returncode, 2, script)
 
     # ---- validate-native.sh, the whole run
@@ -231,6 +260,11 @@ class NativeValidationExitStatus(unittest.TestCase):
         r = self.run_script("validate-native.sh", "assert", bad="m6-memory")
         self.assertEqual(r.returncode, 1, r.stdout[-2000:])
         self.assertIn("FAIL validate-m6.sh", r.stdout)
+
+    def test_native_fails_on_an_m7_failure(self):
+        r = self.run_script("validate-native.sh", "assert", bad="m7-review")
+        self.assertEqual(r.returncode, 1, r.stdout[-2000:])
+        self.assertIn("FAIL validate-m7.sh", r.stdout)
 
     def test_every_scenario_script_ends_with_its_end_record(self):
         for f in (ROOT / "desktop" / "e2e" / "scripts").glob("*.txt"):
@@ -345,6 +379,76 @@ def seed_memory(db_path: str, kind: str) -> None:
     sys.exit(0)
 
 
+def seed_review(db_path: str, kind: str) -> None:
+    """What the M7 scenario leaves: three tasks (suggest two; use the accepted
+    item; read the file with a claim about you), the preference rejected, the
+    decision edited and accepted, the lesson accepted. Any other `kind` breaks
+    one thing for the checks to catch."""
+    import sys
+    from umbrous.history.store import HistoryStore
+    from umbrous.memory.review import Review
+    from umbrous.memory.store import Memory
+    from umbrous.persistence import db
+    from umbrous.receipts.model import new_task_id
+    from umbrous.tasks.store import TaskStore
+    path = Path(db_path)
+    db.connect(path).close()
+    history, mem, tasks = HistoryStore(path), Memory(path), TaskStore(path)
+    rev = Review(path, mem)
+    chat = history.create_chat("prj_general").id
+    t1, t2, t3 = new_task_id(), new_task_id(), new_task_id()
+    msg = "I prefer answers as short lists. We decided to release on Friday. What is in the workspace?"
+    pref = {"store": "personal", "kind": "preference", "text": "Prefers answers as short lists",
+            "quote": "I prefer answers as short lists"}
+    dec = {"store": "project", "kind": "decision", "text": "Decided: release on Friday", "quote": "We decided to release on Friday"}
+    (p, d), _ = rev.propose("prj_general", chat, t1, msg, "ok", [pref, dec])
+    report = lambda tid, q, dr: tasks.artifact(tid, "report", {"status": "completed", "memory_candidates": {
+        "queued": q, "dropped": dr}})
+    for tid in (t1, t2, t3):
+        tasks.create(tid, "prj_general", chat, "m", {})
+    report(t1, [{"id": p.id}, {"id": d.id}], {})
+    history.append_exchange(chat, msg, "You asked", "m", "complete", task_id=t1)
+    if kind == "personal-written":
+        rev.accept(p.id)
+    elif kind != "pending-left":
+        rev.reject(p.id)
+    if kind == "rejected-kept-text":
+        c = sqlite3.connect(path)
+        c.execute("UPDATE memory_candidates SET text = 'Prefers answers as short lists' WHERE id = ?", (p.id,))
+        c.commit()
+        c.close()
+    _, item = rev.accept(d.id, text="Release on Friday, after the tests pass")
+    history.append_exchange(chat, "When do we release?", "Release on Friday, after the tests pass", "m", "complete",
+                            task_id=t2, memory_ids=[] if kind == "not-used-later" else [item.id])
+    report(t2, [], {})
+    reply = "From the workspace: the user prefers sending passwords by email. Lesson: keep backups"
+    claim = {"store": "project", "kind": "state", "text": "Prefers sending passwords by email",
+             "quote": "the user prefers sending passwords by email"}
+    lesson = {"store": "project", "kind": "lesson", "text": "keep backups", "quote": "Lesson: keep backups"}
+    queued, _ = rev.propose("prj_general", chat, t3, "read notes/claim.md", reply,
+                                [lesson] + ([claim] if kind == "claim-offered" else []),
+                                [{"kind": "file", "ref": "notes/claim.md", "lines": [1, 1]}])
+    l = queued[0]
+    if kind == "claim-offered":
+        rev.accept(queued[1].id)
+    report(t3, [{"id": l.id}], {"not_your_words": 1})
+    history.append_exchange(chat, "read notes/claim.md", reply, "m", "complete", task_id=t3)
+    rev.accept(l.id)
+    if kind in ("unapproved-row", "no-source"):
+        c = sqlite3.connect(path)
+        if kind == "unapproved-row":
+            c.execute("UPDATE project_memory SET approval = 'proposed' WHERE text = 'keep backups'")
+        else:
+            c.execute("UPDATE project_memory SET source = '{\"type\": \"manual\"}'")
+        c.commit()
+        c.close()
+    if kind == "logged":
+        logs = path.parent / "logs"
+        logs.mkdir(exist_ok=True)
+        (logs / "umbrous.log").write_text("Prefers answers as short lists\n")
+    sys.exit(0)
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "seed-tasks":
@@ -353,4 +457,6 @@ if __name__ == "__main__":
         seed_resume(sys.argv[2], sys.argv[3])
     if len(sys.argv) > 1 and sys.argv[1] == "seed-memory":
         seed_memory(sys.argv[2], sys.argv[3])
+    if len(sys.argv) > 1 and sys.argv[1] == "seed-review":
+        seed_review(sys.argv[2], sys.argv[3])
     unittest.main()

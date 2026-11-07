@@ -308,11 +308,14 @@ def tasks_command(config: Config, chat: Optional[str], task: Optional[str], last
 
 
 def memory_command(config: Config, action: str, rest: List[str], project: Optional[str], kind: Optional[str],
-                   scope: Optional[List[str]], yes: bool) -> int:
-    """Inspect, add, edit and delete memory items (M6). Chats are never touched."""
+                   scope: Optional[List[str]], yes: bool, to: Optional[str] = None, all_: bool = False) -> int:
+    """Inspect, add, edit and delete memory items (M6). Chats are never touched.
+    M7: review what tasks suggested (suggestions, accept, reject)."""
+    from umbrous.memory.review import Review
     from umbrous.memory.store import Memory, MemoryError_
     history, _, _ = _stores(config)
     mem = Memory(config.db_path)
+    rev = Review(config.db_path, mem)
     p = None
     if project:
         p = _find_project(history, project)
@@ -325,7 +328,7 @@ def memory_command(config: Config, action: str, rest: List[str], project: Option
         return f"{m.id}  {m.store:<8} {m.kind:<10} [{where}] {m.text}"
 
     def scope_ids() -> object:
-        if not scope:
+        if not scope or scope == ["all"]:
             return "all"
         ids = []
         for name in scope:
@@ -335,7 +338,40 @@ def memory_command(config: Config, action: str, rest: List[str], project: Option
             ids.append(sp.id)
         return ids
 
+    def show_cand(c) -> str:
+        where = ("all projects" if c.scope == "all" else ", ".join(c.scope)) if c.store == "personal" else c.scope
+        if c.status != "pending":
+            return f"{c.id}  {c.status:<8} {c.store:<8} {c.kind:<10}" + (f" -> {c.memory_id}" if c.memory_id else "")
+        return (f"{c.id}  {c.store:<8} {c.kind:<10} [{where}] {c.text}\n"
+                f"      from {'your message' if c.basis == 'message' else 'the reply'}: \"{c.quote}\""
+                f"  (task {c.task_id}, chat {c.chat_id})")
+
     try:
+        if action == "suggestions":
+            items = rev.list(p.id if p else None, None if all_ else "pending")
+            print("Suggestions (all):" if all_ else "Suggestions waiting for review:")
+            for c in items:
+                print("  " + show_cand(c))
+            if not items:
+                print("  (none)")
+            else:
+                print("Accept: umbrous memory accept CAND_ID [NEW TEXT] [--kind K] [--to personal|project] [--scope P|all]."
+                      " Reject: umbrous memory reject CAND_ID.")
+            return 0
+        if action in ("accept", "reject"):
+            if not rest:
+                print(f"usage: umbrous memory {action} CAND_ID" + (" [NEW TEXT]" if action == "accept" else ""),
+                      file=sys.stderr)
+                return 2
+            if action == "reject":
+                c = rev.reject(rest[0])
+                print(f"Rejected {c.id}. Its text is not kept, it was never in memory, and it will not be "
+                      "suggested again in this project.")
+                return 0
+            c, m = rev.accept(rest[0], " ".join(rest[1:]) or None, kind, to, scope_ids() if scope else None,
+                              project_exists=lambda pid: any(x.id == pid for x in history.list_projects()))
+            print("Accepted " + show(m))
+            return 0
         if action == "list":
             print("Personal memory:")
             items = mem.personal.list()
@@ -506,13 +542,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_tk.add_argument("--chat", help="the tasks of one chat (chat_…)")
     p_tk.add_argument("--task", help="one task's trace and report (tsk_…)")
     p_tk.add_argument("--last", type=int, default=10, help="how many recent tasks (default 10)")
-    p_mem = sub.add_parser("memory", help="personal and project memory: list, add, edit, delete (M6)")
-    p_mem.add_argument("action", nargs="?", default="list", choices=["list", "add", "edit", "delete"])
-    p_mem.add_argument("rest", nargs="*", help="add: personal|project TEXT; edit: MEM_ID TEXT; delete: MEM_ID")
+    p_mem = sub.add_parser("memory", help="personal and project memory: list, add, edit, delete (M6); "
+                           "review suggestions from tasks: suggestions, accept, reject (M7)")
+    p_mem.add_argument("action", nargs="?", default="list",
+                       choices=["list", "add", "edit", "delete", "suggestions", "accept", "reject"])
+    p_mem.add_argument("rest", nargs="*", help="add: personal|project TEXT; edit: MEM_ID TEXT; delete: MEM_ID; "
+                       "accept: CAND_ID [NEW TEXT]; reject: CAND_ID (M7)")
     p_mem.add_argument("--project", help="project name or id (project items; list one project)")
     p_mem.add_argument("--kind", help="personal: fact|preference; project: decision|state|lesson")
     p_mem.add_argument("--scope", nargs="+", help="personal: the projects it applies to (default: all)")
     p_mem.add_argument("--yes", action="store_true", help="delete: really delete")
+    p_mem.add_argument("--all", action="store_true", dest="all_", help="suggestions: also the decided ones (M7)")
+    p_mem.add_argument("--to", choices=["personal", "project"], help="accept: the store to write it to (M7)")
     sub.add_parser("version")
     sub.add_parser("models", help="list Ollama models, probe results and the exposure check")
     p_probe = sub.add_parser("probe", help="run the tool-call probe")
@@ -552,7 +593,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if command == "tasks":
         return tasks_command(config, args.chat, args.task, args.last)
     if command == "memory":
-        return memory_command(config, args.action, args.rest, args.project, args.kind, args.scope, args.yes)
+        return memory_command(config, args.action, args.rest, args.project, args.kind, args.scope, args.yes,
+                              args.to, args.all_)
     if command in ("models", "probe"):
         return models_command(config, command, getattr(args, "model", []), getattr(args, "all", False))
     desktop = args.command == "serve" and args.desktop

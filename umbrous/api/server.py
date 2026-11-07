@@ -42,6 +42,11 @@ There is deliberately no route that deletes a chat or project (docs/m2-history.m
     POST /api/memory/<mem_id> {text, kind, scope}   edit an item (M6)
     POST /api/memory/<mem_id>/delete                delete an item; transcripts are not touched (M6)
     POST /api/chat {…, use_memory: false}           a reply without memory, to compare (M6)
+    GET  /api/memory/candidates?project_id=…&status=…   suggestions waiting for review (M7; status pending,
+                                                    accepted, rejected or all)
+    POST /api/memory/candidates/<cand_id> {text, kind, store, scope}   edit a waiting suggestion (M7)
+    POST /api/memory/candidates/<cand_id>/accept {…}  check it again and write it to its store (M7)
+    POST /api/memory/candidates/<cand_id>/reject    reject it; its text is not kept (M7)
 """
 
 from __future__ import annotations
@@ -71,6 +76,7 @@ from umbrous.receipts.redaction import default_redactor
 from umbrous.gate.access import AccessError, AccessStore
 from umbrous.gate.gate import Gate, GateError
 from umbrous.history.store import HistoryError, HistoryStore
+from umbrous.memory.review import Review
 from umbrous.memory.store import Memory, MemoryError_
 from umbrous.receipts.store import ReceiptStore
 from umbrous.runloop.chat import ChatLocks, RunRegistry, run_chat
@@ -93,7 +99,9 @@ APPROVAL_PATH = re.compile(r"^/api/approvals/(apr_[0-9a-f]{16})$")
 TASK_ID_RE = re.compile(r"^tsk_[0-9a-f]{28}$")
 ACCESS_STATUS = {"no_such_project": 404, "no_workspace": 409, "no_such_grant": 404}
 MEMORY_PATH = re.compile(r"^/api/memory/(mem_[0-9a-f]{16})(/delete)?$")
-MEMORY_STATUS = {"no_such_memory": 404, "no_such_project": 404, "memory_full": 409}
+MEMORY_STATUS = {"no_such_memory": 404, "no_such_project": 404, "memory_full": 409,
+                 "no_such_candidate": 404, "already_decided": 409, "duplicate": 409}
+CANDIDATE_PATH = re.compile(r"^/api/memory/candidates/(cand_[0-9a-f]{16})(/accept|/reject)?$")
 HISTORY_STATUS = {"no_such_project": 404, "no_such_chat": 404, "project_exists": 409, "bad_project_name": 400}
 
 _INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
@@ -156,6 +164,7 @@ class Runtime:
         self.gate = Gate(self.access, self.receipts)
         self.tasks = TaskStore(config.db_path)
         self.memory = Memory(config.db_path)
+        self.review = Review(config.db_path, self.memory)
         self.chat_locks = ChatLocks()
         self.runs = RunRegistry()
         self.exposure: Optional[ExposureReport] = None
@@ -362,8 +371,24 @@ class Handler(BaseHTTPRequestHandler):
             if project_id:
                 hist.get_project(project_id)
                 out["project"] = [m.as_dict() for m in mem.project.list(project_id)]
+                out["candidates"] = [c.as_dict() for c in rt.review.list(project_id)]   # M7: waiting for you
+            else:
+                out["candidates"] = []
             self._send_json(200, out)
             return 200, "memory"
+        if path == "/api/memory/candidates" and cmd == "GET":
+            q = parse_qs(self.path.split("?", 1)[1].split("#", 1)[0] if "?" in self.path else "")
+            project_id = (q.get("project_id") or [""])[0] or None
+            status = (q.get("status") or ["pending"])[0]
+            if project_id and not PROJECT_ID_RE.match(project_id):
+                self._send_json(400, {"error": "bad_project_id"})
+                return 400, "bad_project_id"
+            if status not in ("pending", "accepted", "rejected", "all"):
+                self._send_json(400, {"error": "bad_status"})
+                return 400, "bad_status"
+            items = rt.review.list(project_id, None if status == "all" else status)
+            self._send_json(200, {"candidates": [c.as_dict() for c in items]})
+            return 200, "candidates"
         if cmd != "POST":
             self._send_json(405, {"error": "method_not_allowed"})
             return 405, "method_not_allowed"
@@ -388,6 +413,9 @@ class Handler(BaseHTTPRequestHandler):
             log_event(log, "memory.added", memory_id=item.id, store=item.store, kind=item.kind)  # never the text
             self._send_json(201, {"item": item.as_dict()})
             return 201, "memory_added"
+        cm = CANDIDATE_PATH.match(path)
+        if cm:
+            return self._candidate(cm.group(1), (cm.group(2) or "").lstrip("/"), body, exists)
         m = MEMORY_PATH.match(path)
         if not m:
             self._send_json(404, {"error": "not_found"})
@@ -412,6 +440,27 @@ class Handler(BaseHTTPRequestHandler):
         log_event(log, "memory.edited", memory_id=item_id, store=item.store)
         self._send_json(200, {"item": item.as_dict()})
         return 200, "memory_edited"
+
+    def _candidate(self, cand_id: str, action: str, body: dict, exists) -> Tuple[int, str]:
+        """M7: review one suggestion. Accept is the only way a suggestion
+        reaches memory, and it is checked again first."""
+        rev = self.runtime.review
+        edits = {k: body.get(k) for k in ("text", "kind", "store", "scope")}
+        if action == "reject":
+            cand = rev.reject(cand_id)
+            log_event(log, "memory.candidate_rejected", candidate_id=cand_id)   # never the text
+            self._send_json(200, {"candidate": cand.as_dict()})
+            return 200, "candidate_rejected"
+        if action == "accept":
+            cand, item = rev.accept(cand_id, project_exists=exists, **edits)
+            log_event(log, "memory.candidate_accepted", candidate_id=cand_id, memory_id=item.id, store=item.store,
+                      kind=item.kind, edited=cand.edited)
+            self._send_json(200, {"candidate": cand.as_dict(), "item": item.as_dict()})
+            return 200, "candidate_accepted"
+        cand = rev.edit(cand_id, project_exists=exists, **edits)
+        log_event(log, "memory.candidate_edited", candidate_id=cand_id)
+        self._send_json(200, {"candidate": cand.as_dict()})
+        return 200, "candidate_edited"
 
     def _access(self, path: str) -> Tuple[int, str]:
         """The access view, approvals and receipts (M3)."""
@@ -576,7 +625,7 @@ class Handler(BaseHTTPRequestHandler):
                           str(body.get("model", "")), body.get("message"), gate=rt.gate,
                           approvals=body.get("approvals") is True, tasks=rt.tasks,
                           resume_task=body.get("resume_task") if "resume_task" in body else None,
-                          memory=rt.memory, use_memory=body.get("use_memory") is not False)
+                          memory=rt.memory, use_memory=body.get("use_memory") is not False, review=rt.review)
         self.send_response(200)
         for k, v in BASE_HEADERS.items():
             self.send_header(k, v)

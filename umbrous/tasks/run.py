@@ -88,6 +88,9 @@ class TaskRun:
         # hash of each file the interrupted task read (from its receipts).
         self.resume_of: Optional[str] = None
         self.previous_reads: Dict[str, str] = {}
+        # M7: what Observe + Verify suggested for memory (ids, stores, kinds,
+        # counts dropped; never the text). Set before finish().
+        self.memory_suggestions: Optional[dict] = None
         self._safe(store.create if store else None, task_id, project_id, chat_id, model, self.limits)
         self._safe(store.set_status if store else None, task_id, "started")
 
@@ -236,6 +239,11 @@ class TaskRun:
         }
         if self.resume_of:
             report["resume_of"] = self.resume_of
+        if self.memory_suggestions is not None:
+            report["memory_candidates"] = self.memory_suggestions
+            self._safe(self.store and self.store.event, self.task_id, "memory.suggested",
+                       queued=len(self.memory_suggestions.get("queued", [])),
+                       dropped=sum(self.memory_suggestions.get("dropped", {}).values()))
         self._safe(self.store and self.store.artifact, self.task_id, "report", report)
         self._safe(self.store and self.store.set_status, self.task_id, status, code,
                    steps=self.step, tool_calls=self.tool_calls)

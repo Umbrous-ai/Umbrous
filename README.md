@@ -1,6 +1,6 @@
 # Umbrous
 
-A local-first agent harness. Status: **M6, personal and project memory: notes you save are given to later replies in the right projects, each reply lists the memory it used, and deleting an item stops further retrieval** (see the milestone plan).
+A local-first agent harness. Status: **M7, memory write review: after a task the model may suggest things to remember, and nothing reaches memory unless you accept it** (built on M6's personal and project memory; see the milestone plan).
 
 ```sh
 bin/umbrous          # start the local runtime and open the app (Python 3.9+, no dependencies)
@@ -9,6 +9,7 @@ bin/umbrous workspace PROJECT FOLDER   # give a project's chats read-only access
 bin/umbrous receipts --last 10         # what tools did
 bin/umbrous tasks --last 10            # tasks: steps, actions, how each ended (--task ID for the trace)
 bin/umbrous memory                     # personal and project memory (add, edit, delete)
+bin/umbrous memory suggestions         # what tasks suggested remembering (accept, reject)
 bin/umbrous test     # run the tests
 desktop/scripts/build-native.sh   # build dist/Umbrous.app and its .dmg (docs/desktop.md)
 ```
@@ -20,6 +21,7 @@ desktop/scripts/build-native.sh   # build dist/Umbrous.app and its .dmg (docs/de
 - [docs/m4-tasks.md](docs/m4-tasks.md): task state, the event log and report, limits, Stop, evidence and uncertainty, privacy of task records
 - [docs/m5-resume.md](docs/m5-resume.md): recovery after a crash, unknown vs failed, retry classes, resume under current scope, what a future write needs
 - [docs/m6-memory.md](docs/m6-memory.md): personal and project memory, retrieval vs training, project isolation, why deleting memory does not rewrite old chats
+- [docs/m7-review.md](docs/m7-review.md): suggestions after a task, the review queue, provenance (your words vs the reply), accept, edit, reject, duplicates
 - [docs/desktop.md](docs/desktop.md): Umbrous.app for macOS (native GPUI interface, bundled Python): build, validation, measurements, limits
 - [docs/receipts.md](docs/receipts.md): receipt format and redaction rules
 - [prototypes/](prototypes/): the front-end prototype the app is built on

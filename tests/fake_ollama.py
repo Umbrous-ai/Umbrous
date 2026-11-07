@@ -32,6 +32,8 @@ class FakeModel:
     agent: Optional[Callable[[list], dict]] = None
     # M6: the reply text from the messages sent (for a model whose answer depends on its prompt)
     answer: Optional[Callable[[list], str]] = None
+    # M7: the answer to a "suggest memory candidates" request (default: suggest_answer)
+    suggest: Optional[Callable[[list], str]] = None
 
     def __post_init__(self):
         if not self.digest:
@@ -107,6 +109,9 @@ class FakeOllama:
                     return self._json(200, {"model_info": {"fake.context_length": m.context_length},
                                             "capabilities": caps})
                 if self.path == "/api/chat":
+                    msgs = body.get("messages") or []
+                    if msgs and msgs[0].get("role") == "system" and SUGGEST_MARK in (msgs[0].get("content") or ""):
+                        return self._stream(m, body, text=(m.suggest or suggest_answer)(msgs))
                     if m.agent is not None and body.get("stream", True):
                         return self._agent_stream(m, body)
                     if body.get("tools"):
@@ -178,7 +183,7 @@ class FakeOllama:
                 except OSError:
                     pass
 
-            def _stream(self, m, body):
+            def _stream(self, m, body, text=None):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson")
                 self.send_header("Transfer-Encoding", "chunked")
@@ -189,7 +194,7 @@ class FakeOllama:
                     self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
                     self.wfile.flush()
 
-                text = self._text(m, body)
+                text = self._text(m, body) if text is None else text
                 pieces = re.findall(r".{1,6}", text, re.S) or [""]
                 try:
                     if m.behavior == "slow_first":
@@ -295,6 +300,56 @@ def memory_answer(messages: list) -> str:
     return f"You asked: {last} Using what you saved: {told}"
 
 
+def notes_agent(messages: list) -> dict:
+    """M7: a tool-using model for the review demo. It looks at the workspace
+    once ("read <path>", otherwise a listing), then answers like memory_answer
+    (naming the memory it was given) followed by what the tool returned."""
+    if messages and messages[-1].get("content") == "__no_tools__" or tool_results(messages):
+        results = tool_results(messages)
+        lines = [l for l in data_lines(results[-1]) if l.strip()][:3] if results else []
+        return {"content": memory_answer([x for x in messages if x.get("content") != "__no_tools__"])
+                + " From the workspace: " + " | ".join(lines)}
+    q = next((x["content"] for x in reversed(messages) if x.get("role") == "user"), "")
+    words = q.split()
+    if words and words[0].lower() == "read" and len(words) > 1:
+        return {"tool_calls": [("read_file", {"path": words[1]})]}
+    return {"tool_calls": [("list_files", {})]}
+
+
+SUGGEST_MARK = "Suggest memory candidates"
+
+
+def _blocks(messages: list) -> "tuple[str, str]":
+    """(user message, reply) from a suggestion request."""
+    body = next((x["content"] for x in messages if x["role"] == "user"), "")
+    m = re.search(r"USER MESSAGE:\n<<<\n(.*?)\n>>>\n\nREPLY:\n<<<\n(.*?)\n>>>", body, re.S)
+    return (m.group(1), m.group(2)) if m else ("", "")
+
+
+def suggest_answer(messages: list) -> str:
+    """M7: a stand-in for a model suggesting memory, with fixed, visible rules:
+      "I prefer X" in your message      -> a personal preference
+      "we decided (to) X" in your message -> a project decision
+      "Lesson: X" in the reply           -> a project lesson
+      "the user prefers X" in the reply  -> a personal preference quoting the
+                                            reply (as a file could make a model
+                                            do); the review queue must drop it."""
+    message, reply = _blocks(messages)
+    out = []
+    for m in re.finditer(r"\bI prefer ([^.!?\n]+)", message):
+        out.append({"store": "personal", "kind": "preference", "text": "Prefers " + m.group(1).strip(),
+                    "quote": m.group(0)})
+    for m in re.finditer(r"\b[Ww]e decided (?:to )?([^.!?\n]+)", message):
+        out.append({"store": "project", "kind": "decision", "text": "Decided: " + m.group(1).strip(),
+                    "quote": m.group(0)})
+    for m in re.finditer(r"\bLesson: ([^.!?\n]+)", reply):
+        out.append({"store": "project", "kind": "lesson", "text": m.group(1).strip(), "quote": m.group(0)})
+    for m in re.finditer(r"\bthe user prefers ([^.!?\n]+)", reply):
+        out.append({"store": "personal", "kind": "preference", "text": "Prefers " + m.group(1).strip(),
+                    "quote": m.group(0)})
+    return json.dumps({"candidates": out})
+
+
 def demo_models() -> List[FakeModel]:
     """The models the browser check and the demo use."""
     return [
@@ -312,6 +367,8 @@ def demo_models() -> List[FakeModel]:
             final=lambda m: "The plan is to ship on Friday (notes/plan.md:2). Owner details are in notes/team.md:4.")),
         # M6: repeats the memory lines it was given, so a reply visibly changes with memory.
         FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer),
+        # M7: a task that names its memory, then suggests things to remember (suggest_answer).
+        FakeModel("memory-notes:3b", chunk_delay=0.02, agent=notes_agent),
     ]
 
 

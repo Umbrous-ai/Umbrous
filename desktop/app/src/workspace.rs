@@ -67,6 +67,7 @@ struct Run {
 pub enum MemTarget {
     Add(&'static str), // "personal" | "project"
     Edit(String),      // a memory id
+    Accept(String),    // M7: a suggestion's id: edit its text, Enter accepts it
 }
 
 enum StreamMsg {
@@ -514,15 +515,39 @@ impl Workspace {
         self.api_call(cx, move |api| api.post::<Value>(&path, json!({})), |this, r, cx| this.memory_done(r, cx));
     }
 
+    // ---------- suggestions to review (M7) ----------
+    /// The suggestion with this id, waiting in the selected project.
+    pub fn candidate(&self, id: &str) -> Option<&api::Candidate> {
+        self.memory.as_ref()?.candidates.iter().find(|c| c.id == id)
+    }
+
+    /// Accept a suggestion: the runtime checks it again and writes it to the
+    /// store it names. `text`: your edited text, or None to keep it.
+    pub fn accept_candidate(&mut self, id: String, text: Option<String>, cx: &mut Context<Self>) {
+        logfile::event("ui.candidate_accept", &[("id", id.clone()), ("edited", text.is_some().to_string())]);
+        let path = format!("/api/memory/candidates/{id}/accept");
+        let body = match text { Some(t) => json!({"text": t}), None => json!({}) };
+        self.api_call(cx, move |api| api.post::<Value>(&path, body), |this, r, cx| this.memory_done(r, cx));
+    }
+
+    /// Reject a suggestion. It was never in memory; its text is not kept.
+    pub fn reject_candidate(&mut self, id: String, cx: &mut Context<Self>) {
+        logfile::event("ui.candidate_reject", &[("id", id.clone())]);
+        let path = format!("/api/memory/candidates/{id}/reject");
+        self.api_call(cx, move |api| api.post::<Value>(&path, json!({})), |this, r, cx| this.memory_done(r, cx));
+    }
+
     fn begin_memory_input(&mut self, target: MemTarget, window: &mut Window, cx: &mut Context<Self>) {
         let initial = match &target {
             MemTarget::Edit(id) => self.memory_item(id).map(|m| m.text.clone()).unwrap_or_default(),
+            MemTarget::Accept(id) => self.candidate(id).map(|c| c.text.clone()).unwrap_or_default(),
             MemTarget::Add(_) => String::new(),
         };
         let placeholder = match &target {
             MemTarget::Add(s) if *s == "personal" => "A fact about you, then Enter",
             MemTarget::Add(_) => "A decision for this project, then Enter",
             MemTarget::Edit(_) => "Edit, then Enter",
+            MemTarget::Accept(_) => "Edit, then Enter to accept",
         };
         let input = cx.new(|cx| {
             let mut c = Composer::new(cx);
@@ -538,6 +563,7 @@ impl Workspace {
             ComposerEvent::Submit(text) => match &t {
                 MemTarget::Add(store) => this.add_memory(*store, text.clone(), cx),
                 MemTarget::Edit(id) => this.edit_memory(id.clone(), text.clone(), cx),
+                MemTarget::Accept(id) => this.accept_candidate(id.clone(), Some(text.clone()), cx),
             },
         });
         self._subs.push(sub);
@@ -982,6 +1008,8 @@ impl Workspace {
                             }
                         }
                         "delta" => msg.text.push_str(ev.get("text").and_then(Value::as_str).unwrap_or("")),
+                        // M7: the reply is saved; the task looks for things to remember
+                        "suggesting" => msg.meta = "Looking for things to remember…".into(),
                         "done" => {
                             let g = |k: &str| ev.get(k).and_then(Value::as_u64);
                             let model = ev.get("model").and_then(Value::as_str).unwrap_or("").to_string();
@@ -1004,6 +1032,11 @@ impl Workspace {
                                 if attention {
                                     msg.meta_kind = MetaKind::Warn;
                                 }
+                            }
+                            // M7: suggestions wait in Memory; nothing was saved
+                            let n = ev.get("candidates").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+                            if let Some(note) = api::suggestion_note(n) {
+                                msg.meta = format!("{} · {note}", msg.meta);
                             }
                             refresh_lists = true;
                         }
@@ -1796,6 +1829,70 @@ impl Workspace {
             return col.child(note(self.memory_error.clone().unwrap_or_else(|| "Loading…".into()))).into_any_element();
         };
         let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
+        // M7: suggestions from tasks, waiting for you. Not in memory, never
+        // retrieved, until you accept one.
+        if !view.candidates.is_empty() {
+            col = col.child(title("mem-h-review", format!("Waiting for review ({})", view.candidates.len()), None))
+                .child(note("Suggested after tasks. Click the text to edit it, then Enter accepts.".into()));
+            for c in view.candidates.iter() {
+                if matches!(&self.memory_input, Some((_, MemTarget::Accept(id))) if *id == c.id) {
+                    col = col.child(self.memory_field());
+                    continue;
+                }
+                let gid = SharedString::from(format!("cand-{}", c.id));
+                let (id_edit, id_ok, id_no) = (c.id.clone(), c.id.clone(), c.id.clone());
+                let button = |id: String, label: &'static str| {
+                    div()
+                        .id(gpui::ElementId::Name(id.into()))
+                        .flex_none()
+                        .h(px(22.))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(R_6))
+                        .border_1()
+                        .border_color(border_strong())
+                        .cursor_pointer()
+                        .text_size(fs_12())
+                        .text_color(text_strong())
+                        .hover(|s| s.bg(bg_hover()))
+                        .child(label)
+                };
+                col = col.child(
+                    div()
+                        .id(gpui::ElementId::Name(gid.clone()))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .px(px(20.))
+                        .py(px(5.))
+                        .child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("cand-{}-text", c.id).into()))
+                                .cursor_pointer()
+                                .text_size(fs_13())
+                                .line_height(px(18.))
+                                .text_color(text_strong())
+                                .child(c.text.clone())
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.begin_memory_input(MemTarget::Accept(id_edit.clone()), window, cx);
+                                })),
+                        )
+                        .child(div().text_size(fs_12()).text_color(text_subtle()).child(format!("→ {}", c.destination(&project))))
+                        .child(div().text_size(fs_12()).text_color(text_subtle()).child(c.source()))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.))
+                                .pt(px(3.))
+                                .child(button(format!("cand-{}-accept", c.id), "Accept").on_click(cx.listener(
+                                    move |this, _: &ClickEvent, _, cx| this.accept_candidate(id_ok.clone(), None, cx))))
+                                .child(button(format!("cand-{}-reject", c.id), "Reject").on_click(cx.listener(
+                                    move |this, _: &ClickEvent, _, cx| this.reject_candidate(id_no.clone(), cx)))),
+                        ),
+                );
+            }
+        }
         let sections: [(&'static str, &'static str, String, &Vec<api::MemoryItem>); 2] = [
             ("personal", "mem-add-personal", "Personal".to_string(), &view.personal),
             ("project", "mem-add-project", format!("This project: {project}"), &view.project),

@@ -309,7 +309,7 @@ Try it before reading `RetrievalTests.test_cross_project_isolation`:
 
 ## Not in M6
 
-- Memory written from chats, and the approval queue: M7. The `source` and
+- Memory suggested by tasks, and the review queue: M7 ([m7-review.md](m7-review.md)). The `source` and
   `approval` columns are ready for it; nothing writes `proposed` yet.
 - Embeddings, semantic search, automatic summarising or merging of items.
 - Selective reset ("forget everything about project X"): M8.

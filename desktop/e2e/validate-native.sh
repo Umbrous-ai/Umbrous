@@ -70,6 +70,8 @@ echo "### M5: kill the runtime mid-task, restart, resume (validate-m5.sh)"
 "$ROOT/desktop/e2e/validate-m5.sh" "$W" || fail "validate-m5.sh: M5 in the app failed (see above)"
 echo "### M6: personal and project memory, a reply that uses them, delete (validate-m6.sh)"
 "$ROOT/desktop/e2e/validate-m6.sh" "$W" || fail "validate-m6.sh: M6 in the app failed (see above)"
+echo "### M7: suggestions to review after a task, accept and reject (validate-m7.sh)"
+"$ROOT/desktop/e2e/validate-m7.sh" "$W" || fail "validate-m7.sh: M7 in the app failed (see above)"
 echo "### a runtime started from a terminal is reported and left running"
 mkdir -p "$W/h-cli"
 PYTHONPATH="$ROOT" python3 -m umbrous --home "$W/h-cli" serve --no-open --port 0 >/dev/null 2>&1 & CLI=$!; sleep 2

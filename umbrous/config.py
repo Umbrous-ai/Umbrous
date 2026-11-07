@@ -37,6 +37,8 @@ _ALLOWED_KEYS = {
     "task_timeout_s", "task_max_steps", "task_max_tool_calls", "tool_timeout_s",
     # M6: memory retrieval limits
     "memory_max_items", "memory_tokens",
+    # M7: suggestions for memory after a task
+    "memory_suggestions",
 }
 # Integer settings: (minimum, maximum)
 _INT_RANGES = {
@@ -84,6 +86,9 @@ class Config:
     # M6: memory given to one reply. 0 turns memory off. See docs/m6-memory.md.
     memory_max_items: int = 8              # at most this many memory items per reply
     memory_tokens: int = 600               # and at most about this many tokens of them
+    # M7: after a task, ask the model for things worth remembering; you review
+    # each one before anything is written. See docs/m7-review.md.
+    memory_suggestions: bool = True
 
     @property
     def db_path(self) -> Path:
@@ -175,6 +180,8 @@ def _validate(values: Mapping[str, Any]) -> dict:
         raise ConfigError("system_prompt must be text of at most 8000 characters")
     if "open_browser" in out and not isinstance(out["open_browser"], bool):
         raise ConfigError("open_browser must be true or false")
+    if "memory_suggestions" in out and not isinstance(out["memory_suggestions"], bool):
+        raise ConfigError("memory_suggestions must be true or false")
     return out
 
 

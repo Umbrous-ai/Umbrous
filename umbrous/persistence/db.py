@@ -23,6 +23,10 @@ Versions so far:
   7 (M6)  `personal_memory` and `project_memory`, two memory stores with no
           link to chats; `messages.memory_ids` records which items a reply
           was given.
+  8 (M7)  `memory_candidates`: notes a finished task suggests for memory,
+          waiting for your review. A separate queue, never read by retrieval;
+          an accepted candidate is written to its store, and once decided the
+          candidate keeps no text (only a hash, to spot duplicates).
 """
 
 from __future__ import annotations
@@ -239,6 +243,29 @@ MIGRATIONS = (
     );
     CREATE INDEX project_memory_by_project ON project_memory (project_id, created_at);
     ALTER TABLE messages ADD COLUMN memory_ids TEXT;
+    """,
+    # version 8 (M7)
+    """
+    CREATE TABLE memory_candidates (
+        id          TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL REFERENCES projects(id),
+        chat_id     TEXT,
+        task_id     TEXT,
+        store       TEXT NOT NULL CHECK (store IN ('personal', 'project')),
+        kind        TEXT NOT NULL,
+        text        TEXT NOT NULL,
+        quote       TEXT NOT NULL,
+        text_hash   TEXT NOT NULL,
+        scope       TEXT NOT NULL,
+        basis       TEXT NOT NULL CHECK (basis IN ('message', 'reply')),
+        evidence    TEXT NOT NULL,
+        status      TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected')),
+        edited      INTEGER NOT NULL DEFAULT 0,
+        memory_id   TEXT,
+        created_at  TEXT NOT NULL,
+        decided_at  TEXT
+    );
+    CREATE INDEX memory_candidates_by_project ON memory_candidates (project_id, status, created_at);
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)

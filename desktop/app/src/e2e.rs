@@ -100,7 +100,8 @@ fn snapshot(ws: &Workspace, label: &str) -> Value {
         "memory": ws.memory.as_ref().map(|v| json!({
             "project_id": v.project_id,
             "personal": v.personal.iter().map(|m| json!([m.id, m.kind, m.text, m.applies])).collect::<Vec<_>>(),
-            "project": v.project.iter().map(|m| json!([m.id, m.kind, m.text])).collect::<Vec<_>>()})),
+            "project": v.project.iter().map(|m| json!([m.id, m.kind, m.text])).collect::<Vec<_>>(),
+            "candidates": v.candidates.iter().map(|c| json!([c.id, c.store, c.kind, c.basis, c.text])).collect::<Vec<_>>()})),
         "use_memory": ws.use_memory,
         "ollama": ws.models.as_ref().map(|m| json!({"reachable": m.reachable, "models": m.models.len()})),
         "perf": format!("{:?}", ws.perf),
@@ -232,6 +233,36 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             window.update(cx, |ws, _, cx| ws.delete_memory(id, cx)).ok();
             wait_until(cx, window, 10, "memory deleted", move |ws| ws.memory_item(&gone).is_none()).await?;
         }
+        "wait_candidates" => {
+            // until N suggestions wait for review in the selected project (M7)
+            let n: usize = arg.parse().map_err(|_| "wait_candidates N")?;
+            wait_until(cx, window, 10, "candidates", move |ws| ws.memory.as_ref().map(|v| v.candidates.len() == n).unwrap_or(false)).await?;
+        }
+        "candidate_accept" => {
+            // what a suggestion's Accept button does: `candidate_accept TEXT` (a suggestion containing TEXT)
+            let (id, text) = candidate(window, cx, arg)?;
+            let gone = id.clone();
+            window.update(cx, |ws, _, cx| ws.accept_candidate(id, None, cx)).ok();
+            wait_until(cx, window, 10, "accepted", move |ws| ws.candidate(&gone).is_none()
+                && memory_texts(ws).iter().any(|x| *x == text)).await?;
+        }
+        "candidate_edit_accept" => {
+            // what clicking a suggestion, editing it and Enter do: `candidate_edit_accept OLD|NEW`
+            let (old, new) = arg.split_once('|').ok_or("candidate_edit_accept OLD|NEW")?;
+            let (id, _) = candidate(window, cx, old)?;
+            let (gone, n) = (id.clone(), new.to_string());
+            window.update(cx, |ws, _, cx| ws.accept_candidate(id, Some(n), cx)).ok();
+            let n = new.to_string();
+            wait_until(cx, window, 10, "accepted", move |ws| ws.candidate(&gone).is_none()
+                && memory_texts(ws).iter().any(|x| *x == n)).await?;
+        }
+        "candidate_reject" => {
+            // what a suggestion's Reject button does: `candidate_reject TEXT`
+            let (id, _) = candidate(window, cx, arg)?;
+            let gone = id.clone();
+            window.update(cx, |ws, _, cx| ws.reject_candidate(id, cx)).ok();
+            wait_until(cx, window, 10, "rejected", move |ws| ws.memory.as_ref().is_some() && ws.candidate(&gone).is_none()).await?;
+        }
         "use_memory" => {
             let on = arg != "off";
             window.update(cx, |ws, _, cx| { ws.use_memory = on; cx.notify(); }).ok();
@@ -277,11 +308,16 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "memory" => memory_texts(ws).join(" | "),
                 "memory_count" => memory_texts(ws).len().to_string(),
                 "memory_project" => ws.memory.as_ref().map(|v| v.project.len()).unwrap_or(0).to_string(),
+                "memory_personal" => ws.memory.as_ref().map(|v| v.personal.len()).unwrap_or(0).to_string(),
+                "candidates" => ws.memory.as_ref().map(|v| v.candidates.iter()
+                    .map(|c| format!("{} {} ({}): {}", c.store, c.kind, c.basis, c.text)).collect::<Vec<_>>().join(" | ")).unwrap_or_default(),
                 _ => "?".into(),
             }).map_err(|_| "window gone".to_string())?;
             let ok = match what {
                 "chat" if val != "none" => got.contains(val),
                 "last_meta" | "sessions" | "last_text" | "reply_metas" | "memory" => got.contains(val),
+                "candidates" if val != "none" => got.contains(val),
+                "candidates" => got.is_empty(),
                 "last_text_lacks" => got == "true",
                 "interrupted" if val != "none" => got.contains(val),
                 "no_text" | "user_meta_empty" => got == "true",
@@ -381,6 +417,15 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
 
 fn memory_texts(ws: &Workspace) -> Vec<String> {
     ws.memory.as_ref().map(|v| v.personal.iter().chain(v.project.iter()).map(|m| m.text.clone()).collect()).unwrap_or_default()
+}
+
+fn candidate(window: WindowHandle<Workspace>, cx: &mut AsyncApp, text: &str) -> Result<(String, String), String> {
+    window
+        .update(cx, |ws, _, _| ws.memory.as_ref().and_then(|v| v.candidates.iter()
+            .find(|c| c.text.contains(text)).map(|c| (c.id.clone(), c.text.clone()))))
+        .ok()
+        .flatten()
+        .ok_or_else(|| format!("no suggestion containing {text:?}"))
 }
 
 fn memory_id(window: WindowHandle<Workspace>, cx: &mut AsyncApp, text: &str) -> Result<String, String> {
