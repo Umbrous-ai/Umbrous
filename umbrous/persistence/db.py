@@ -11,7 +11,8 @@ Rules for later milestones:
 Versions so far:
   1 (M0)  `meta` key/value table and `launches`, one row per start and stop.
   2 (M1)  `model_probes`, the result of the tool-call probe per model digest.
-Chats arrive in M2, receipts in M3, task state in M4.
+  3 (M2)  `projects`, `chats`, `messages`: the chat history store.
+Receipts arrive in M3, task state in M4.
 """
 
 from __future__ import annotations
@@ -50,6 +51,41 @@ MIGRATIONS = (
         probed_at  TEXT NOT NULL,
         PRIMARY KEY (model, digest)
     );
+    """,
+    # version 3 (M2): the chat history store. Projects own chats, chats own
+    # messages. Archiving sets archived_at and deletes nothing. There is no
+    # delete path yet (docs/m2-history.md: the deletion contract is undecided).
+    """
+    CREATE TABLE projects (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        created_at  TEXT NOT NULL
+    );
+    CREATE TABLE chats (
+        id          TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL REFERENCES projects(id),
+        title       TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        archived_at TEXT
+    );
+    CREATE INDEX chats_by_project ON chats (project_id, archived_at, updated_at);
+    CREATE TABLE messages (
+        id            INTEGER PRIMARY KEY,
+        chat_id       TEXT NOT NULL REFERENCES chats(id),
+        seq           INTEGER NOT NULL,
+        role          TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+        content       TEXT NOT NULL,
+        model         TEXT,
+        status        TEXT NOT NULL DEFAULT 'complete'
+                      CHECK (status IN ('complete', 'stopped', 'interrupted', 'timeout', 'error')),
+        prompt_tokens INTEGER,
+        reply_tokens  INTEGER,
+        created_at    TEXT NOT NULL,
+        UNIQUE (chat_id, seq)
+    );
+    INSERT INTO projects (id, name, created_at)
+        VALUES ('prj_general', 'General', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)

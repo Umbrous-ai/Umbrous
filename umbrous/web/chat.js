@@ -1,10 +1,13 @@
-// Real chat in the prototype page (M1).
+// Real chat in the prototype page (M1), with saved history and projects (M2).
 //
 // Once runtime-bridge.js has a session it fires 'umbrous:connected'. This
 // script then takes over the composer (replacing the prototype's fake run),
 // the model pill (now a picker of installed Ollama models) and the Details
-// panel's Session section. Opened as a plain file, none of this runs and the
-// prototype behaves exactly as before.
+// panel's Session section. Since M2 it also fills the sidebar's Projects and
+// Sessions from the runtime's history store, loads a saved chat when you click
+// it, and offers Archive / Restore in the header's Options menu. Deleting is
+// deliberately not available yet. Opened as a plain file, none of this runs and
+// the prototype behaves exactly as before.
 //
 // Safe rendering: everything the model says is untrusted text. It is only ever
 // written with textContent / text nodes, never parsed as HTML. After a reply
@@ -24,17 +27,32 @@
   let api = null;
   let models = [];
   let selected = null;     // exact model name; never changed behind your back
-  let chatId = null;
+  let chatId = null;       // the open chat; null until the first message creates it (M2)
+  let chatArchived = false;
+  let projects = [];
+  let projectId = 'prj_general';
+  let showArchived = false;
+  let view = 0;            // bumped on every chat switch, so a late answer for an old view is ignored
   let run = null;          // { runId, controller } while a reply is streaming
   let ollamaUp = false;
   let autoPicked = false;  // a default may be picked on the first load only; never again
   let downNotice = null;   // the single "Ollama is not running" notice with its Retry button
 
   // ---------- helpers ----------
-  function newId() {
-    const b = new Uint8Array(12);
-    crypto.getRandomValues(b);
-    return 'chat_' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  function ago(iso) {
+    const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+    if (s < 60) return 'now';
+    if (s < 3600) return Math.floor(s / 60) + 'm';
+    if (s < 86400) return Math.floor(s / 3600) + 'h';
+    return Math.floor(s / 86400) + 'd';
+  }
+  function projectName(id) { const p = projects.find((x) => x.id === id); return p ? p.name : id; }
+  async function getJson(path, opts) {
+    const r = await api.fetch(path, opts);
+    let j = null;
+    try { j = await r.json(); } catch (_) { j = null; }
+    if (!r.ok) throw new Error((j && (j.message || j.error)) || 'HTTP ' + r.status);
+    return j;
   }
   function fmtK(n) { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
   function scrollDown() { const s = $('#scroll'); if (s) s.scrollTop = 1e9; }
@@ -80,7 +98,7 @@
     if (run) { send.disabled = false; send.title = 'Stop'; setIcon(STOP); return; }
     send.title = 'Send';
     setIcon(ARROW);
-    send.disabled = !($('#input').value.trim() && selected && ollamaUp);
+    send.disabled = !($('#input').value.trim() && selected && ollamaUp && !chatArchived);
   }
 
   // ---------- Details panel ----------
@@ -201,18 +219,234 @@
     n.appendChild(retry);
     downNotice = n;
   }
+  // ---------- history: sidebar (M2) ----------
+  // Sidebar rows are .nav buttons like the prototype's, but each click handler
+  // stops the event so the prototype's own .nav handler (which expects its
+  // placeholder data attributes) never sees them.
+  function navButton(text, n, cls) {
+    const b = el('button', 'nav' + (cls ? ' ' + cls : ''));
+    b.type = 'button';
+    b.appendChild(el('span', 't', text));
+    if (n !== undefined && n !== null) b.appendChild(el('span', 'n', String(n)));
+    return b;
+  }
+  function markCurrent() {
+    document.querySelectorAll('.nav').forEach((x) => x.removeAttribute('aria-current'));
+    const p = document.querySelector(`#sec-projects [data-project-id="${projectId}"]`);
+    if (p) p.setAttribute('aria-current', 'true');
+    const c = chatId && document.querySelector(`#sec-sessions [data-chat-id="${chatId}"]`);
+    if (c) c.setAttribute('aria-current', 'true');
+    else if (!chatId) $('[data-new]').setAttribute('aria-current', 'true');
+  }
+  async function loadProjects() {
+    const box = $('#sec-projects');
+    try { projects = (await getJson('/api/projects')).projects; } catch (e) { box.textContent = ''; box.appendChild(el('div', 'proj-error', e.message)); return; }
+    box.textContent = '';
+    for (const p of projects) {
+      const b = navButton(p.name, p.chats || '');
+      b.prepend(folderIcon());
+      b.dataset.projectId = p.id;
+      b.title = `${p.chats} chat(s)` + (p.archived_chats ? `, ${p.archived_chats} archived` : '');
+      b.addEventListener('click', (e) => { e.stopPropagation(); openProject(p.id); });
+      box.appendChild(b);
+    }
+    markCurrent();
+  }
+  function folderIcon() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'i');
+    const use = document.createElementNS(NS, 'use');
+    use.setAttribute('href', '#folder');
+    svg.appendChild(use);
+    return svg;
+  }
+  async function loadChats() {
+    const box = $('#sec-sessions');
+    const want = projectId;
+    let active, archived = [];
+    try {
+      active = (await getJson('/api/chats?project_id=' + encodeURIComponent(want))).chats;
+      if (showArchived) archived = (await getJson('/api/chats?archived=1&project_id=' + encodeURIComponent(want))).chats;
+    } catch (e) { box.textContent = ''; box.appendChild(el('div', 'proj-error', e.message)); return; }
+    if (want !== projectId) return;
+    box.textContent = '';
+    if (!active.length) box.appendChild(el('div', 'side-empty', 'No chats in ' + projectName(want) + ' yet.'));
+    for (const c of active.concat(archived)) {
+      const b = navButton(c.title, c.archived ? 'archived' : ago(c.updated_at), c.archived ? 'archived' : '');
+      b.dataset.chatId = c.id;
+      b.title = c.title;
+      b.addEventListener('click', (e) => { e.stopPropagation(); openChat(c.id); });
+      box.appendChild(b);
+    }
+    const p = projects.find((x) => x.id === want);
+    if (showArchived || (p && p.archived_chats)) {
+      const t = navButton(showArchived ? 'Hide archived' : `Show archived (${p ? p.archived_chats : 0})`, null, 'toggle-archived');
+      t.dataset.toggleArchived = '';
+      t.addEventListener('click', (e) => { e.stopPropagation(); showArchived = !showArchived; loadChats(); });
+      box.appendChild(t);
+    }
+    markCurrent();
+  }
+  async function refreshSidebar() { await loadProjects(); await loadChats(); }
+
+  function addProject() {
+    const box = $('#sec-projects');
+    box.hidden = false;
+    $('[data-sec="projects"]').setAttribute('aria-expanded', 'true');
+    if ($('#proj-input')) { $('#proj-input').focus(); return; }
+    const input = el('input', 'proj-input');
+    input.id = 'proj-input';
+    input.placeholder = 'Project name, then Enter';
+    input.maxLength = 60;
+    const err = el('div', 'proj-error');
+    err.hidden = true;
+    const done = () => { input.remove(); err.remove(); };
+    input.addEventListener('keydown', async (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') { done(); return; }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      try {
+        const j = await getJson('/api/projects', { json: { name: input.value } });
+        done();
+        await loadProjects();
+        openProject(j.project.id);
+      } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+    });
+    input.addEventListener('click', (e) => e.stopPropagation());
+    box.prepend(input, err);
+    input.focus();
+  }
+
+  function openProject(id) {
+    projectId = id;
+    showArchived = false;
+    newChat();
+    loadChats();
+  }
+
+  // ---------- history: the open chat ----------
+  function setTitle(text) { $('#title').textContent = text; }
+  function setComposer() {
+    const input = $('#input');
+    input.disabled = chatArchived;
+    input.placeholder = chatArchived ? 'Archived chats are read-only. Restore it to continue.' : 'Message a local model…';
+    syncSend();
+  }
+  function showSessionProject() { const sp = $('#sess-project'); if (sp) sp.textContent = projectName(projectId); }
+  function clearContext() {  // the Context bar describes the next send; it is filled when a reply starts
+    const label = $('#ctx-label'), bar = $('#ctx-bar'), row = $('#ctx-row');
+    if (label) label.textContent = '–';
+    if (bar) bar.style.width = '0%';
+    if (row) row.title = '';
+  }
+
   function newChat() {
     if (run) stop();
-    chatId = newId();
+    view++;
+    chatId = null;
+    chatArchived = false;
     const t = thread();
     t.textContent = '';
     t.hidden = false;
     $('#empty').hidden = true;
-    $('#title').textContent = 'New chat';
-    $('#input').placeholder = 'Message a local model…';
-    t.appendChild(el('div', 'notice', 'Chat with a model running in Ollama on this Mac. Nothing leaves this machine. ' +
-      'Chats are kept in memory only until history arrives in M2.'));
+    setTitle('New chat');
+    setComposer();
+    showSessionProject();
+    clearContext();
+    t.appendChild(el('div', 'notice', `New chat in ${projectName(projectId)}. It talks to a model running in Ollama on this Mac; ` +
+      'nothing leaves this machine. It is saved on this Mac once you send the first message.'));
     if (api && !ollamaUp) loadModels();
+    markCurrent();
+  }
+
+  function renderStoredReply(m) {
+    const reply = el('div', 'reply');
+    const answer = el('p', 'answer plain', m.content);
+    linkify(answer);
+    const meta = el('div', 'reply-meta');
+    const toks = m.prompt_tokens != null ? `${m.prompt_tokens} in · ${m.reply_tokens} out` : '';
+    if (m.status === 'complete') meta.textContent = [m.model, toks].filter(Boolean).join(' · ');
+    else {
+      meta.textContent = [m.model, m.status === 'stopped' ? 'Stopped by you. Incomplete.' : 'Incomplete (' + m.status + ').'].filter(Boolean).join(' · ');
+      meta.classList.add(m.status === 'stopped' ? 'warn' : 'bad');
+    }
+    reply.append(answer, meta);
+    return reply;
+  }
+
+  function archivedNotice() {
+    const n = notice('This chat is archived. All its messages are kept and shown here read-only. Restore it to continue.', 'warn');
+    n.id = 'archived-notice';
+    const b = el('button', 'pill retry', 'Restore');
+    b.type = 'button';
+    b.onclick = () => setArchived(false);
+    n.appendChild(b);
+  }
+
+  async function openChat(id) {
+    if (run) stop();
+    const mine = ++view;
+    let j;
+    try { j = await getJson('/api/chats/' + encodeURIComponent(id)); } catch (e) { notice('Could not open that chat: ' + e.message, 'bad'); return; }
+    if (mine !== view) return;  // another chat was opened meanwhile
+    chatId = j.chat.id;
+    chatArchived = j.chat.archived;
+    projectId = j.chat.project_id;
+    const t = thread();
+    t.textContent = '';
+    t.hidden = false;
+    $('#empty').hidden = true;
+    setTitle(j.chat.title);
+    for (const m of j.messages) {
+      if (m.role === 'user') {
+        const u = el('div', 'msg-u', m.content);
+        u.style.marginTop = '48px';
+        t.appendChild(u);
+      } else {
+        t.appendChild(renderStoredReply(m));
+        if (m.model) { const sm = $('#sess-model'); if (sm) sm.textContent = m.model; }
+      }
+    }
+    if (chatArchived) archivedNotice();
+    setComposer();
+    showSessionProject();
+    clearContext();
+    markCurrent();
+    scrollDown();
+  }
+
+  async function setArchived(archive) {
+    if (!chatId) return;
+    if (run) await stop();
+    try { await getJson('/api/chats/' + encodeURIComponent(chatId) + (archive ? '/archive' : '/unarchive'), { json: {} }); }
+    catch (e) { notice('Could not ' + (archive ? 'archive' : 'restore') + ' this chat: ' + e.message, 'bad'); return; }
+    if (archive) showArchived = true;  // keep it visible in the list, marked archived
+    await refreshSidebar();
+    await openChat(chatId);
+  }
+
+  // ---------- header Options menu ----------
+  function closeOptions() { const m = $('#opt-menu'); if (m) m.remove(); }
+  function openOptions() {
+    closeOptions();
+    const menu = el('div', 'opt-menu');
+    menu.id = 'opt-menu';
+    const item = (label, sub, fn) => {
+      const b = el('button', '', label);
+      b.type = 'button';
+      if (sub) b.appendChild(el('span', 'sub', sub));
+      if (fn) b.onclick = (e) => { e.stopPropagation(); closeOptions(); fn(); };
+      else b.disabled = true;
+      menu.appendChild(b);
+      return b;
+    };
+    if (!chatId) item('Archive chat', 'Nothing saved yet: send a message first.', null);
+    else if (chatArchived) item('Restore chat', 'Back to the list; you can continue it.', () => setArchived(false)).dataset.act = 'restore';
+    else item('Archive chat', 'Hidden from the list, read-only. Nothing is deleted.', () => setArchived(true)).dataset.act = 'archive';
+    item('Delete chat', 'Not available yet: how deletion must work is still being decided.', null).dataset.act = 'delete';
+    $('.panel .head').appendChild(menu);
   }
 
   async function send(q) {
@@ -234,7 +468,13 @@
     run = { runId: null, controller };
     syncSend();
     let finished = false;
+    const mine = view;
     try {
+      if (!chatId) {  // the chat is created on the first message, in the selected project
+        const j = await getJson('/api/chats', { json: { project_id: projectId } });
+        if (mine !== view) return;
+        chatId = j.chat.id;
+      }
       const r = await api.fetch('/api/chat', { json: { chat_id: chatId, model: selected, message: q }, signal: controller.signal });
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
       const reader = r.body.getReader();
@@ -273,6 +513,7 @@
             else meta.textContent = (ev.partial ? 'Incomplete: ' : 'Not answered: ') + ev.message;
             meta.classList.add(ev.code === 'cancelled' ? 'warn' : 'bad');
             if (ev.code === 'ollama_unreachable') ollamaDown(ev.message);  // Retry button, same as at start
+            if (ev.code === 'chat_archived') { chatArchived = true; archivedNotice(); setComposer(); }
           }
         }
       }
@@ -285,6 +526,12 @@
     } finally {
       run = null;
       syncSend();
+      if (mine === view && chatId) {  // the title and order may have changed
+        refreshSidebar().then(() => {
+          const c = projects.length && document.querySelector(`#sec-sessions [data-chat-id="${chatId}"] .t`);
+          if (c && mine === view) setTitle(c.textContent);
+        });
+      }
     }
   }
 
@@ -306,21 +553,32 @@
       e.preventDefault();
       if (run) { stop(); return; }
       const q = input.value.trim();
-      if (!q || !selected || !ollamaUp) return;
+      if (!q || !selected || !ollamaUp || chatArchived) return;
       input.value = '';
       send(q);
     };
     sendBtn.addEventListener('click', (e) => { if (run) { e.preventDefault(); stop(); } });
     input.addEventListener('input', syncSend);   // runs after the prototype's own listener
     $('[data-new]').addEventListener('click', newChat);
+    $('[data-addproj]').addEventListener('click', (e) => { e.stopPropagation(); addProject(); });
+    $('#chat-options').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if ($('#opt-menu')) closeOptions(); else openOptions();
+    });
     $('#model-pill').addEventListener('click', (e) => {
       e.stopPropagation();
       if ($('#model-menu')) { closeMenu(); return; }
       openMenu();
       loadModels(true);  // refresh: Ollama may have come back, models may have changed
     });
-    document.addEventListener('click', (e) => { if (!e.target.closest('#model-menu')) closeMenu(); });
-    $('[data-new]').click();  // the prototype's own New chat (sidebar state) plus ours (fresh chat id)
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#model-menu')) closeMenu();
+      if (!e.target.closest('#opt-menu')) closeOptions();
+    });
+    $('#sec-projects').textContent = '';   // the prototype's placeholder projects and sessions
+    $('#sec-sessions').textContent = '';
+    $('[data-new]').click();  // the prototype's own New chat (sidebar state) plus ours
+    refreshSidebar().then(showSessionProject);
     loadModels();
   }
 

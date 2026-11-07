@@ -11,7 +11,7 @@ ollama pull qwen2.5:3b        # any chat model works; a few GB
 bin/umbrous                   # start, open the app, pick a model in the composer, chat
 bin/umbrous models            # installed models, tool-call labels, exposure check
 bin/umbrous probe --all       # run the tool-call probe on every installed model
-bin/umbrous test              # 109 tests; no Ollama needed (a stand-in is used)
+bin/umbrous test              # 109 tests at M1; no Ollama needed (a stand-in is used)
 ```
 
 ## How a message travels
