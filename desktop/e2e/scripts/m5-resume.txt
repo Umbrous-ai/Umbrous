@@ -36,6 +36,8 @@ expect last_meta Task completed
 expect last_text step by step
 screenshot @OUT@/m5-resumed.png
 record resumed
+# a small scroll up right after the reply finished stays where you put it
+scroll_wheel_up 40
 # 5. opened again: the stored exchange, and no notice
 new_chat
 open_chat What is the plan

@@ -294,6 +294,33 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             let pct = |p: f64| frames[((frames.len() as f64 - 1.0) * p) as usize];
             return Ok(Some(json!({"step": "scroll_test", "frames": frames.len(), "p50_ms": pct(0.5), "p95_ms": pct(0.95), "max_ms": pct(1.0)})));
         }
+        "scroll_wheel_up" => {
+            // a real scroll-wheel event over the transcript (up by PX), then check that
+            // later frames do not move the view back toward the end
+            let dy: f32 = arg.parse().unwrap_or(40.);
+            let top = |ws: &Workspace| -f32::from(ws.list.scroll_px_offset_for_scrollbar().y);
+            let (top0, state0) = window.update(cx, |ws, _, _| (top(ws), ws.scroll_state())).map_err(|_| "window gone".to_string())?;
+            let at = window.update(cx, |ws, _, _| ws.list.viewport_bounds().center()).map_err(|_| "window gone".to_string())?;
+            let sent = scroll_wheel(f64::from(f32::from(at.x)), f64::from(f32::from(at.y)), dy as i32);
+            next_frame(window, cx).await;
+            let (top1, state1) = window.update(cx, |ws, _, _| (top(ws), ws.scroll_state())).map_err(|_| "window gone".to_string())?;
+            for _ in 0..20 {
+                next_frame(window, cx).await;
+            }
+            sleep(cx, 300).await;
+            next_frame(window, cx).await;
+            let (top2, state2) = window.update(cx, |ws, _, _| (top(ws), ws.scroll_state())).map_err(|_| "window gone".to_string())?;
+            let rec = json!({"step": "scroll_wheel_up", "top_before": top0, "top_after_event": top1, "top_after_frames": top2,
+                             "follow_reveal": [state0, state1, state2],
+                             "at": [f32::from(at.x), f32::from(at.y)], "sent": sent});
+            if top1 > top0 - 1. {
+                return Ok(Some(json!({"step": "scroll_wheel_up", "error": format!("the view is not above where it was (the wheel event did not scroll, or render undid it in the same frame): {rec}")})));
+            }
+            if top2 > top1 + 0.5 {
+                return Ok(Some(json!({"step": "scroll_wheel_up", "error": format!("the view moved back toward the end: {rec}")})));
+            }
+            return Ok(Some(rec));
+        }
         "screenshot" => {
             next_frame(window, cx).await;
             sleep(cx, 150).await;
@@ -400,5 +427,61 @@ fn mouse_moved(x: f64, y_from_top: f64) {
         if !ev.is_null() {
             let _: () = msg_send![win, sendEvent: ev];
         }
+    }
+}
+
+/// A scroll-wheel event (pixel units, `dy` > 0 scrolls up) at a window point (from
+/// the top left), handed straight to our own window's content view, in-process.
+fn scroll_wheel(x: f64, y_from_top: f64, dy: i32) -> Value {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint { x: f64, y: f64 }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NSRect { x: f64, y: f64, w: f64, h: f64 }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateScrollWheelEvent(source: *const std::ffi::c_void, units: u32, count: u32, wheel1: i32, ...) -> *mut std::ffi::c_void;
+        fn CGEventSetLocation(ev: *mut std::ffi::c_void, p: CGPoint);
+        fn CGEventSetIntegerValueField(ev: *mut std::ffi::c_void, field: u32, value: i64);
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayPixelsHigh(display: u32) -> usize;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let windows: *mut Object = msg_send![app, windows];
+        let win: *mut Object = msg_send![windows, firstObject];
+        if win.is_null() { return json!("no window"); }
+        let view: *mut Object = msg_send![win, contentView];
+        let frame: NSRect = msg_send![view, frame];
+        let ev = CGEventCreateScrollWheelEvent(std::ptr::null(), 0 /* pixel */, 1, dy);
+        if ev.is_null() { return json!("no event"); }
+        CGEventSetIntegerValueField(ev, 88 /* kCGScrollWheelEventIsContinuous */, 1);
+        // an event with no window reports its screen point as locationInWindow; place it
+        // so that point is the window point we want (GPUI flips y with the view height)
+        let screen_h = CGDisplayPixelsHigh(CGMainDisplayID()) as f64;
+        CGEventSetLocation(ev, CGPoint { x, y: screen_h - (frame.h - y_from_top) });
+        let ns: *mut Object = msg_send![class!(NSEvent), eventWithCGEvent: ev];
+        let mut got = json!("no NSEvent or no GPUIView");
+        // GPUI's own view (GPUIView) is a subview of the window's content view
+        let subviews: *mut Object = msg_send![view, subviews];
+        let n: usize = msg_send![subviews, count];
+        let gpui_view = (0..n).map(|i| -> *mut Object { msg_send![subviews, objectAtIndex: i] })
+            .find(|&v| { let c: *const objc::runtime::Class = msg_send![v, class]; (*c).name() == "GPUIView" });
+        if let (false, Some(target)) = (ns.is_null(), gpui_view) {
+            let loc: CGPoint = msg_send![ns, locationInWindow];
+            let d: f64 = msg_send![ns, scrollingDeltaY];
+            let precise: i8 = msg_send![ns, hasPreciseScrollingDeltas];
+            let _: () = msg_send![target, scrollWheel: ns];
+            got = json!({"location_in_window": [loc.x, loc.y], "view_h": frame.h, "delta_y": d, "precise": precise != 0});
+        }
+        CFRelease(ev);
+        got
     }
 }

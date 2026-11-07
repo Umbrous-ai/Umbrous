@@ -28,6 +28,8 @@ use crate::ui;
 use crate::transcript::{self, MetaKind, Msg, Pos, Role, Row, Selection, SelectionHost};
 
 const STREAM_BATCH: Duration = Duration::from_millis(33);
+/// At most this many frames of render-time correction after one reveal_end.
+const REVEAL_FRAMES: u8 = 10;
 
 pub enum Phase {
     Starting,
@@ -78,6 +80,9 @@ pub struct Workspace {
     pub list: ListState,
     /// keep the newest text in view while a reply streams; off once you scroll up
     follow: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Frames left in which render may scroll again to bring the last row's bottom
+    /// into view (0 = off). Only our own reveal arms it; any scroll input clears it.
+    reveal_frames: std::rc::Rc<std::cell::Cell<u8>>,
     /// list rows (see transcript::Row) and each message's row range
     rows: Vec<Row>,
     msg_rows: Vec<std::ops::Range<usize>>,
@@ -203,8 +208,12 @@ impl Workspace {
         // end in view while new text arrives, until you scroll away from it.
         let list = ListState::new(0, ListAlignment::Top, px(800.));
         let follow = std::rc::Rc::new(std::cell::Cell::new(true));
-        let f = follow.clone();
-        list.set_scroll_handler(move |ev, _, _| f.set(ev.visible_range.end >= ev.count));
+        let reveal_frames = std::rc::Rc::new(std::cell::Cell::new(0u8));
+        let (f, r) = (follow.clone(), reveal_frames.clone());
+        list.set_scroll_handler(move |ev, _, _| {
+            r.set(0); // a scroll gesture always wins over a pending reveal
+            f.set(ev.visible_range.end >= ev.count)
+        });
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
                 if this.update(cx, |this, cx| this.on_backend(ev, cx)).is_err() {
@@ -228,6 +237,7 @@ impl Workspace {
             msgs: vec![],
             list,
             follow,
+            reveal_frames,
             rows: vec![],
             msg_rows: vec![],
             selection: Selection::default(),
@@ -1000,6 +1010,12 @@ impl Workspace {
         cx.notify();
     }
 
+    /// (following the end, corrective frames left) for e2e scroll checks.
+    #[cfg(feature = "e2e")]
+    pub fn scroll_state(&self) -> (bool, u8) {
+        (self.follow.get(), self.reveal_frames.get())
+    }
+
     #[cfg(feature = "e2e")]
     pub fn is_running(&self) -> bool {
         self.run.is_some()
@@ -1031,6 +1047,7 @@ impl Workspace {
     fn reveal_end(&self) {
         if self.follow.get() && !self.rows.is_empty() {
             self.list.scroll_to_reveal_item(self.rows.len() - 1);
+            self.reveal_frames.set(REVEAL_FRAMES); // render finishes it once the rows are measured
         }
     }
 
@@ -1915,14 +1932,19 @@ impl Render for Workspace {
         let t0 = Instant::now();
         let wide = window.viewport_size().width >= px(1180.); // the page's @media (max-width:1180px)
         // reveal_end scrolls with the heights the list measured last frame, so a row that
-        // just grew (a reply's closing meta line) can end up below the view; once the
-        // list has measured it, scroll again while following the end
-        if self.follow.get() && !self.rows.is_empty() {
-            let last = self.rows.len() - 1;
-            let below = self.list.bounds_for_item(last).is_some_and(|b| b.bottom() > self.list.viewport_bounds().bottom() + px(0.5));
-            if below {
-                self.list.scroll_to_reveal_item(last);
-                window.request_animation_frame();
+        // just grew (a reply's closing meta line) can end up below the view. Only after
+        // our own reveal, and for a few frames at most, scroll again once it is measured;
+        // any scroll input clears this before it can undo the gesture.
+        let left = self.reveal_frames.get();
+        if left > 0 {
+            match self.rows.len().checked_sub(1).map(|last| (last, self.list.bounds_for_item(last))) {
+                Some((_, Some(b))) if b.bottom() <= self.list.viewport_bounds().bottom() + px(0.5) => self.reveal_frames.set(0),
+                Some((last, _)) => {
+                    self.list.scroll_to_reveal_item(last);
+                    self.reveal_frames.set(left - 1);
+                    window.request_animation_frame();
+                }
+                None => self.reveal_frames.set(0),
             }
         }
         let root = div()
