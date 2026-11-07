@@ -26,7 +26,11 @@ for a in "$@"; do case "$a" in UMBROUS_E2E_OUT=*) OUT=${a#*=};; UMBROUS_HOME=*) 
 name=$(basename "$OUT" .jsonl)
 mode=pass; if [ -z "${BAD:-}" ] || [ "$BAD" = "$name" ]; then mode=$MODE; fi
 case "$mode" in
-pass)     printf '{"expect":"x","ok":true}\n{"record":"end"}\n' > "$OUT";;
+pass)     printf '{"expect":"x","ok":true}\n{"record":"end"}\n' > "$OUT"
+          if [ "$name" = m4-task ]; then   # play the M4 run: its records in the data folder, Stop timing
+            printf '{"step":"stop","stop_to_idle_ms":%s}\n{"record":"end"}\n' "${STOP_MS:-120}" > "$OUT"
+            PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-tasks "$H/umbrous.db" "${TASKS:-good}"
+          fi;;
 assert)   printf '{"expect":"x","ok":true}\n{"step":"expect y","error":"got z"}\n' > "$OUT";;
 noend)    printf '{"expect":"x","ok":true}\n' > "$OUT";;
 none)     ;;
@@ -66,8 +70,9 @@ class NativeValidationExitStatus(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_script(self, script, mode="pass", bad=None, args=None):
-        env = dict(os.environ, MODE=mode, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}")
+    def run_script(self, script, mode="pass", bad=None, args=None, **extra):
+        env = dict(os.environ, MODE=mode, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+                   STUB_ROOT=str(self.root), **extra)
         env.pop("BAD", None)
         if bad:
             env["BAD"] = bad
@@ -95,8 +100,31 @@ class NativeValidationExitStatus(unittest.TestCase):
         self.assertIn("Umbrous-e2e.app is missing", r.stdout)
         self.assertIn("the app was not run", r.stdout)
 
+    # ---- validate-m4.sh
+    def test_m4_only_a_clean_complete_run_passes(self):
+        r = self.run_script("validate-m4.sh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("m4-task: PASS", r.stdout)
+        self.assertIn("Stop to idle: 120 ms", r.stdout)
+        for mode, why in (("assert", "a step failed"), ("noend", "did not reach its end"),
+                          ("none", "no results"), ("panic", "m4-task: the app panicked"),
+                          ("openfail", "could not be launched")):
+            r = self.run_script("validate-m4.sh", mode)
+            self.assertEqual(r.returncode, 1, (mode, r.stdout))
+            self.assertIn(why, r.stdout, mode)
+            self.assertIn("m4-task: FAIL", r.stdout, mode)
+
+    def test_m4_checks_the_records_and_the_stop_bound(self):
+        for extra, why in (({"TASKS": "bad-status"}, "FAIL task records"),
+                           ({"TASKS": "leak"}, "FAIL task records"),
+                           ({"STOP_MS": "1500"}, "FAIL Stop took 1500 ms")):
+            r = self.run_script("validate-m4.sh", **extra)
+            self.assertEqual(r.returncode, 1, (extra, r.stdout + r.stderr))
+            self.assertIn(why, r.stdout, extra)
+            self.assertIn("m4-task: FAIL", r.stdout, extra)
+
     def test_usage_errors(self):
-        for script in ("validate-m3.sh", "validate-native.sh"):
+        for script in ("validate-m3.sh", "validate-m4.sh", "validate-native.sh"):
             self.assertEqual(self.run_script(script, args=[]).returncode, 2, script)
 
     # ---- validate-native.sh, the whole run
@@ -139,11 +167,42 @@ class NativeValidationExitStatus(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout[-2000:])
         self.assertIn("FAIL validate-m3.sh", r.stdout)
 
+    def test_native_fails_on_an_m4_failure(self):
+        r = self.run_script("validate-native.sh", "assert", bad="m4-task")
+        self.assertEqual(r.returncode, 1, r.stdout[-2000:])
+        self.assertIn("FAIL validate-m4.sh", r.stdout)
+
     def test_every_scenario_script_ends_with_its_end_record(self):
         for f in (ROOT / "desktop" / "e2e" / "scripts").glob("*.txt"):
             lines = [l.strip() for l in f.read_text().splitlines() if l.strip() and not l.startswith("#")]
             self.assertEqual(lines[-2:], ["record end", "quit"], f.name)
 
 
+def seed_tasks(db_path: str, kind: str) -> None:
+    """What the M4 scenario leaves in its data folder, for the open stand-in:
+    completed, cancelled (Stop), completed at the step limit. `kind` bad-status
+    or leak breaks one thing for the checks to catch."""
+    import sys
+    from umbrous.persistence import db
+    from umbrous.receipts.model import new_task_id
+    from umbrous.tasks.store import TaskStore
+    db.connect(Path(db_path)).close()
+    store = TaskStore(Path(db_path))
+    ends = ["completed", "cancelled", "completed"] if kind != "bad-status" else ["completed", "completed", "completed"]
+    for i, end in enumerate(ends):
+        tid = new_task_id()
+        store.create(tid, "prj_general", None, "m", {})
+        store.set_status(tid, "started")
+        if i == 2:
+            store.event(tid, "limit", limit="steps")
+        if kind == "leak" and i == 0:
+            store.checkpoint(tid, 1, {"note": "ZEBRA-CANARY-991"})   # what the checks must catch
+        store.set_status(tid, end)
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "seed-tasks":
+        seed_tasks(sys.argv[2], sys.argv[3])
     unittest.main()

@@ -40,7 +40,7 @@ import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
-from typing import Iterator, List, Optional, Tuple
+from typing import Callable, Iterator, List, Optional, Tuple
 
 # ---------------------------------------------------------------- limits
 MAX_READ_BYTES = 256 * 1024        # largest file read_file will open
@@ -139,6 +139,7 @@ class SearchResult:
     skipped: int = 0
     truncated: bool = False
     timed_out: bool = False
+    cancelled: bool = False
 
 
 # ---------------------------------------------------------------- descriptor walking
@@ -320,8 +321,10 @@ def list_dir(root: str, parts: Tuple[str, ...]) -> ListResult:
                       truncated=truncated)
 
 
-def search(root: str, parts: Tuple[str, ...], query: str, deadline_s: float = SEARCH_SECONDS) -> SearchResult:
-    """Case-insensitive plain-text search (not a regular expression)."""
+def search(root: str, parts: Tuple[str, ...], query: str, deadline_s: float = SEARCH_SECONDS,
+           cancelled: Callable[[], bool] = lambda: False) -> SearchResult:
+    """Case-insensitive plain-text search (not a regular expression).
+    `cancelled` is checked before each file, so Stop ends a search within one file read."""
     result = SearchResult(query=query, path="/".join(parts) or ".")
     needle = query.casefold()
     started = time.monotonic()
@@ -335,6 +338,9 @@ def search(root: str, parts: Tuple[str, ...], query: str, deadline_s: float = SE
                 dirnames[:] = []
             dirnames[:] = sorted(d for d in dirnames if not is_excluded(parts + rel + (d,)))
             for name in sorted(filenames):
+                if cancelled():
+                    result.cancelled = result.truncated = True
+                    return result
                 if time.monotonic() - started > deadline_s:
                     result.timed_out = result.truncated = True
                     return result

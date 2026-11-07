@@ -294,7 +294,7 @@ class ToolChatTests(unittest.TestCase):
         with self.rt() as rt:
             self.setup_rt(rt)
             ev = rt.chat(rt.new_chat(), "greedy:3b", "look around")
-            self.assertEqual(sum(e["type"] == "tool_result" for e in ev), 6)   # MAX_TOOL_ROUNDS
+            self.assertEqual(sum(e["type"] == "tool_result" for e in ev), 6)   # task_max_steps (default 6)
             self.assertEqual(ev[-1]["type"], "done")
             self.assertEqual("".join(e["text"] for e in ev if e["type"] == "delta"), "Done looking.")
             ev = rt.chat(rt.new_chat(), "burst:3b", "list a lot")

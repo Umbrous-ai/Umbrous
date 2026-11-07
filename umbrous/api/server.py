@@ -33,6 +33,8 @@ There is deliberately no route that deletes a chat or project (docs/m2-history.m
     POST /api/projects/<id>/grants/<grant>/revoke   revoke a project grant (M3)
     POST /api/approvals/<id> {choice}               answer an approval card: once | grant | deny (M3)
     GET  /api/receipts?chat_id=… | task_id=…        receipts, for inspection (M3)
+    GET  /api/tasks?chat_id=…                       a chat's tasks with their reports (M4)
+    GET  /api/tasks/<tsk_id>                        one task: actions, event log, checkpoints, report (M4)
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ from umbrous.gate.gate import Gate, GateError
 from umbrous.history.store import HistoryError, HistoryStore
 from umbrous.receipts.store import ReceiptStore
 from umbrous.runloop.chat import ChatLocks, RunRegistry, run_chat
+from umbrous.tasks.store import TaskStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PAGE_PATH = REPO_ROOT / "prototypes" / "umbrous-harness.html"
@@ -140,6 +143,7 @@ class Runtime:
         self.access = AccessStore(config.db_path, config.home)
         self.receipts = ReceiptStore(config.db_path)
         self.gate = Gate(self.access, self.receipts)
+        self.tasks = TaskStore(config.db_path)
         self.chat_locks = ChatLocks()
         self.runs = RunRegistry()
         self.exposure: Optional[ExposureReport] = None
@@ -269,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
                 status = ACCESS_STATUS.get(exc.code, HISTORY_STATUS.get(exc.code, 400))
                 self._send_json(status, {"error": exc.code, "message": exc.message})
                 return status, exc.code
+        if path == "/api/tasks" or path.startswith("/api/tasks/"):
+            return self._tasks(path)
         if path == "/api/projects" or path == "/api/chats" or path.startswith("/api/chats/"):
             try:
                 return self._history(path)
@@ -278,6 +284,29 @@ class Handler(BaseHTTPRequestHandler):
                 return status, exc.code
         self._send_json(404, {"error": "not_found"})
         return 404, "not_found"
+
+    def _tasks(self, path: str) -> Tuple[int, str]:
+        """Task state, for the report and the trace (M4). Read-only: tasks are
+        removed only by `bin/umbrous purge tasks`."""
+        rt = self.runtime
+        if self.command != "GET":
+            self._send_json(405, {"error": "method_not_allowed"})
+            return 405, "method_not_allowed"
+        if path == "/api/tasks":
+            q = parse_qs(self.path.split("?", 1)[1].split("#", 1)[0] if "?" in self.path else "")
+            chat_id = (q.get("chat_id") or [""])[0]
+            if not (chat_id and CHAT_PATH.match("/api/chats/" + chat_id)):
+                self._send_json(400, {"error": "give chat_id"})
+                return 400, "bad_query"
+            self._send_json(200, {"tasks": rt.tasks.for_chat(chat_id)})
+            return 200, "tasks"
+        task_id = path[len("/api/tasks/"):]
+        task = rt.tasks.get(task_id) if TASK_ID_RE.match(task_id) else None
+        if task is None:
+            self._send_json(404, {"error": "no_such_task"})
+            return 404, "no_such_task"
+        self._send_json(200, task)
+        return 200, "task"
 
     def _access(self, path: str) -> Tuple[int, str]:
         """The access view, approvals and receipts (M3)."""
@@ -440,7 +469,7 @@ class Handler(BaseHTTPRequestHandler):
         rt = self.runtime
         events = run_chat(rt.config, rt.router, rt.history, rt.chat_locks, rt.runs, str(body.get("chat_id", "")),
                           str(body.get("model", "")), body.get("message"), gate=rt.gate,
-                          approvals=body.get("approvals") is True)
+                          approvals=body.get("approvals") is True, tasks=rt.tasks)
         self.send_response(200)
         for k, v in BASE_HEADERS.items():
             self.send_header(k, v)

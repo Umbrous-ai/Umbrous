@@ -195,6 +195,17 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             window.update(cx, |ws, _, cx| ws.switch_to_workspace_read(cx)).ok();
             wait_until(cx, window, 10, "profile switched", |ws| !ws.asks_before_read()).await?;
         }
+        "stop" => {
+            // what the Stop button does; records how long until the reply has ended (M4)
+            let t0 = Instant::now();
+            window.update(cx, |ws, _, cx| ws.stop_reply(cx)).ok();
+            wait_until(cx, window, 10, "stopped", |ws| !ws.is_running()).await?;
+            return Ok(Some(json!({"step": "stop", "stop_to_idle_ms": t0.elapsed().as_millis()})));
+        }
+        "wait_meta" => {
+            // until the last reply's meta line contains the text (e.g. a running step)
+            wait_until(cx, window, 60, "meta", |ws| ws.msgs.last().map(|m| m.meta.contains(arg)).unwrap_or(false)).await?;
+        }
         "wait_idle" => {
             wait_until(cx, window, arg.parse().unwrap_or(60), "no reply running", |ws| !ws.is_running()).await?;
         }

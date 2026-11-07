@@ -5,6 +5,7 @@
     python3 desktop/e2e/stress.py fake-empty PORT         a fake Ollama with no models installed
     python3 desktop/e2e/stress.py fake-workspace PORT     a fake Ollama whose model reads files with tools (M3)
     python3 desktop/e2e/stress.py seed-workspace DIR      a test workspace (DIR/ws) and an outside secret (M3)
+    python3 desktop/e2e/stress.py fake-tasks PORT         a fake Ollama with multi-step, slow and endless task models (M4)
 
 HOME is a throwaway data folder; point the app at it with UMBROUS_HOME, and at
 the fake Ollama with {"ollama_url": "http://127.0.0.1:PORT"} in HOME/config.json.
@@ -85,9 +86,22 @@ def seed_workspace(base: Path) -> None:
     print(make_fixture(base))
 
 
-def fake_ollama(port: int, empty: bool = False, workspace: bool = False) -> None:
+def task_models():
+    """M4: a three-step read task, one whose answer streams slowly (to press Stop
+    while a step is running), and one that never stops asking for tools (to reach
+    the step limit)."""
+    from tests.fake_ollama import FakeModel, demo_models, scripted
+    multi = next(m for m in demo_models() if m.name == "multi-step:3b")
+    slow = FakeModel("slow-task:3b", chunk_delay=0.15, agent=scripted(
+        ("list_files", {}), final=lambda m: "Looking through the workspace, step by step. " * 30))
+    endless = FakeModel("endless:3b", agent=lambda msgs: {"tool_calls": [("list_files", {})]}
+                        if msgs[-1].get("content") != "__no_tools__" else {"content": "I kept looking and stopped at the limit."})
+    return [multi, slow, endless]
+
+
+def fake_ollama(port: int, empty: bool = False, workspace: bool = False, tasks: bool = False) -> None:
     from tests.fake_ollama import FakeModel, FakeOllama, workspace_agent
-    models = [FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02)] if workspace else [] if empty else [
+    models = task_models() if tasks else [FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02)] if workspace else [] if empty else [
         FakeModel("stress:1b", reply=big_markdown(100), chunk_delay=0.0005),
         # streams for ~30 s: time to switch chats, projects or archive mid-reply
         FakeModel("slow:1b", reply=big_markdown(20), chunk_delay=0.01),
@@ -105,4 +119,5 @@ if __name__ == "__main__":
     elif sys.argv[1] == "seed":
         seed(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 1000)
     else:
-        fake_ollama(int(sys.argv[2]), empty=sys.argv[1] == "fake-empty", workspace=sys.argv[1] == "fake-workspace")
+        fake_ollama(int(sys.argv[2]), empty=sys.argv[1] == "fake-empty", workspace=sys.argv[1] == "fake-workspace",
+                    tasks=sys.argv[1] == "fake-tasks")

@@ -121,6 +121,10 @@ class Outcome:
     evidence: List[dict] = field(default_factory=list)
     receipt: Optional[dict] = None
     truncated: bool = False
+    action_id: str = ""
+    # M4: what the tool itself reported about completeness (for Observe + Verify):
+    # truncated, timed_out, skipped, lines_total, partial. No content.
+    observed: dict = field(default_factory=dict)
 
 
 class GateError(Exception):
@@ -285,10 +289,15 @@ class Gate:
     def run(self, task_id: str, project_id: str, chat_id: Optional[str], call: Call,
             ask: Optional[Callable[[Verdict, str], None]] = None,
             cancelled: Callable[[], bool] = lambda: False,
-            approval_timeout: Optional[float] = None) -> Outcome:
-        """Decide, maybe ask, execute only on ALLOW, and write the receipt."""
+            approval_timeout: Optional[float] = None, action_id: Optional[str] = None,
+            observer: Optional[Callable[[str], None]] = None) -> Outcome:
+        """Decide, maybe ask, execute only on ALLOW, and write the receipt.
+
+        M4: `action_id` lets the task record and the receipt share one id.
+        `observer("started")` is called just before the tool runs (after any
+        approval), which is when the tool's own deadline starts."""
         started = _now()
-        action_id = new_action_id()
+        action_id = action_id or new_action_id()
         verdict = self.evaluate(project_id, call)
         approval_id = None
         if verdict.outcome == ASK:
@@ -322,16 +331,24 @@ class Gate:
         if verdict.outcome == BLOCK:
             return self._finish(task_id, action_id, project_id, chat_id, verdict, started, "denied",
                                 verdict.code, verdict.reason)
-        return self._execute(task_id, action_id, project_id, chat_id, verdict, started)
+        if cancelled():
+            return self._finish(task_id, action_id, project_id, chat_id, verdict, started, "failed",
+                                "cancelled", "Stopped before the tool ran.")
+        if observer:
+            observer("started")
+        return self._execute(task_id, action_id, project_id, chat_id, verdict, started, cancelled)
 
-    def refuse(self, task_id: str, project_id: str, chat_id: Optional[str], call: Call, code: str, message: str) -> Outcome:
+    def refuse(self, task_id: str, project_id: str, chat_id: Optional[str], call: Call, code: str, message: str,
+               action_id: Optional[str] = None) -> Outcome:
         """Record a proposal the run loop will not even evaluate (e.g. too many calls at once)."""
         v = self.evaluate(project_id, call)
-        return self._finish(task_id, new_action_id(), project_id, chat_id, v, _now(), "denied", code, message)
+        return self._finish(task_id, action_id or new_action_id(), project_id, chat_id, v, _now(), "denied", code, message)
 
-    def _execute(self, task_id, action_id, project_id, chat_id, v: Verdict, started) -> Outcome:
+    def _execute(self, task_id, action_id, project_id, chat_id, v: Verdict, started,
+                 cancelled: Callable[[], bool] = lambda: False) -> Outcome:
         ws: Workspace = self.access.workspace(project_id)
         a = v.clean_args
+        observed: dict = {}
         try:
             if v.action == "fs.read":
                 r = fs.read_file(ws.root, v.parts, a.get("start_line", 1), min(a.get("max_lines", 400), 400))
@@ -344,6 +361,7 @@ class Gate:
                                              if r.total_lines else " (empty)")
                 ev = [EvidenceRef("file", r.path, r.sha256, r.size_bytes,
                                   (r.first_line, r.last_line) if r.last_line >= r.first_line else None)]
+                observed = {"lines_total": r.total_lines, "partial": r.truncated or r.first_line > 1}
             elif v.action == "fs.list":
                 r = fs.list_dir(ws.root, v.parts)
                 lines = [f"{kind:8} {name}" + (f"  ({size:,} bytes)" if size is not None else "")
@@ -356,8 +374,12 @@ class Gate:
                 body = f"list_files {r.path}: {len(r.entries)} entries. {' '.join(extra)}\n" + ("\n".join(lines) or "(empty)")
                 summary = f"Listed {r.path} ({len(r.entries)} entries)"
                 ev = [EvidenceRef("directory", r.path)]
+                observed = {"truncated": r.truncated, "hidden": r.hidden}
             else:
-                r = fs.search(ws.root, v.parts, a["query"])
+                r = fs.search(ws.root, v.parts, a["query"], cancelled=cancelled)
+                if r.cancelled:
+                    return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", "cancelled",
+                                        f"Stopped during the search, after {r.files_scanned} file(s).")
                 lines = [f"{h.path}:{h.line}: {h.text}" for h in r.hits]
                 notes = []
                 if r.truncated:
@@ -371,6 +393,8 @@ class Gate:
                 ev = [EvidenceRef("search", f"{r.path} query#{qhash}")] + \
                      [EvidenceRef("file", p, lines=(n, n)) for p, n in
                       list(dict.fromkeys((h.path, h.line) for h in r.hits))[:40]]
+                observed = {"truncated": r.truncated, "timed_out": r.timed_out, "skipped": r.skipped,
+                            "files_scanned": r.files_scanned}
         except fs.FsError as exc:
             security = exc.code in ("symlink", "hard_link", "not_regular", "permission")
             return self._finish(task_id, action_id, project_id, chat_id, v, started,
@@ -379,8 +403,10 @@ class Gate:
             return self._finish(task_id, action_id, project_id, chat_id, v, started, "uncertain",
                                 "tool_crashed", f"The tool failed unexpectedly ({exc.__class__.__name__}).")
         model_text = wrap_untrusted(body)
-        return self._finish(task_id, action_id, project_id, chat_id, v, started, "allowed", "ok",
-                            v.reason, model_text=model_text, summary=summary, evidence=ev)
+        out = self._finish(task_id, action_id, project_id, chat_id, v, started, "allowed", "ok",
+                           v.reason, model_text=model_text, summary=summary, evidence=ev)
+        out.observed = observed
+        return out
 
     def _finish(self, task_id, action_id, project_id, chat_id, v: Verdict, started, decision, code, message,
                 model_text: Optional[str] = None, summary: str = "", evidence=()) -> Outcome:
@@ -393,7 +419,7 @@ class Gate:
         if model_text is None:
             model_text = f"TOOL ERROR ({decision}, {code}): {message}"
         return Outcome(decision=decision, code=code, message=message, model_text=model_text,
-                       summary=summary or message, evidence=record["evidence"], receipt=record)
+                       summary=summary or message, evidence=record["evidence"], receipt=record, action_id=action_id)
 
 
 def wrap_untrusted(body: str) -> str:

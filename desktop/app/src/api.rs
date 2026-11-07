@@ -165,6 +165,60 @@ pub struct Message {
     pub status: String,
     pub prompt_tokens: Option<u64>,
     pub reply_tokens: Option<u64>,
+    /// the task this reply was (M4): its report is fetched from /api/tasks
+    #[serde(default)]
+    pub task_id: Option<String>,
+}
+
+/// GET /api/tasks?chat_id= (umbrous/tasks/store.py, M4): each task with its report.
+#[derive(Debug, Deserialize)]
+pub struct TaskList {
+    pub tasks: Vec<TaskBrief>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TaskBrief {
+    pub task_id: String,
+    #[serde(default)]
+    pub report: Option<Value>,
+}
+
+/// One line summing up a task report (M4), for the reply's meta line, and
+/// whether it needs attention (something failed, was not checked, or a limit
+/// was reached). The full trace is in the browser page and `bin/umbrous tasks`.
+pub fn report_line(rep: &Value) -> Option<(String, bool)> {
+    let status = rep.get("status")?.as_str()?;
+    let n = |k: &str| rep.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let len = |k: &str| rep.get(k).and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+    let done = rep.get("actions").and_then(|a| a.get("completed")).and_then(Value::as_u64).unwrap_or(0);
+    let word = match status {
+        "completed" => "Task completed",
+        "cancelled" => "Task stopped",
+        "failed" => "Task failed",
+        _ => "Task outcome unknown",
+    };
+    let steps = n("steps");
+    let mut parts = vec![
+        word.to_string(),
+        format!("{steps} step{}", if steps == 1 { "" } else { "s" }),
+        format!("{done} of {} actions completed", n("tool_calls")),
+    ];
+    let limits: Vec<&str> = rep.get("limits_hit").and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    for l in &limits {
+        parts.push(match *l {
+            "steps" => "step limit reached".into(),
+            "tool_calls" => "action limit reached".into(),
+            "task_time" => "time limit reached".into(),
+            other => format!("{other} limit reached"),
+        });
+    }
+    let unc = len("uncertainty");
+    if unc > 0 {
+        parts.push(format!("{unc} thing{} not fully checked", if unc == 1 { "" } else { "s" }));
+    }
+    let attention = status != "completed" || unc > 0 || len("failures") > 0 || !limits.is_empty();
+    Some((parts.join(" · "), attention))
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,4 +273,27 @@ pub struct Health {
     pub uptime_s: u64,
     #[serde(default)]
     pub ollama_exposure: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_line_sums_up_a_task() {
+        let rep = json!({"status": "completed", "steps": 4, "tool_calls": 3, "actions": {"completed": 3},
+                         "uncertainty": ["x"], "failures": [], "limits_hit": []});
+        assert_eq!(report_line(&rep), Some(("Task completed · 4 steps · 3 of 3 actions completed · 1 thing not fully checked".into(), true)));
+        let rep = json!({"status": "cancelled", "steps": 1, "tool_calls": 0, "actions": {}, "uncertainty": [],
+                         "failures": [], "limits_hit": []});
+        assert_eq!(report_line(&rep), Some(("Task stopped · 1 step · 0 of 0 actions completed".into(), true)));
+        let rep = json!({"status": "completed", "steps": 7, "tool_calls": 6, "actions": {"completed": 6},
+                         "uncertainty": ["a", "b"], "failures": [], "limits_hit": ["steps"]});
+        assert_eq!(report_line(&rep).unwrap().0,
+                   "Task completed · 7 steps · 6 of 6 actions completed · step limit reached · 2 things not fully checked");
+        let clean = json!({"status": "completed", "steps": 2, "tool_calls": 1, "actions": {"completed": 1},
+                           "uncertainty": [], "failures": [], "limits_hit": []});
+        assert!(!report_line(&clean).unwrap().1);
+        assert_eq!(report_line(&json!({})), None);
+    }
 }

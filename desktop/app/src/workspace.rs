@@ -497,7 +497,22 @@ impl Workspace {
             cx,
             move |api| {
                 let t: api::Transcript = api.get(&format!("/api/chats/{id}"))?;
-                let msgs: Vec<Msg> = t.messages.iter().map(stored_msg).collect();
+                let mut msgs: Vec<Msg> = t.messages.iter().map(stored_msg).collect();
+                // M4: replies that were tasks get their report line back
+                if t.messages.iter().any(|m| m.task_id.is_some()) {
+                    if let Ok(list) = api.get::<api::TaskList>(&format!("/api/tasks?chat_id={id}")) {
+                        for (m, msg) in t.messages.iter().zip(msgs.iter_mut()) {
+                            let Some(tid) = m.task_id.as_deref() else { continue };
+                            let rep = list.tasks.iter().find(|x| x.task_id == tid).and_then(|x| x.report.as_ref());
+                            if let Some((line, attention)) = rep.and_then(api::report_line) {
+                                msg.meta = format!("{} · {line}", msg.meta);
+                                if attention && msg.meta_kind == MetaKind::Normal {
+                                    msg.meta_kind = MetaKind::Warn;
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok((t.chat, msgs))
             },
             move |this, r, cx| {
@@ -783,7 +798,27 @@ impl Workspace {
                             }
                             msg.meta = parts.join(" · ");
                             msg.meta_kind = MetaKind::Normal;
+                            // M4: a task's report, in one line (the trace is in the browser page)
+                            if let Some((line, attention)) = api::report_line(&ev["report"]) {
+                                msg.meta = format!("{} · {line}", msg.meta);
+                                if attention {
+                                    msg.meta_kind = MetaKind::Warn;
+                                }
+                            }
                             refresh_lists = true;
+                        }
+                        "tool_call" => {
+                            // M4: say which step is running, so Stop has something to interrupt that you can see
+                            let step = ev.get("step").and_then(Value::as_u64).unwrap_or(0);
+                            let tool = ev.get("tool").and_then(Value::as_str).unwrap_or("a tool");
+                            let path = ev["args"].get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).unwrap_or(".");
+                            let what = match tool {
+                                "read_file" => format!("reading {path}"),
+                                "list_files" => format!("listing {path}"),
+                                "search_files" => format!("searching {path}"),
+                                _ => "running a tool".into(),
+                            };
+                            msg.meta = format!("Step {step}: {}…", what.chars().take(80).collect::<String>());
                         }
                         "error" => {
                             let code = ev.get("code").and_then(Value::as_str).unwrap_or("error");
@@ -795,6 +830,9 @@ impl Workspace {
                                 text.clone()
                             };
                             msg.meta_kind = if code == "cancelled" { MetaKind::Warn } else { MetaKind::Bad };
+                            if let Some((line, _)) = api::report_line(&ev["report"]) {
+                                msg.meta = format!("{} {line}.", msg.meta.trim_end());
+                            }
                             if code == "ollama_unreachable" {
                                 self.notice = Some((text, MetaKind::Warn, true));
                                 if let Some(m) = self.models.as_mut() {

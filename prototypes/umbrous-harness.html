@@ -145,6 +145,15 @@ textarea:focus-visible,input:focus-visible{outline:none}
 .approval .acts button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .approval.done{border-color:var(--border);opacity:.8}
 .sources{font-size:var(--fs-12);color:var(--text-subtle);margin-top:6px}
+.task-report{font-size:var(--fs-12);color:var(--text-subtle);margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px}
+.task-report[data-status=failed] .tr-head,.task-report[data-status=cancelled] .tr-head{color:var(--warning)}
+.task-report .tr-title{color:var(--text-default);margin-top:6px}
+.task-report .tr-list.fail .tr-item{color:var(--warning)}
+.task-report .tr-item{padding-left:10px}
+.linkish{background:none;border:0;padding:0;font:inherit;color:var(--text-default);text-decoration:underline;cursor:pointer}
+.trace-list{list-style:none;margin:6px 0;padding:0;font-size:var(--fs-12)}
+.trace-ev{padding:2px 0;color:var(--text-subtle)}.trace-ev .k{color:var(--text-default)}
+.trace-ev code{font:var(--fs-12) var(--mono)}
 .sources code{font:var(--fs-12) var(--mono);color:var(--text-default)}
 .acc-root{font:var(--fs-12) var(--mono);color:var(--text-strong);overflow-wrap:anywhere;margin-bottom:6px}
 .acc-row{display:flex;align-items:center;gap:8px;font-size:var(--fs-13);margin:6px 0}
@@ -374,11 +383,9 @@ h3{font-size:var(--fs-16);font-weight:var(--fw-medium);color:var(--text-strong);
         <div class="row"><svg class="i"><use href="#table"/></svg><span class="t">evals/runs.csv</span><code>read</code></div>
         <div class="row"><svg class="i"><use href="#doc"/></svg><span class="t">CHANGELOG.md</span><code>read</code></div>
       </div>
-      <div class="rsec">
-        <h4>Steps</h4>
-        <div class="row"><svg class="i"><use href="#search"/></svg><span class="t">Queried eval runs</span><code>4s</code></div>
-        <div class="row"><svg class="i"><use href="#table"/></svg><span class="t">Compared by task type</span><code>11s</code></div>
-        <div class="row"><svg class="i"><use href="#branch"/></svg><span class="t">Matched to a41f9c2</span><code>19s</code></div>
+      <div class="rsec" id="trace-sec" hidden>
+        <h4>Trace</h4>
+        <div id="trace-body"></div>
       </div>
     </div>
   </aside>

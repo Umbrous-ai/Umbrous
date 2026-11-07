@@ -1,0 +1,40 @@
+# M4 in the app: a multi-step task and its report, Stop during a running step, a forced limit.
+# Data: General with workspace @OUT@/m4-fixture/ws on Workspace read (validate-m4.sh);
+# Ollama: stress.py fake-tasks (multi-step:3b, slow-task:3b, endless:3b; tool checks passed).
+wait_ready 30
+wait_models
+wait_access
+expect access workspace_read
+# 1. a multi-step read-only task ends with its report on the reply
+select_model multi-step:3b
+send What is the plan? My note: ZEBRA-CANARY-991
+wait_reply 30
+expect last_text ship on Friday
+expect last_meta Task completed · 4 steps · 3 of 3 actions completed
+expect last_meta 2 things not fully checked
+screenshot @OUT@/m4-report.png
+record multi
+# 2. Stop while a step is running: the reply ends at once and no new step starts
+new_chat
+select_model slow-task:3b
+send Walk through the workspace
+wait_streaming
+stop
+expect running false
+expect last_meta Stopped by you.
+expect last_meta Task stopped · 2 steps · 1 of 1 actions completed
+screenshot @OUT@/m4-stopped.png
+record stopped
+# 3. a model that never stops asking for tools reaches the step limit, and says so
+new_chat
+select_model endless:3b
+send Look around as much as you like
+wait_reply 30
+expect last_meta step limit reached
+expect last_text stopped at the limit
+record limit
+# 4. the report comes back when a stored chat is opened again
+open_chat What is the plan
+expect last_meta Task completed · 4 steps
+record end
+quit

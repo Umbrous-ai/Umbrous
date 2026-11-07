@@ -63,6 +63,8 @@ e2e nav-stream nav-stream.txt "$W/h-nav"; kill $FAKE
 if grep -q '"error"' "$W"/*.jsonl 2>/dev/null; then fail "e2e assertions failed:"; grep -h '"error"' "$W"/*.jsonl; fi
 echo "### M3: Ask before read in the app, the switch, reads (validate-m3.sh)"
 "$ROOT/desktop/e2e/validate-m3.sh" "$W" || fail "validate-m3.sh: M3 in the app failed (see above)"
+echo "### M4: a task's report, Stop during a step, a forced limit (validate-m4.sh)"
+"$ROOT/desktop/e2e/validate-m4.sh" "$W" || fail "validate-m4.sh: M4 in the app failed (see above)"
 echo "### a runtime started from a terminal is reported and left running"
 mkdir -p "$W/h-cli"
 PYTHONPATH="$ROOT" python3 -m umbrous --home "$W/h-cli" serve --no-open --port 0 >/dev/null 2>&1 & CLI=$!; sleep 2

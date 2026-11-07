@@ -63,7 +63,8 @@ The model never runs anything itself. It only names a tool and arguments; the
 application decides and runs it. A refusal goes back to the model as
 `TOOL ERROR (denied, outside): …` so it can say what it could not check.
 
-Limits: 6 tool rounds per reply and 8 calls per round. A file read returns at
+Limits: 6 tool rounds per reply and 8 calls per round (since M4, the rounds and a total
+are settings: see [m4-tasks.md](m4-tasks.md#limits-and-stop)). A file read returns at
 most 400 lines and 12,000 characters, from files up to 256 KB. A listing shows
 at most 300 entries. A search looks at up to 2,000 files of 1 MB or less, for
 at most 5 seconds, and returns at most 40 matches. Anything cut is marked

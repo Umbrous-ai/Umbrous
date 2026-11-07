@@ -160,7 +160,10 @@ class FakeOllama:
                         send({"model": m.name, "done": False, "message": {"role": "assistant", "content": "",
                               "tool_calls": [{"function": {"name": n, "arguments": a}} for n, a in step["tool_calls"]]}})
                     else:
-                        for p in re.findall(r".{1,12}", step["content"], re.S) or [""]:
+                        parts = re.findall(r".{1,12}", step["content"], re.S) or [""]
+                        for i, p in enumerate(parts):
+                            if m.behavior == "stall_mid" and i == len(parts) // 2:
+                                time.sleep(fake.stall_seconds)   # a model that hangs mid-answer
                             send({"model": m.name, "message": {"role": "assistant", "content": p}, "done": False})
                             if m.chunk_delay:
                                 time.sleep(m.chunk_delay)
@@ -283,6 +286,11 @@ def demo_models() -> List[FakeModel]:
                         '<a href="http://127.0.0.1:8417/api/health">health</a> and https://example.com/docs ok'),
         FakeModel("slow-model:7b", chunk_delay=0.4, reply="This reply streams slowly so you can press stop. " * 4),
         FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02),
+        # M4: a three-step task (list, search, read), then an answer with one
+        # citation that was read and one that was not, for the report's Verify step.
+        FakeModel("multi-step:3b", chunk_delay=0.02, agent=scripted(
+            ("list_files", {}), ("search_files", {"query": "Ship"}), ("read_file", {"path": "notes/plan.md"}),
+            final=lambda m: "The plan is to ship on Friday (notes/plan.md:2). Owner details are in notes/team.md:4.")),
     ]
 
 

@@ -11,6 +11,8 @@
                                 show or set which folder a project may read (M3)
     bin/umbrous receipts        recent tool receipts (--chat ID, --task ID for full records)
     bin/umbrous purge receipts --all|--before DATE   delete receipts (asks for --yes)
+    bin/umbrous tasks           recent tasks (--chat ID; --task ID for the trace and report)
+    bin/umbrous purge tasks --all|--before DATE      delete task state (asks for --yes)
     bin/umbrous prototype       open the static prototype file, as before M0 (handled in bin/umbrous)
     bin/umbrous version
 """
@@ -269,6 +271,54 @@ def receipts_command(config: Config, chat: Optional[str], task: Optional[str], l
     return 0
 
 
+def tasks_command(config: Config, chat: Optional[str], task: Optional[str], last: int) -> int:
+    """Recent tasks, or one task's trace (events) and report."""
+    import json as _json
+    from umbrous.tasks.store import TaskStore
+    _stores(config)
+    store = TaskStore(config.db_path)
+    if task:
+        t = store.get(task)
+        if t is None:
+            print(f"No task {task}.", file=sys.stderr)
+            return 1
+        tk = t["task"]
+        print(f"{tk['task_id']}  {tk['status']}{' (' + tk['code'] + ')' if tk['code'] else ''}  model {tk['model']}")
+        print("trace:")
+        for e in t["events"]:
+            data = " ".join(f"{k}={_json.dumps(v)}" for k, v in sorted(e["data"].items()))
+            print(f"  {e['seq']:>3} {e['at']}  {e['kind']:<18} {e['action_id'] or '':<32} {data}")
+        print("report:")
+        print(_json.dumps(t["report"], indent=2))
+        return 0
+    rows = store.for_chat(chat) if chat else store.latest(last)
+    for r in rows:
+        rep = r.get("report") or {}
+        print(f"{r['created_at']}  {r['task_id']}  {r['status']:<9} {r.get('code') or '':<16} "
+              f"steps={rep.get('steps', '?')} actions={rep.get('actions', {})}")
+    if not rows:
+        print("No tasks.")
+    return 0
+
+
+def purge_tasks(config: Config, before: Optional[str], purge_all: bool, yes: bool) -> int:
+    from umbrous.tasks.store import TaskStore
+    _stores(config)
+    store = TaskStore(config.db_path)
+    if not before and not purge_all:
+        print("Say what to purge: --all, or --before YYYY-MM-DD.", file=sys.stderr)
+        return 2
+    n = store.count(before)
+    print(f"{n} task(s) {'created before ' + before if before else 'in total'}, with their events, "
+          "checkpoints and reports.")
+    if not yes:
+        print("Run again with --yes to delete them. Receipts are kept (purge them with `purge receipts`); "
+              "this cannot be undone.")
+        return 1
+    print(f"Deleted {store.purge(before)} task(s).")
+    return 0
+
+
 def purge_receipts(config: Config, before: Optional[str], purge_all: bool, yes: bool) -> int:
     _, _, receipts = _stores(config)
     if not before and not purge_all:
@@ -343,10 +393,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                          help="started by the desktop app: JSON lines on stdout, commands on stdin (umbrous/desktop.py)")
     sub.add_parser("test", help="run the test suite")
     p_purge = sub.add_parser("purge", help="delete stored records")
-    p_purge.add_argument("what", choices=["logs", "receipts"], help="what to purge")
+    p_purge.add_argument("what", choices=["logs", "receipts", "tasks"], help="what to purge")
     p_purge.add_argument("--yes", action="store_true", help="really delete")
-    p_purge.add_argument("--all", dest="purge_all", action="store_true", help="receipts: all of them")
-    p_purge.add_argument("--before", help="receipts: those started before this date (YYYY-MM-DD)")
+    p_purge.add_argument("--all", dest="purge_all", action="store_true", help="receipts or tasks: all of them")
+    p_purge.add_argument("--before", help="receipts or tasks: those from before this date (YYYY-MM-DD)")
     p_ws = sub.add_parser("workspace", help="show or set a project's workspace folder and access profile")
     p_ws.add_argument("project", nargs="?", help="project name or id (omit to list all)")
     p_ws.add_argument("root", nargs="?", help="folder to attach")
@@ -356,6 +406,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_rc.add_argument("--chat", help="all receipts of one chat (chat_…)")
     p_rc.add_argument("--task", help="all receipts of one task (tsk_…)")
     p_rc.add_argument("--last", type=int, default=20, help="how many recent receipts (default 20)")
+    p_tk = sub.add_parser("tasks", help="show task state: recent tasks, or one task's trace and report")
+    p_tk.add_argument("--chat", help="the tasks of one chat (chat_…)")
+    p_tk.add_argument("--task", help="one task's trace and report (tsk_…)")
+    p_tk.add_argument("--last", type=int, default=10, help="how many recent tasks (default 10)")
     sub.add_parser("version")
     sub.add_parser("models", help="list Ollama models, probe results and the exposure check")
     p_probe = sub.add_parser("probe", help="run the tool-call probe")
@@ -385,11 +439,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if command == "purge":
         if args.what == "receipts":
             return purge_receipts(config, args.before, args.purge_all, args.yes)
+        if args.what == "tasks":
+            return purge_tasks(config, args.before, args.purge_all, args.yes)
         return purge_logs(config, args.yes)
     if command == "workspace":
         return workspace_command(config, args.project, args.root, args.profile, args.detach)
     if command == "receipts":
         return receipts_command(config, args.chat, args.task, args.last)
+    if command == "tasks":
+        return tasks_command(config, args.chat, args.task, args.last)
     if command in ("models", "probe"):
         return models_command(config, command, getattr(args, "model", []), getattr(args, "all", False))
     desktop = args.command == "serve" and args.desktop
