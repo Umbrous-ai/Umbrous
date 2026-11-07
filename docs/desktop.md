@@ -369,6 +369,9 @@ Limitations found, none worked around by changing the architecture:
 5. **API stability.** The crates.io release (0.2.2, pinned exactly) trails
    Zed's own copy, and its API changes between releases.
 
-Not ported from the browser page yet: the tool-call probe button in the model
+Not ported from the browser page yet: M3's tool steps, approval cards, Sources
+and Access view (the app ignores those stream events; see
+[m3-gate.md](m3-gate.md#the-desktop-app)), M4's task trace (the app shows the
+running step and a one-line report; see [m4-tasks.md](m4-tasks.md#the-desktop-app); M5's interrupted-task notice and Resume are ported, see [m5-resume.md](m5-resume.md#the-desktop-app)), the tool-call probe button in the model
 menu, and the prototype's placeholder panels (tool toggles, files, steps) that
 had no runtime behind them.

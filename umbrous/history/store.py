@@ -15,6 +15,14 @@ What each word means here:
 
 Every chat belongs to exactly one project. A fresh database has one project,
 "General".
+
+Pending turns (M5): while a task runs, its message waits in `pending_turns`,
+not in the transcript. If the runtime is killed mid-task, the message is still
+there after the restart, so the interrupted task can be resumed without asking
+you to type it again. The row is removed when the exchange is stored, when the
+reply ends with nothing to keep (the M2 rule: the message is not kept), when
+you send a new message in that chat instead of resuming, and with its task
+when tasks are purged. It is never sent to a model as context.
 """
 
 from __future__ import annotations
@@ -107,9 +115,19 @@ class Message:
     prompt_tokens: Optional[int]
     reply_tokens: Optional[int]
     created_at: str
+    task_id: Optional[str] = None   # M3: links a reply to its tool receipts
 
     def as_dict(self) -> dict:
         return dict(self.__dict__)
+
+
+@dataclass(frozen=True)
+class PendingTurn:
+    task_id: str
+    chat_id: str
+    user_text: str
+    model: str
+    created_at: str
 
 
 class HistoryStore:
@@ -193,8 +211,8 @@ class HistoryStore:
     def messages(self, chat_id: str) -> List[Message]:
         self.get_chat(chat_id)
         with self._db() as c:
-            rows = c.execute("""SELECT seq, role, content, model, status, prompt_tokens, reply_tokens, created_at
-                                FROM messages WHERE chat_id = ? ORDER BY seq""", (chat_id,)).fetchall()
+            rows = c.execute("""SELECT seq, role, content, model, status, prompt_tokens, reply_tokens, created_at,
+                                       task_id FROM messages WHERE chat_id = ? ORDER BY seq""", (chat_id,)).fetchall()
         return [Message(*r) for r in rows]
 
     def turns(self, chat_id: str) -> List[Turn]:
@@ -202,7 +220,8 @@ class HistoryStore:
         return [Turn(m.role, m.content) for m in self.messages(chat_id)]
 
     def append_exchange(self, chat_id: str, user_text: str, reply_text: str, model: str, status: str,
-                        prompt_tokens: Optional[int] = None, reply_tokens: Optional[int] = None) -> None:
+                        prompt_tokens: Optional[int] = None, reply_tokens: Optional[int] = None,
+                        task_id: Optional[str] = None) -> None:
         """Store one message and its reply together, in one transaction."""
         if status not in STATUSES:
             raise HistoryError(f"unknown status {status!r}")
@@ -219,13 +238,15 @@ class HistoryStore:
                 archived_at, title, last = row
                 if archived_at is not None:
                     raise HistoryError("This chat is archived. Restore it to continue.", "chat_archived")
-                c.execute("INSERT INTO messages (chat_id, seq, role, content, model, status, created_at) "
-                          "VALUES (?, ?, 'user', ?, NULL, 'complete', ?)", (chat_id, last + 1, user_text, now))
+                c.execute("INSERT INTO messages (chat_id, seq, role, content, model, status, created_at, task_id) "
+                          "VALUES (?, ?, 'user', ?, NULL, 'complete', ?, ?)", (chat_id, last + 1, user_text, now, task_id))
                 c.execute("INSERT INTO messages (chat_id, seq, role, content, model, status, prompt_tokens, "
-                          "reply_tokens, created_at) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?)",
-                          (chat_id, last + 2, reply_text, model, status, prompt_tokens, reply_tokens, now))
+                          "reply_tokens, created_at, task_id) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
+                          (chat_id, last + 2, reply_text, model, status, prompt_tokens, reply_tokens, now, task_id))
                 new_title = make_title(user_text) if last == 0 else title
                 c.execute("UPDATE chats SET updated_at = ?, title = ? WHERE id = ?", (now, new_title, chat_id))
+                if task_id:   # M5: the message is in the transcript now, so it is no longer pending
+                    c.execute("DELETE FROM pending_turns WHERE task_id = ?", (task_id,))
                 c.execute("COMMIT")
             except BaseException:
                 c.execute("ROLLBACK")
@@ -237,3 +258,40 @@ class HistoryStore:
         with self._write_lock, self._db() as c:
             c.execute("UPDATE chats SET archived_at = ? WHERE id = ?", (_now() if archived else None, chat_id))
         return self.get_chat(chat_id)
+
+    # ---------------------------------------------------------------- pending turns (M5)
+    def begin_pending(self, task_id: str, chat_id: str, user_text: str, model: str) -> None:
+        """Keep a running task's message until its exchange is stored or dropped."""
+        with self._write_lock, self._db() as c:
+            c.execute("INSERT INTO pending_turns (task_id, chat_id, user_text, model, created_at) VALUES (?, ?, ?, ?, ?)",
+                      (task_id, chat_id, user_text, model, _now()))
+
+    def pending(self, task_id: str) -> Optional[PendingTurn]:
+        with self._db() as c:
+            row = c.execute("SELECT task_id, chat_id, user_text, model, created_at FROM pending_turns WHERE task_id = ?",
+                            (task_id,)).fetchone()
+        return PendingTurn(*row) if row else None
+
+    def pending_for_chat(self, chat_id: str) -> List[PendingTurn]:
+        with self._db() as c:
+            rows = c.execute("SELECT task_id, chat_id, user_text, model, created_at FROM pending_turns "
+                             "WHERE chat_id = ? ORDER BY created_at", (chat_id,)).fetchall()
+        return [PendingTurn(*r) for r in rows]
+
+    def drop_pending(self, task_id: str) -> bool:
+        """Remove a pending message (its reply ended with nothing to keep, or it was superseded)."""
+        with self._write_lock, self._db() as c:
+            c.execute("PRAGMA secure_delete = ON")
+            return c.execute("DELETE FROM pending_turns WHERE task_id = ?", (task_id,)).rowcount > 0
+
+    def move_pending(self, old_task_id: str, new_task_id: str) -> bool:
+        """A resumed task takes over the interrupted task's message."""
+        with self._write_lock, self._db() as c:
+            return c.execute("UPDATE pending_turns SET task_id = ? WHERE task_id = ?",
+                             (new_task_id, old_task_id)).rowcount > 0
+
+    def has_reply(self, task_id: str) -> bool:
+        """Was a reply stored for this task? (A crash can come after the reply was saved.)"""
+        with self._db() as c:
+            return c.execute("SELECT 1 FROM messages WHERE task_id = ? AND role = 'assistant' LIMIT 1",
+                             (task_id,)).fetchone() is not None

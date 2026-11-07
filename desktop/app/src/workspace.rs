@@ -28,11 +28,25 @@ use crate::ui;
 use crate::transcript::{self, MetaKind, Msg, Pos, Role, Row, Selection, SelectionHost};
 
 const STREAM_BATCH: Duration = Duration::from_millis(33);
+/// At most this many frames of render-time correction after one reveal_end.
+const REVEAL_FRAMES: u8 = 10;
 
 pub enum Phase {
     Starting,
     Failed(Failure),
     Ready,
+}
+
+/// An interrupted task of the open chat that can be resumed (M5).
+#[derive(Clone, Debug)]
+pub struct Interrupted {
+    pub task_id: String,
+    /// the message that was waiting when the runtime stopped
+    pub text: String,
+    /// the recovered report, in one line
+    pub report: String,
+    /// what resuming does (the runtime's words)
+    pub note: String,
 }
 
 struct Run {
@@ -66,6 +80,9 @@ pub struct Workspace {
     pub list: ListState,
     /// keep the newest text in view while a reply streams; off once you scroll up
     follow: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Frames left in which render may scroll again to bring the last row's bottom
+    /// into view (0 = off). Only our own reveal arms it; any scroll input clears it.
+    reveal_frames: std::rc::Rc<std::cell::Cell<u8>>,
     /// list rows (see transcript::Row) and each message's row range
     rows: Vec<Row>,
     msg_rows: Vec<std::ops::Range<usize>>,
@@ -79,6 +96,15 @@ pub struct Workspace {
     project_error: Option<String>,
     run: Option<Run>,
     notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
+    /// M5: the open chat's last task, if the runtime was stopped in the middle
+    /// of it and it can be resumed: shown as a notice with a Resume button.
+    pub interrupted: Option<Interrupted>,
+    /// The selected project's workspace access (M3). This app cannot show approval
+    /// requests yet, so a project on Ask before read gets an explanation and an
+    /// explicit switch, never a silent change or a request left waiting.
+    pub access: Option<api::Access>,
+    access_seq: u64,
+    pub access_error: Option<String>,
     sidebar: bool,
     /// the right sidebar (Changes and Sources), shown and hidden by the header's panel button
     details: bool,
@@ -182,8 +208,12 @@ impl Workspace {
         // end in view while new text arrives, until you scroll away from it.
         let list = ListState::new(0, ListAlignment::Top, px(800.));
         let follow = std::rc::Rc::new(std::cell::Cell::new(true));
-        let f = follow.clone();
-        list.set_scroll_handler(move |ev, _, _| f.set(ev.visible_range.end >= ev.count));
+        let reveal_frames = std::rc::Rc::new(std::cell::Cell::new(0u8));
+        let (f, r) = (follow.clone(), reveal_frames.clone());
+        list.set_scroll_handler(move |ev, _, _| {
+            r.set(0); // a scroll gesture always wins over a pending reveal
+            f.set(ev.visible_range.end >= ev.count)
+        });
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
                 if this.update(cx, |this, cx| this.on_backend(ev, cx)).is_err() {
@@ -207,6 +237,7 @@ impl Workspace {
             msgs: vec![],
             list,
             follow,
+            reveal_frames,
             rows: vec![],
             msg_rows: vec![],
             selection: Selection::default(),
@@ -219,6 +250,10 @@ impl Workspace {
             project_error: None,
             run: None,
             notice: None,
+            interrupted: None,
+            access: None,
+            access_seq: 0,
+            access_error: None,
             sidebar: true,
             details: true,
             card_menu: false,
@@ -335,6 +370,7 @@ impl Workspace {
 
     pub fn load_chats(&mut self, cx: &mut Context<Self>) {
         let Some(pid) = self.project_id.clone() else { return };
+        self.load_access(cx);
         let show_archived = self.show_archived;
         self.chats_seq += 1;
         let seq = self.chats_seq;
@@ -369,10 +405,57 @@ impl Workspace {
         );
     }
 
+    /// The selected project's access (workspace and profile). Asked again whenever
+    /// the chat list is, so a change made in the browser page or the CLI shows up.
+    pub fn load_access(&mut self, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        self.access_seq += 1;
+        let seq = self.access_seq;
+        let path = format!("/api/projects/{pid}/access");
+        self.api_call(cx, move |api| api.get::<api::Access>(&path), move |this, r, _| {
+            if seq != this.access_seq || this.project_id.as_deref() != Some(pid.as_str()) {
+                return;
+            }
+            if let Ok(a) = r {
+                this.access = Some(a);
+            }
+        });
+    }
+
+    pub fn asks_before_read(&self) -> bool {
+        self.access
+            .as_ref()
+            .filter(|a| self.project_id.as_deref() == Some(a.project_id.as_str()))
+            .and_then(|a| a.workspace.as_ref())
+            .map(|w| w.profile == "ask_before_read")
+            .unwrap_or(false)
+    }
+
+    /// The explicit way out of Ask before read in this app: you press the button,
+    /// the runtime changes the profile, and the notice goes away once it has.
+    pub fn switch_to_workspace_read(&mut self, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        logfile::event("ui.profile_switch", &[("to", "workspace_read".into())]);
+        let path = format!("/api/projects/{pid}/profile");
+        self.access_error = None;
+        self.api_call(cx, move |api| api.post::<api::Access>(&path, json!({"profile": "workspace_read"})), move |this, r, _| {
+            match r {
+                Ok(a) if this.project_id.as_deref() == Some(a.project_id.as_str()) => {
+                    this.access_seq += 1; // a list answer already on its way is older than this
+                    this.access = Some(a);
+                }
+                Ok(_) => {}
+                Err(e) => this.access_error = Some(e.message),
+            }
+        });
+    }
+
     pub fn select_project(&mut self, id: String, cx: &mut Context<Self>) {
         if self.project_id.as_deref() != Some(&id) {
             self.project_id = Some(id);
             self.show_archived = false;
+            self.access = None;
+            self.access_error = None;
             self.new_chat(cx);
             self.load_chats(cx);
         }
@@ -413,6 +496,7 @@ impl Workspace {
         self.rebuild_rows();
         self.selection = Selection::default();
         self.notice = None;
+        self.interrupted = None;
         self.options_menu = false;
         self.composer.update(cx, |c, cx| c.set_disabled(false, cx));
         cx.notify();
@@ -440,8 +524,38 @@ impl Workspace {
             cx,
             move |api| {
                 let t: api::Transcript = api.get(&format!("/api/chats/{id}"))?;
-                let msgs: Vec<Msg> = t.messages.iter().map(stored_msg).collect();
-                Ok((t.chat, msgs))
+                let mut msgs: Vec<Msg> = t.messages.iter().map(stored_msg).collect();
+                let mut interrupted = None;
+                // M4: replies that were tasks get their report line back.
+                // M5: and a task the runtime was stopped in the middle of is offered for resuming.
+                if let Ok(list) = api.get::<api::TaskList>(&format!("/api/tasks?chat_id={id}")) {
+                    interrupted = list.tasks.iter().rev().find_map(|x| {
+                        let r = x.resume.as_ref().filter(|r| r.possible)?;
+                        Some(Interrupted {
+                            task_id: x.task_id.clone(),
+                            text: r.text.clone().unwrap_or_default(),
+                            report: x.report.as_ref().and_then(api::report_line).map(|(l, _)| l).unwrap_or_default(),
+                            note: r.message.clone(),
+                        })
+                    });
+                    {
+                        for (m, msg) in t.messages.iter().zip(msgs.iter_mut()) {
+                            // the user's message carries the same task id; the report belongs to the reply only
+                            if m.role == "user" {
+                                continue;
+                            }
+                            let Some(tid) = m.task_id.as_deref() else { continue };
+                            let rep = list.tasks.iter().find(|x| x.task_id == tid).and_then(|x| x.report.as_ref());
+                            if let Some((line, attention)) = rep.and_then(api::report_line) {
+                                msg.meta = format!("{} · {line}", msg.meta);
+                                if attention && msg.meta_kind == MetaKind::Normal {
+                                    msg.meta_kind = MetaKind::Warn;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok((t.chat, msgs, interrupted))
             },
             move |this, r, cx| {
                 if view != this.view {
@@ -450,11 +564,12 @@ impl Workspace {
                 this.loading_chat = false;
                 this.opening = None;
                 match r {
-                    Ok((chat, msgs)) => {
+                    Ok((chat, msgs, interrupted)) => {
                         let archived = chat.archived;
                         this.chat = Some(chat);
                         this.context = None;
                         this.msgs = msgs;
+                        this.interrupted = interrupted;
                         this.rebuild_rows();
                         this.selection = Selection::default();
                         this.notice = None;
@@ -575,14 +690,32 @@ impl Workspace {
 
     // ---------- sending and streaming ----------
     pub fn send(&mut self, text: String, _window: &mut Window, cx: &mut Context<Self>) {
+        self.send_inner(text, None, cx)
+    }
+
+    /// M5: run the interrupted task again, from its waiting message, under the
+    /// current settings. Nothing from the interrupted attempt is replayed.
+    pub fn resume_task(&mut self, cx: &mut Context<Self>) {
+        let Some(it) = self.interrupted.clone() else { return };
+        if self.chat.is_none() || !self.can_send() {
+            return;
+        }
+        logfile::event("ui.resume", &[]);
+        self.send_inner(it.text, Some(it.task_id), cx)
+    }
+
+    fn send_inner(&mut self, text: String, resume: Option<String>, cx: &mut Context<Self>) {
         if !self.can_send() || text.trim().is_empty() {
             return;
         }
+        self.interrupted = None;
         let model = self.model.clone().unwrap();
         let project_id = self.project_id.clone().unwrap_or_else(|| "prj_general".into());
         let existing = self.chat.as_ref().map(|c| c.id.clone());
         let existing_for_ui = existing.clone();
-        self.composer.update(cx, |c, cx| c.set_text("", cx));
+        if resume.is_none() {
+            self.composer.update(cx, |c, cx| c.set_text("", cx));
+        }
         self.notice = None;
         // show the message and an empty reply at once; the runtime saves both together
         let n = self.msgs.len();
@@ -636,7 +769,7 @@ impl Workspace {
                         }
                     },
                 };
-                let r = api2.chat_stream(&chat_id, &model, &text, |ev| {
+                let r = api2.chat_stream(&chat_id, &model, &text, resume.as_deref(), |ev| {
                     let _ = tx.unbounded_send(StreamMsg::Event(ev));
                     !stop.load(Ordering::SeqCst)
                 });
@@ -706,7 +839,8 @@ impl Workspace {
                                 run.run_id = ev.get("run_id").and_then(Value::as_str).map(str::to_string);
                             }
                             if let Some(m) = ev.get("model_requested").and_then(Value::as_str) {
-                                msg.meta = format!("{m} is answering…");
+                                let again = if ev.get("resume_of").map(|v| !v.is_null()).unwrap_or(false) { " again (resumed)" } else { "" };
+                                msg.meta = format!("{m} is answering{again}…");
                             }
                             let c = &ev["context"];
                             if let (Some(est), Some(win)) = (c["estimated_tokens"].as_u64(), c["window"].as_u64()) {
@@ -726,7 +860,27 @@ impl Workspace {
                             }
                             msg.meta = parts.join(" · ");
                             msg.meta_kind = MetaKind::Normal;
+                            // M4: a task's report, in one line (the trace is in the browser page)
+                            if let Some((line, attention)) = api::report_line(&ev["report"]) {
+                                msg.meta = format!("{} · {line}", msg.meta);
+                                if attention {
+                                    msg.meta_kind = MetaKind::Warn;
+                                }
+                            }
                             refresh_lists = true;
+                        }
+                        "tool_call" => {
+                            // M4: say which step is running, so Stop has something to interrupt that you can see
+                            let step = ev.get("step").and_then(Value::as_u64).unwrap_or(0);
+                            let tool = ev.get("tool").and_then(Value::as_str).unwrap_or("a tool");
+                            let path = ev["args"].get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).unwrap_or(".");
+                            let what = match tool {
+                                "read_file" => format!("reading {path}"),
+                                "list_files" => format!("listing {path}"),
+                                "search_files" => format!("searching {path}"),
+                                _ => "running a tool".into(),
+                            };
+                            msg.meta = format!("Step {step}: {}…", what.chars().take(80).collect::<String>());
                         }
                         "error" => {
                             let code = ev.get("code").and_then(Value::as_str).unwrap_or("error");
@@ -738,6 +892,9 @@ impl Workspace {
                                 text.clone()
                             };
                             msg.meta_kind = if code == "cancelled" { MetaKind::Warn } else { MetaKind::Bad };
+                            if let Some((line, _)) = api::report_line(&ev["report"]) {
+                                msg.meta = format!("{} {line}.", msg.meta.trim_end());
+                            }
                             if code == "ollama_unreachable" {
                                 self.notice = Some((text, MetaKind::Warn, true));
                                 if let Some(m) = self.models.as_mut() {
@@ -853,6 +1010,12 @@ impl Workspace {
         cx.notify();
     }
 
+    /// (following the end, corrective frames left) for e2e scroll checks.
+    #[cfg(feature = "e2e")]
+    pub fn scroll_state(&self) -> (bool, u8) {
+        (self.follow.get(), self.reveal_frames.get())
+    }
+
     #[cfg(feature = "e2e")]
     pub fn is_running(&self) -> bool {
         self.run.is_some()
@@ -884,6 +1047,7 @@ impl Workspace {
     fn reveal_end(&self) {
         if self.follow.get() && !self.rows.is_empty() {
             self.list.scroll_to_reveal_item(self.rows.len() - 1);
+            self.reveal_frames.set(REVEAL_FRAMES); // render finishes it once the rows are measured
         }
     }
 
@@ -1450,6 +1614,44 @@ impl Workspace {
                     .into_any_element(),
             );
         }
+        if self.asks_before_read() {
+            let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
+            let folder = self.access.as_ref().and_then(|a| a.workspace.as_ref()).map(|w| w.name.clone()).unwrap_or_default();
+            let error = self.access_error.clone();
+            notices.push(
+                ui::notice(Some(ui::NoticeKind::Warn))
+                    .child(
+                        div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
+                            .child(format!(
+                                "{project} uses Ask before read. This app cannot show approval requests yet, so chats here cannot read files in {folder}: each read is refused right away. Workspace read lets chats read ordinary files in that folder without asking; excluded files, links and paths outside it stay blocked, and every read still gets a receipt. Or keep Ask before read and answer requests in the browser page."
+                            ))
+                            .when_some(error, |d, e| d.child(div().text_color(danger()).child(e))),
+                    )
+                    .child(
+                        ui::pill("switch-workspace-read")
+                            .child("Switch to Workspace read")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.switch_to_workspace_read(cx))),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let (Some(it), false) = (self.interrupted.clone(), archived) {
+            let can = self.can_send();
+            notices.push(
+                ui::notice(Some(ui::NoticeKind::Warn))
+                    .child(
+                        div().flex_1().min_w_0()
+                            .child(div().child("Task interrupted: Umbrous stopped while this task was running, so its outcome is unknown. Nothing was replayed."))
+                            .child(div().mt(px(4.)).text_color(text_subtle()).child(format!("Your message: “{}”", it.text.chars().take(200).collect::<String>())))
+                            .when(!it.report.is_empty(), |d| d.child(div().mt(px(4.)).text_color(text_subtle()).child(it.report.clone())))
+                            .child(div().mt(px(4.)).text_color(text_subtle()).child(it.note.clone())),
+                    )
+                    .when(can, |d| {
+                        d.child(ui::pill("resume-task").child("Resume").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.resume_task(cx))))
+                    })
+                    .into_any_element(),
+            );
+        }
         if let Some((text, kind, retry)) = self.notice.clone() {
             let k = match kind {
                 MetaKind::Bad => Some(ui::NoticeKind::Bad),
@@ -1466,22 +1668,26 @@ impl Workspace {
             );
         }
         let notice_col = |notices: Vec<AnyElement>, top: f32| {
+            // block layout, not a centring flex row: a flex row measured the notices' text
+            // without a definite width (one line per text), so a wrapping notice was given
+            // too little height and ran on under the composer
             div()
                 .w_full()
-                .flex()
-                .justify_center()
                 .px(px(SP_32))
                 .pt(px(top))
-                .child(div().w_full().max_w(px(696.)).flex().flex_col().gap(px(SP_16)).children(notices))
+                .child(div().w_full().max_w(px(696.)).mx_auto().flex().flex_col().gap(px(SP_16)).children(notices))
         };
         if self.msgs.is_empty() {
             return div().flex_1().min_h_0().child(notice_col(notices, SP_48)).into_any_element();
         }
         let host = cx.entity();
         let state = self.list.clone();
+        // w_full: with an auto width here the notices' text was measured without a
+        // definite width (one line per text), so a wrapping notice got too little height
         div()
             .flex_1()
             .min_h_0()
+            .w_full()
             .flex()
             .flex_col()
             .child(
@@ -1494,9 +1700,12 @@ impl Workspace {
                     }
                 })
                 .flex_1()
-                .size_full(),
+                .min_h_0()
+                .w_full(),
             )
-            .when(!notices.is_empty(), |d| d.child(notice_col(notices, SP_8)))
+            // the notices take their full height and the list gets what is left, so a
+            // long notice (M5's interrupted task) is never drawn under the composer
+            .when(!notices.is_empty(), |d| d.child(notice_col(notices, SP_8).flex_none()))
             .into_any_element()
     }
 
@@ -1722,6 +1931,22 @@ impl Render for Workspace {
         use theme::*;
         let t0 = Instant::now();
         let wide = window.viewport_size().width >= px(1180.); // the page's @media (max-width:1180px)
+        // reveal_end scrolls with the heights the list measured last frame, so a row that
+        // just grew (a reply's closing meta line) can end up below the view. Only after
+        // our own reveal, and for a few frames at most, scroll again once it is measured;
+        // any scroll input clears this before it can undo the gesture.
+        let left = self.reveal_frames.get();
+        if left > 0 {
+            match self.rows.len().checked_sub(1).map(|last| (last, self.list.bounds_for_item(last))) {
+                Some((_, Some(b))) if b.bottom() <= self.list.viewport_bounds().bottom() + px(0.5) => self.reveal_frames.set(0),
+                Some((last, _)) => {
+                    self.list.scroll_to_reveal_item(last);
+                    self.reveal_frames.set(left - 1);
+                    window.request_animation_frame();
+                }
+                None => self.reveal_frames.set(0),
+            }
+        }
         let root = div()
             .id("workspace")
             .key_context("Workspace")

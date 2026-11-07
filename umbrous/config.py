@@ -33,6 +33,8 @@ _ALLOWED_KEYS = {
     # M1: local model chat
     "ollama_url", "system_prompt", "recent_turns", "context_tokens", "reply_tokens",
     "first_token_timeout_s", "idle_timeout_s", "total_timeout_s",
+    # M4: task limits
+    "task_timeout_s", "task_max_steps", "task_max_tool_calls", "tool_timeout_s",
 }
 # Integer settings: (minimum, maximum)
 _INT_RANGES = {
@@ -42,6 +44,10 @@ _INT_RANGES = {
     "first_token_timeout_s": (1, 3600),
     "idle_timeout_s": (1, 3600),
     "total_timeout_s": (1, 86_400),
+    "task_timeout_s": (1, 86_400),
+    "task_max_steps": (1, 50),
+    "task_max_tool_calls": (1, 400),
+    "tool_timeout_s": (1, 3600),
 }
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 
@@ -66,6 +72,11 @@ class Config:
     first_token_timeout_s: int = 180       # includes loading the model into memory
     idle_timeout_s: int = 60               # longest silence allowed mid-reply
     total_timeout_s: int = 600             # hard limit for one reply
+    # M4: limits for a task (a reply that may use tools). See docs/m4-tasks.md.
+    task_timeout_s: int = 600              # the whole task: every model step and tool action
+    task_max_steps: int = 6                # model steps that may ask for tools
+    task_max_tool_calls: int = 24          # tool calls in the whole task
+    tool_timeout_s: int = 30               # one tool action, from when it starts running
 
     @property
     def db_path(self) -> Path:

@@ -99,12 +99,18 @@ impl Api {
 
     /// POST /api/chat and call `on_event` for each JSON line as it arrives.
     /// Returns when the runtime closes the stream. Blocking: run it off the UI thread.
-    pub fn chat_stream(&self, chat_id: &str, model: &str, message: &str, mut on_event: impl FnMut(Value) -> bool) -> Result<()> {
+    /// `resume`: an interrupted task to run again (M5) instead of sending `message`.
+    pub fn chat_stream(&self, chat_id: &str, model: &str, message: &str, resume: Option<&str>,
+                       mut on_event: impl FnMut(Value) -> bool) -> Result<()> {
+        let body = match resume {
+            Some(task) => json!({"chat_id": chat_id, "model": model, "resume_task": task}),
+            None => json!({"chat_id": chat_id, "model": model, "message": message}),
+        };
         let resp = self
             .stream_agent
             .post(&format!("{}/api/chat", self.origin))
             .set("X-Umbrous-Token", &self.token)
-            .send_json(json!({"chat_id": chat_id, "model": model, "message": message}))
+            .send_json(body)
             .map_err(to_error)?;
         let reader = BufReader::new(resp.into_reader());
         for line in reader.lines() {
@@ -165,6 +171,75 @@ pub struct Message {
     pub status: String,
     pub prompt_tokens: Option<u64>,
     pub reply_tokens: Option<u64>,
+    /// the task this reply was (M4): its report is fetched from /api/tasks
+    #[serde(default)]
+    pub task_id: Option<String>,
+}
+
+/// GET /api/tasks?chat_id= (umbrous/tasks/store.py, M4): each task with its report.
+#[derive(Debug, Deserialize)]
+pub struct TaskList {
+    pub tasks: Vec<TaskBrief>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TaskBrief {
+    pub task_id: String,
+    #[serde(default)]
+    pub report: Option<Value>,
+    /// M5: set for a task whose outcome is unknown (interrupted by a crash or restart)
+    #[serde(default)]
+    pub resume: Option<Resume>,
+}
+
+/// Whether an interrupted task can be resumed (umbrous/tasks/recover.py, M5).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Resume {
+    pub possible: bool,
+    /// what resuming means (when possible), or why it is not possible
+    #[serde(default)]
+    pub message: String,
+    /// the message that was waiting, when it can be resumed
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// One line summing up a task report (M4), for the reply's meta line, and
+/// whether it needs attention (something failed, was not checked, or a limit
+/// was reached). The full trace is in the browser page and `bin/umbrous tasks`.
+pub fn report_line(rep: &Value) -> Option<(String, bool)> {
+    let status = rep.get("status")?.as_str()?;
+    let n = |k: &str| rep.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let len = |k: &str| rep.get(k).and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+    let done = rep.get("actions").and_then(|a| a.get("completed")).and_then(Value::as_u64).unwrap_or(0);
+    let word = match status {
+        "completed" => "Task completed",
+        "cancelled" => "Task stopped",
+        "failed" => "Task failed",
+        _ => "Task outcome unknown",
+    };
+    let steps = n("steps");
+    let mut parts = vec![
+        word.to_string(),
+        format!("{steps} step{}", if steps == 1 { "" } else { "s" }),
+        format!("{done} of {} actions completed", n("tool_calls")),
+    ];
+    let limits: Vec<&str> = rep.get("limits_hit").and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    for l in &limits {
+        parts.push(match *l {
+            "steps" => "step limit reached".into(),
+            "tool_calls" => "action limit reached".into(),
+            "task_time" => "time limit reached".into(),
+            other => format!("{other} limit reached"),
+        });
+    }
+    let unc = len("uncertainty");
+    if unc > 0 {
+        parts.push(format!("{unc} thing{} not fully checked", if unc == 1 { "" } else { "s" }));
+    }
+    let attention = status != "completed" || unc > 0 || len("failures") > 0 || !limits.is_empty();
+    Some((parts.join(" · "), attention))
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,6 +270,19 @@ pub struct Models {
     pub models: Vec<ModelInfo>,
 }
 
+/// GET /api/projects/<id>/access (umbrous/gate/access.py, M3). Only what the app uses.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccessWorkspace {
+    pub name: String,
+    pub profile: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Access {
+    pub project_id: String,
+    pub workspace: Option<AccessWorkspace>,
+}
+
 #[allow(dead_code)] // logged nowhere yet; kept as the claim step's sanity check
 #[derive(Debug, Clone, Deserialize)]
 pub struct Health {
@@ -206,4 +294,45 @@ pub struct Health {
     pub uptime_s: u64,
     #[serde(default)]
     pub ollama_exposure: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_line_sums_up_a_task() {
+        let rep = json!({"status": "completed", "steps": 4, "tool_calls": 3, "actions": {"completed": 3},
+                         "uncertainty": ["x"], "failures": [], "limits_hit": []});
+        assert_eq!(report_line(&rep), Some(("Task completed · 4 steps · 3 of 3 actions completed · 1 thing not fully checked".into(), true)));
+        let rep = json!({"status": "cancelled", "steps": 1, "tool_calls": 0, "actions": {}, "uncertainty": [],
+                         "failures": [], "limits_hit": []});
+        assert_eq!(report_line(&rep), Some(("Task stopped · 1 step · 0 of 0 actions completed".into(), true)));
+        let rep = json!({"status": "completed", "steps": 7, "tool_calls": 6, "actions": {"completed": 6},
+                         "uncertainty": ["a", "b"], "failures": [], "limits_hit": ["steps"]});
+        assert_eq!(report_line(&rep).unwrap().0,
+                   "Task completed · 7 steps · 6 of 6 actions completed · step limit reached · 2 things not fully checked");
+        let clean = json!({"status": "completed", "steps": 2, "tool_calls": 1, "actions": {"completed": 1},
+                           "uncertainty": [], "failures": [], "limits_hit": []});
+        assert!(!report_line(&clean).unwrap().1);
+        assert_eq!(report_line(&json!({})), None);
+    }
+
+    #[test]
+    fn interrupted_task_parses_with_its_resume_info() {
+        let list: TaskList = serde_json::from_value(json!({"tasks": [
+            {"task_id": "tsk_a", "status": "completed", "report": {"status": "completed"}},
+            {"task_id": "tsk_b", "status": "unknown", "report": {"status": "unknown", "steps": 1, "tool_calls": 1,
+             "actions": {"unknown": 1}, "uncertainty": ["x"]},
+             "resume": {"possible": true, "reason": null, "message": "Resuming runs the task again.", "text": "who?"}},
+            {"task_id": "tsk_c", "status": "unknown", "resume": {"possible": false, "reason": "already_resumed",
+             "message": "This task was already resumed."}}]})).unwrap();
+        assert!(list.tasks[0].resume.is_none());
+        let r = list.tasks[1].resume.as_ref().unwrap();
+        assert!(r.possible);
+        assert_eq!(r.text.as_deref(), Some("who?"));
+        assert_eq!(report_line(list.tasks[1].report.as_ref().unwrap()).unwrap().0,
+                   "Task outcome unknown · 1 step · 0 of 1 actions completed · 1 thing not fully checked");
+        assert!(!list.tasks[2].resume.as_ref().unwrap().possible);
+    }
 }

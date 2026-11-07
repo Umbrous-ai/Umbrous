@@ -15,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 
 @dataclass
@@ -27,6 +27,9 @@ class FakeModel:
     context_length: int = 32768
     chunk_delay: float = 0.0
     digest: str = ""
+    # M3: when tools are offered in a streamed chat, this decides the next step:
+    # agent(messages) -> {"tool_calls": [(name, args), ...]} or {"content": "..."}
+    agent: Optional[Callable[[list], dict]] = None
 
     def __post_init__(self):
         if not self.digest:
@@ -102,6 +105,8 @@ class FakeOllama:
                     return self._json(200, {"model_info": {"fake.context_length": m.context_length},
                                             "capabilities": caps})
                 if self.path == "/api/chat":
+                    if m.agent is not None and body.get("stream", True):
+                        return self._agent_stream(m, body)
                     if body.get("tools"):
                         return self._tools(m, body)
                     if body.get("stream", True):
@@ -133,6 +138,41 @@ class FakeOllama:
                 name = "get_weather" if m.tools == "wrong_tool" else body["tools"][0]["function"]["name"]
                 return self._json(200, {"model": m.name, "done": True, "message": {
                     "role": "assistant", "content": "", "tool_calls": [{"function": {"name": name, "arguments": {}}}]}})
+
+            def _agent_stream(self, m, body):
+                if body.get("tools"):
+                    step = m.agent(body["messages"])
+                else:  # no tools offered: the agent must answer in text
+                    step = m.agent(body["messages"] + [{"role": "system", "content": "__no_tools__"}])
+                    if "tool_calls" in step:
+                        step = {"content": "(I wanted another tool but none are available.)"}
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+
+                def send(obj):
+                    data = (json.dumps(obj) + "\n").encode()
+                    self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+                    self.wfile.flush()
+                try:
+                    if "tool_calls" in step:
+                        send({"model": m.name, "done": False, "message": {"role": "assistant", "content": "",
+                              "tool_calls": [{"function": {"name": n, "arguments": a}} for n, a in step["tool_calls"]]}})
+                    else:
+                        parts = re.findall(r".{1,12}", step["content"], re.S) or [""]
+                        for i, p in enumerate(parts):
+                            if m.behavior == "stall_mid" and i == len(parts) // 2:
+                                time.sleep(fake.stall_seconds)   # a model that hangs mid-answer
+                            send({"model": m.name, "message": {"role": "assistant", "content": p}, "done": False})
+                            if m.chunk_delay:
+                                time.sleep(m.chunk_delay)
+                    prompt_chars = sum(len(x.get("content") or "") for x in body["messages"])
+                    send({"model": m.name, "message": {"role": "assistant", "content": ""}, "done": True,
+                          "done_reason": "stop", "prompt_eval_count": prompt_chars // 4, "eval_count": 5})
+                    self.wfile.write(b"0\r\n\r\n")
+                except OSError:
+                    pass
 
             def _stream(self, m, body):
                 self.send_response(200)
@@ -186,6 +226,56 @@ class FakeOllama:
         self.server.server_close()
 
 
+def tool_results(messages: list) -> List[str]:
+    return [x["content"] for x in messages if x.get("role") == "tool"]
+
+
+def data_lines(tool_text: str) -> List[str]:
+    """The lines between the wrapper markers, without the header line."""
+    if "<<<BEGIN WORKSPACE DATA>>>" not in tool_text:
+        return [tool_text]
+    inner = tool_text.split("<<<BEGIN WORKSPACE DATA>>>\n", 1)[1].split("\n<<<END WORKSPACE DATA>>>", 1)[0]
+    return inner.split("\n")[1:]
+
+
+def scripted(*steps, final: Optional[Callable[[list], str]] = None) -> Callable[[list], dict]:
+    """An agent that makes the given tool calls, one per model turn, then answers.
+    A step is (name, args) or a list of them (several calls in one turn)."""
+    def agent(messages):
+        done = sum(1 for x in messages if x.get("role") == "assistant" and x.get("tool_calls"))
+        no_tools = messages and messages[-1].get("content") == "__no_tools__"
+        if done < len(steps) and not no_tools:
+            step = steps[done]
+            return {"tool_calls": step if isinstance(step, list) else [step]}
+        if final:
+            return {"content": final(messages)}
+        last = tool_results(messages)[-1] if tool_results(messages) else ""
+        return {"content": "From the workspace: " + " | ".join(data_lines(last)[:3])}
+    return agent
+
+
+def workspace_agent(messages: list) -> dict:
+    """The demo's stand-in for a real tool-using model. "read <path>", "list
+    [path]" or anything else (searched for its longest word), then it answers
+    with what the tool returned and names the source."""
+    if messages and messages[-1].get("content") == "__no_tools__" or tool_results(messages):
+        results = tool_results(messages)
+        last = results[-1] if results else ""
+        if not last.startswith("UNTRUSTED"):
+            return {"content": f"I could not do that: {last}"}
+        head = last.split("<<<BEGIN WORKSPACE DATA>>>\n", 1)[1].split("\n", 1)[0]
+        lines = [l for l in data_lines(last) if l.strip()][:4]
+        return {"content": "Here is what I found (" + head + "):\n" + "\n".join(lines)}
+    q = next((x["content"] for x in reversed(messages) if x.get("role") == "user"), "")
+    words = q.split()
+    if words and words[0].lower() == "read" and len(words) > 1:
+        return {"tool_calls": [("read_file", {"path": words[1]})]}
+    if words and words[0].lower() == "list":
+        return {"tool_calls": [("list_files", {"path": words[1] if len(words) > 1 else "."})]}
+    word = max((w.strip("?.,!") for w in words), key=len, default="")
+    return {"tool_calls": [("search_files", {"query": word})]}
+
+
 def demo_models() -> List[FakeModel]:
     """The models the browser check and the demo use."""
     return [
@@ -195,6 +285,12 @@ def demo_models() -> List[FakeModel]:
                   reply='Here is HTML: <img src=x onerror="alert(1)"><script>alert(2)</script> '
                         '<a href="http://127.0.0.1:8417/api/health">health</a> and https://example.com/docs ok'),
         FakeModel("slow-model:7b", chunk_delay=0.4, reply="This reply streams slowly so you can press stop. " * 4),
+        FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02),
+        # M4: a three-step task (list, search, read), then an answer with one
+        # citation that was read and one that was not, for the report's Verify step.
+        FakeModel("multi-step:3b", chunk_delay=0.02, agent=scripted(
+            ("list_files", {}), ("search_files", {"query": "Ship"}), ("read_file", {"path": "notes/plan.md"}),
+            final=lambda m: "The plan is to ship on Friday (notes/plan.md:2). Owner details are in notes/team.md:4.")),
     ]
 
 

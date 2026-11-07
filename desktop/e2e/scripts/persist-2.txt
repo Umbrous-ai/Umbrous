@@ -10,4 +10,5 @@ send And in pots? One sentence.
 wait_reply 240
 sleep 600
 record run2_continued
+record end
 quit

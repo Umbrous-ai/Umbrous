@@ -1,0 +1,47 @@
+# M5 in the app: a task cut off by killing the runtime mid-reply, then resumed after the restart.
+# Data: General with workspace @OUT@/m5-fixture/ws on Workspace read (validate-m5.sh);
+# Ollama: stress.py fake-tasks (multi-step:3b, slow-task:3b; tool checks passed).
+wait_ready 30
+wait_models
+wait_access
+# 1. a finished exchange first, so the chat is saved and has its title
+select_model multi-step:3b
+send What is the plan? Resume check
+wait_reply 30
+expect last_meta Task completed
+# 2. a slow task: its first step reads the workspace (receipt saved), then the
+#    answer streams; the runtime is killed in the middle of it
+select_model slow-task:3b
+send Walk through the workspace ZEBRA-CANARY-552
+wait_streaming
+screenshot @OUT@/m5-before-kill.png
+kill_backend
+wait_failed 10
+retry
+wait_ready 30
+wait_models
+# 3. after the restart the chat offers the interrupted task, with its message
+new_chat
+open_chat What is the plan
+expect messages 2
+expect interrupted Walk through the workspace
+screenshot @OUT@/m5-interrupted.png
+record interrupted
+# 4. Resume runs it again under the current settings, and it completes
+resume
+wait_reply 60
+expect interrupted none
+expect messages 4
+expect last_meta Task completed
+expect last_text step by step
+screenshot @OUT@/m5-resumed.png
+record resumed
+# a small scroll up right after the reply finished stays where you put it
+scroll_wheel_up 40
+# 5. opened again: the stored exchange, and no notice
+new_chat
+open_chat What is the plan
+expect messages 4
+expect interrupted none
+record end
+quit

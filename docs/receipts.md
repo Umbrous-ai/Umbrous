@@ -1,7 +1,7 @@
 # Receipt rules (format version 1)
 
-Status: **defined in M0, not yet stored anywhere.** M3 is the first milestone
-that writes receipts, and it must follow these rules. Code:
+Status: **defined in M0, written since M3** (one per tool attempt, in the
+`receipts` table; see [m3-gate.md](m3-gate.md) for storage, retention and the CLI). Code:
 `umbrous/receipts/model.py` (format) and `umbrous/receipts/redaction.py`
 (redaction). Tests: `tests/test_receipts.py`.
 

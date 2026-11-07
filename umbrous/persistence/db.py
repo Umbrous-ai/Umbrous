@@ -12,7 +12,14 @@ Versions so far:
   1 (M0)  `meta` key/value table and `launches`, one row per start and stop.
   2 (M1)  `model_probes`, the result of the tool-call probe per model digest.
   3 (M2)  `projects`, `chats`, `messages`: the chat history store.
-Receipts arrive in M3, task state in M4.
+  4 (M3)  `workspaces`, `access_policy`, `grants` (the access profile store),
+          `receipts` (one per tool attempt), and `messages.task_id`.
+  5 (M4)  Durable task state: `tasks`, `task_actions`, `task_events`,
+          `task_checkpoints`, `task_artifacts`. Separate from chats and memory.
+  6 (M5)  `pending_turns`: the message of a task that is still running, so a
+          crash or restart can offer to resume it. One row per running task,
+          removed when the exchange is stored or dropped, and with its task
+          when tasks are purged.
 """
 
 from __future__ import annotations
@@ -90,6 +97,116 @@ MIGRATIONS = (
     );
     INSERT INTO projects (id, name, name_key, created_at)
         VALUES ('prj_general', 'General', 'general', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    """,
+    # version 4 (M3): workspaces, access profiles, grants and receipts. Each
+    # project has at most one workspace folder and one profile. policy_version
+    # goes up whenever the workspace or profile changes, which makes every
+    # approval given under the old policy stale. Receipts are their own store:
+    # never memory, never shown to the model.
+    """
+    CREATE TABLE workspaces (
+        project_id  TEXT PRIMARY KEY REFERENCES projects(id),
+        root        TEXT NOT NULL,
+        profile     TEXT NOT NULL CHECK (profile IN ('workspace_read', 'ask_before_read')),
+        attached_at TEXT NOT NULL
+    );
+    CREATE TABLE access_policy (
+        project_id  TEXT PRIMARY KEY REFERENCES projects(id),
+        version     INTEGER NOT NULL
+    );
+    CREATE TABLE grants (
+        id          TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL REFERENCES projects(id),
+        capability  TEXT NOT NULL,
+        policy_version INTEGER NOT NULL,
+        granted_at  TEXT NOT NULL,
+        revoked_at  TEXT
+    );
+    CREATE INDEX grants_active ON grants (project_id, capability, revoked_at);
+    CREATE TABLE receipts (
+        receipt_id  TEXT PRIMARY KEY,
+        task_id     TEXT NOT NULL,
+        action_id   TEXT NOT NULL,
+        project_id  TEXT,
+        chat_id     TEXT,
+        action      TEXT NOT NULL,
+        decision    TEXT NOT NULL CHECK (decision IN ('allowed', 'denied', 'failed', 'uncertain')),
+        started_at  TEXT NOT NULL,
+        record      TEXT NOT NULL
+    );
+    CREATE INDEX receipts_by_task ON receipts (task_id);
+    CREATE INDEX receipts_by_chat ON receipts (chat_id, started_at);
+    ALTER TABLE messages ADD COLUMN task_id TEXT;
+    """,
+    # version 5 (M4): durable task state. Its own store, like receipts: the
+    # chat history never reads it and it never holds message or file text.
+    # Every row is metadata and evidence references, redacted before writing.
+    """
+    CREATE TABLE tasks (
+        task_id     TEXT PRIMARY KEY,
+        project_id  TEXT,
+        chat_id     TEXT,
+        model       TEXT,
+        status      TEXT NOT NULL CHECK (status IN ('requested', 'started', 'completed', 'failed', 'cancelled', 'unknown')),
+        code        TEXT,
+        created_at  TEXT NOT NULL,
+        started_at  TEXT,
+        ended_at    TEXT,
+        limits      TEXT NOT NULL
+    );
+    CREATE INDEX tasks_by_chat ON tasks (chat_id, created_at);
+    CREATE TABLE task_actions (
+        action_id   TEXT PRIMARY KEY,
+        task_id     TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+        step        INTEGER NOT NULL,
+        tool        TEXT NOT NULL,
+        resource    TEXT,
+        status      TEXT NOT NULL CHECK (status IN ('requested', 'started', 'completed', 'denied', 'failed', 'cancelled', 'unknown')),
+        code        TEXT,
+        receipt_id  TEXT,
+        requested_at TEXT NOT NULL,
+        ended_at    TEXT
+    );
+    CREATE INDEX task_actions_by_task ON task_actions (task_id, requested_at);
+    CREATE TABLE task_events (
+        task_id     TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+        seq         INTEGER NOT NULL,
+        at          TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        action_id   TEXT,
+        data        TEXT NOT NULL,
+        PRIMARY KEY (task_id, seq)
+    );
+    CREATE TABLE task_checkpoints (
+        task_id     TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+        step        INTEGER NOT NULL,
+        at          TEXT NOT NULL,
+        state       TEXT NOT NULL,
+        PRIMARY KEY (task_id, step)
+    );
+    CREATE TABLE task_artifacts (
+        artifact_id TEXT PRIMARY KEY,
+        task_id     TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+        kind        TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        sha256      TEXT NOT NULL,
+        body        TEXT NOT NULL
+    );
+    CREATE INDEX task_artifacts_by_task ON task_artifacts (task_id);
+    """,
+    # version 6 (M5): the message of a running task, kept only until its
+    # exchange is stored (or dropped), so an interrupted task can be resumed
+    # after a crash or restart. It is chat content, written by the history
+    # store, and it goes with its task when tasks are purged.
+    """
+    CREATE TABLE pending_turns (
+        task_id     TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE,
+        chat_id     TEXT NOT NULL REFERENCES chats(id),
+        user_text   TEXT NOT NULL,
+        model       TEXT NOT NULL,
+        created_at  TEXT NOT NULL
+    );
+    CREATE INDEX pending_turns_by_chat ON pending_turns (chat_id);
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)

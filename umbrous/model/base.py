@@ -113,6 +113,13 @@ class ChatDelta:
 
 
 @dataclass(frozen=True)
+class ChatToolCalls:
+    """The model asked for tools (M3). Each call is (name, arguments). Only a request:
+    nothing runs until the gate says so."""
+    calls: tuple
+
+
+@dataclass(frozen=True)
 class ChatDone:
     model: str                      # the model Ollama says actually answered
     prompt_tokens: Optional[int] = None

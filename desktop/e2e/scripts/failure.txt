@@ -1,4 +1,5 @@
 wait_failed 30
 record failed
 screenshot @OUT@/@NAME@.png
+record end
 quit

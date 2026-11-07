@@ -256,15 +256,16 @@
     }
     markCurrent();
   }
-  function folderIcon() {
+  function icon(name) {
     const NS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(NS, 'svg');
     svg.setAttribute('class', 'i');
     const use = document.createElementNS(NS, 'use');
-    use.setAttribute('href', '#folder');
+    use.setAttribute('href', '#' + name);
     svg.appendChild(use);
     return svg;
   }
+  function folderIcon() { return icon('folder'); }
   async function loadChats() {
     const box = $('#sec-sessions');
     const want = projectId;
@@ -334,6 +335,287 @@
     showArchived = false;
     newChat();
     loadChats();
+    loadAccess();
+  }
+
+
+  // ---------- tools, approvals and access (M3) ----------
+  // The model only proposes a tool call. The runtime's gate decides, may ask
+  // you here, runs it, and writes a receipt. Everything below shows what the
+  // gate did; nothing in the page can run a tool itself. File names and search
+  // words come from the model or your files, so they are shown as text only.
+  const TOOL_ICON = { list_files: 'folder', read_file: 'doc', search_files: 'search' };
+  const ACTION_TOOL = { 'fs.list': 'list_files', 'fs.read': 'read_file', 'fs.search': 'search_files' };
+  const DECISION_WORD = { denied: 'Blocked', failed: 'Failed', uncertain: 'Unclear', cancelled: 'Not run' };
+  function clip(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+  function stepLabel(tool, args) {
+    args = args || {};
+    if (tool === 'read_file') return 'Read ' + clip(args.path || '?', 80) + (args.start_line ? ' from line ' + args.start_line : '');
+    if (tool === 'list_files') return 'List ' + clip(args.path || 'the workspace folder', 80);
+    if (tool === 'search_files') return 'Search for “' + clip(args.query || '', 60) + '”' + (args.path ? ' in ' + clip(args.path, 60) : '');
+    return 'Unknown tool ' + clip(tool || '?', 40);
+  }
+  function stepRow(tool, label) {
+    const row = el('div', 'step');
+    row.appendChild(icon(TOOL_ICON[tool] || 'x'));
+    row.appendChild(el('span', 't', label));
+    const why = el('span', 'why');
+    row.appendChild(why);
+    return row;
+  }
+  function settleStep(row, decision, summary, notice) {
+    if (decision !== 'allowed') {
+      row.classList.add(decision);
+      row.querySelector('use').setAttribute('href', '#x');
+    }
+    const word = DECISION_WORD[decision];
+    row.querySelector('.why').textContent = '· ' + clip([word ? word + ': ' + summary : summary, notice].filter(Boolean).join(' '), 200);
+  }
+  function sourcesLine(evidence) {
+    const files = [];
+    for (const e of evidence || []) {
+      if (e.kind !== 'file') continue;
+      const where = e.ref + (e.lines ? (e.lines[0] === e.lines[1] ? ':' + e.lines[0] : ':' + e.lines[0] + '-' + e.lines[1]) : '');
+      if (!files.includes(where)) files.push(where);
+    }
+    if (!files.length) return null;
+    const line = el('div', 'sources', 'Sources: ');
+    files.slice(0, 12).forEach((f, i) => {
+      if (i) line.appendChild(document.createTextNode(', '));
+      line.appendChild(el('code', '', f));
+    });
+    if (files.length > 12) line.appendChild(document.createTextNode(` and ${files.length - 12} more`));
+    line.title = 'What the tools actually read for this reply, from the receipts. The answer text itself is not checked against them.';
+    return line;
+  }
+
+  function approvalCard(ev) {
+    const card = el('div', 'approval');
+    card.dataset.approvalId = ev.approval_id;
+    card.appendChild(el('div', 'ttl', 'Allow this read?'));
+    const what = el('div', '', 'The model wants to ' + stepLabel(ev.tool, ev.args).replace(/^./, (c) => c.toLowerCase()) + '. ');
+    card.appendChild(what);
+    const scope = el('div', '');
+    scope.appendChild(document.createTextNode('Action '));
+    scope.appendChild(el('code', '', ev.action));
+    scope.appendChild(document.createTextNode(' on '));
+    scope.appendChild(el('code', '', ev.resource || '?'));
+    card.appendChild(scope);
+    if (ev.reason) card.appendChild(el('div', 'acc-note', ev.reason));
+    const acts = el('div', 'acts');
+    const status = el('div', 'acc-note');
+    const choose = async (choice, label) => {
+      acts.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+      try {
+        await getJson('/api/approvals/' + encodeURIComponent(ev.approval_id), { json: { choice } });
+        status.textContent = label;
+      } catch (e) { status.textContent = 'This request is closed: ' + e.message; }
+      card.classList.add('done');
+      if (choice === 'grant') loadAccess();
+    };
+    const btn = (text, choice, label, cls) => {
+      const b = el('button', cls || '', text);
+      b.type = 'button';
+      b.dataset.choice = choice;
+      b.onclick = (e) => { e.stopPropagation(); choose(choice, label); };
+      acts.appendChild(b);
+    };
+    btn('Approve once', 'once', 'Approved once, for exactly this request.', 'primary');
+    btn('Allow ' + (ev.action === 'fs.read' ? 'reads' : ev.action === 'fs.list' ? 'listing' : 'searches') + ' in this project', 'grant',
+        'Allowed for this project until you revoke it in Details › Access.');
+    btn('Deny', 'deny', 'Denied. The model was told it may not do this.');
+    card.append(acts, status);
+    return card;
+  }
+  function closeApprovals(box, text) {
+    box.querySelectorAll('.approval:not(.done)').forEach((c) => {
+      c.classList.add('done');
+      c.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+      c.querySelector('.acc-note:last-child').textContent = text;
+    });
+  }
+
+  // ---------- M4: the task report under a reply, and its trace in Details ----------
+  const TASK_WORD = { completed: 'Task completed', failed: 'Task failed', cancelled: 'Task stopped', unknown: 'Task outcome unknown' };
+  function taskReport(rep) {
+    if (!rep) return null;
+    const box = el('div', 'task-report');
+    box.dataset.status = rep.status;
+    const a = rep.actions || {};
+    const parts = [TASK_WORD[rep.status] || rep.status, rep.steps + (rep.steps === 1 ? ' step' : ' steps'),
+      (a.completed || 0) + ' of ' + (rep.tool_calls || 0) + ' actions completed'];
+    if (rep.code && rep.status !== 'completed') parts.push(rep.code.replace(/_/g, ' '));
+    const head = el('div', 'tr-head', parts.join(' · '));
+    const btn = el('button', 'linkish', 'Trace');
+    btn.type = 'button';
+    btn.title = 'Show every step and action of this task in Details';
+    btn.onclick = (e) => { e.stopPropagation(); showTrace(rep.task_id); };
+    head.append(' ', btn);
+    box.appendChild(head);
+    const list = (title, items, cls) => {
+      if (!items.length) return;
+      const d = el('div', 'tr-list ' + cls);
+      d.appendChild(el('div', 'tr-title', title));
+      items.slice(0, 8).forEach((t) => d.appendChild(el('div', 'tr-item', clip(t, 220))));
+      if (items.length > 8) d.appendChild(el('div', 'tr-item', `and ${items.length - 8} more (see Trace)`));
+      box.appendChild(d);
+    };
+    list('Did not complete', (rep.failures || []).map((f) => `${f.tool} ${f.resource}: ${f.status} (${f.code}) ${f.message || ''}`), 'fail');
+    list('Not fully checked', rep.uncertainty || [], 'unc');
+    if (rep.status === 'completed' && !(rep.failures || []).length && !(rep.uncertainty || []).length)
+      box.appendChild(el('div', 'tr-item ok', rep.citations_checked
+        ? `Every action completed, and the ${rep.citations_checked === 1 ? 'file:line citation' : rep.citations_checked + ' file:line citations'} in the answer ${rep.citations_checked === 1 ? 'is' : 'are'} covered by reads.`
+        : 'Every action completed. The answer cites no file:line to check, so nothing it says was matched to a read.'));
+    return box;
+  }
+  async function showTrace(taskId) {
+    const sec = $('#trace-sec'), body = $('#trace-body');
+    if (!sec || !body) return;
+    const app = document.querySelector('.app');
+    if (app && app.classList.contains('no-right')) { const t = $('#rtoggle'); if (t) t.click(); }
+    sec.hidden = false;
+    body.textContent = 'Loading…';
+    sec.scrollIntoView({ block: 'start' });
+    let t;
+    try { t = await getJson('/api/tasks/' + encodeURIComponent(taskId)); }
+    catch (e) { body.textContent = 'Could not load the trace: ' + e.message; return; }
+    body.textContent = '';
+    const tk = t.task;
+    body.appendChild(el('div', 'acc-note', `${tk.task_id} · ${tk.status}${tk.code ? ' (' + tk.code + ')' : ''} · ${tk.model}`));
+    const lim = tk.limits || {};
+    body.appendChild(el('div', 'acc-note', `Limits: ${lim.max_steps} steps, ${lim.max_tool_calls} actions, ` +
+      `${lim.tool_timeout_s}s per action, ${lim.task_timeout_s}s in all`));
+    const t0 = t.events.length ? Date.parse(t.events[0].at) : 0;
+    const ol = el('ol', 'trace-list');
+    for (const e of t.events) {
+      const li = el('li', 'trace-ev');
+      li.dataset.kind = e.kind;
+      const d = e.data || {};
+      const bits = [];
+      if (d.step != null) bits.push('step ' + d.step);
+      if (d.tool) bits.push(d.tool + (d.resource ? ' ' + d.resource : ''));
+      ['code', 'limit', 'decision', 'done_reason'].forEach((k) => { if (d[k]) bits.push(d[k]); });
+      if (d.tool_calls != null && e.kind === 'step.completed') bits.push(d.tool_calls + ' call(s)');
+      li.appendChild(el('code', '', '+' + ((Date.parse(e.at) - t0) / 1000).toFixed(2) + 's'));
+      li.appendChild(el('span', 'k', ' ' + e.kind + ' '));
+      li.appendChild(el('span', 'v', bits.join(' · ')));
+      if (e.action_id) li.title = e.action_id + (d.receipt_id ? ' · ' + d.receipt_id : '');
+      ol.appendChild(li);
+    }
+    body.appendChild(ol);
+    body.appendChild(el('div', 'acc-note', 'The trace holds ids, statuses, paths and counts, never file contents, messages or search words.'));
+  }
+  async function tasksFor(id) {
+    try { return (await getJson('/api/tasks?chat_id=' + encodeURIComponent(id))).tasks || []; }
+    catch (_) { return []; }
+  }
+
+  // Stored chats: steps and sources come from the receipts, joined by task id.
+  async function receiptsFor(id) {
+    try { return (await getJson('/api/receipts?chat_id=' + encodeURIComponent(id))).receipts || []; }
+    catch (_) { return []; }
+  }
+  function storedSteps(records) {
+    const box = el('div', 'tool-steps');
+    for (const r of records) {
+      const tool = ACTION_TOOL[r.action] || 'unknown';
+      const res = (r.scope || '').replace(/^project:\S+\s*/, '').replace(/^resource:/, '');
+      const label = (tool === 'unknown' ? 'Unknown tool' : tool === 'read_file' ? 'Read ' : tool === 'list_files' ? 'List ' : 'Search in ') +
+        (tool === 'unknown' ? '' : clip(res || '.', 80));
+      const row = stepRow(tool, label);
+      settleStep(row, r.decision, clip((r.reason || '').replace(/^[a-z_]+: /, ''), 160));
+      row.title = r.receipt_id + ' · ' + r.started_at;
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  // The Access section of the Details panel, for the selected project.
+  let accessView = null;
+  async function loadAccess() {
+    const box = $('#access-body');
+    if (!box) return;
+    $('#access').hidden = false;
+    const want = projectId;
+    let v;
+    try { v = await getJson('/api/projects/' + encodeURIComponent(want) + '/access'); }
+    catch (e) { box.textContent = ''; box.appendChild(el('div', 'acc-err', e.message)); return; }
+    if (want !== projectId) return;
+    accessView = v;
+    renderAccess(v);
+  }
+  async function accessPost(what, body, err) {
+    try {
+      const v = await getJson('/api/projects/' + encodeURIComponent(projectId) + '/' + what, { json: body || {} });
+      accessView = v;
+      renderAccess(v);
+    } catch (e) { err.textContent = e.message; err.hidden = false; }
+  }
+  function renderAccess(v) {
+    const box = $('#access-body');
+    box.textContent = '';
+    const err = el('div', 'acc-err');
+    err.hidden = true;
+    const ws = v.workspace;
+    const profileSelect = (current) => {
+      const sel = el('select');
+      sel.setAttribute('aria-label', 'Access profile');
+      for (const p of v.profiles) {
+        const o = el('option', '', p.label);
+        o.value = p.id;
+        o.title = p.description;
+        if (p.id === current) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('click', (e) => e.stopPropagation());
+      return sel;
+    };
+    const button = (text, fn) => {
+      const b = el('button', '', text);
+      b.type = 'button';
+      b.onclick = (e) => { e.stopPropagation(); fn(b); };
+      return b;
+    };
+    if (!ws) {
+      box.appendChild(el('div', 'acc-note', `No workspace for ${projectName(v.project_id)}. Chats here cannot read files.`));
+      const row = el('div', 'acc-row');
+      const input = el('input');
+      input.placeholder = 'Folder path, e.g. ~/code/notes';
+      input.setAttribute('aria-label', 'Workspace folder');
+      input.addEventListener('keydown', (e) => e.stopPropagation());
+      input.addEventListener('click', (e) => e.stopPropagation());
+      const sel = profileSelect('workspace_read');
+      row.append(input);
+      box.appendChild(row);
+      const row2 = el('div', 'acc-row');
+      row2.append(sel, button('Attach', () => accessPost('workspace', { root: input.value, profile: sel.value }, err)));
+      box.appendChild(row2);
+    } else {
+      const root = el('div', 'acc-root', ws.root);
+      root.title = 'Attached ' + ws.attached_at;
+      box.appendChild(root);
+      const row = el('div', 'acc-row');
+      const sel = profileSelect(ws.profile);
+      sel.onchange = () => accessPost('profile', { profile: sel.value }, err);
+      row.append(sel, button('Detach', () => accessPost('workspace/detach', {}, err)));
+      box.appendChild(row);
+      const prof = v.profiles.find((p) => p.id === ws.profile);
+      if (prof) box.appendChild(el('div', 'acc-note', prof.description));
+      if (v.grants.length) {
+        box.appendChild(el('div', 'acc-note', 'Allowed for this project:'));
+        for (const g of v.grants) {
+          const gr = el('div', 'acc-row');
+          gr.dataset.grantId = g.id;
+          gr.appendChild(el('span', '', g.capability));
+          gr.firstChild.style.flex = '1';
+          gr.appendChild(button('Revoke', () => accessPost('grants/' + encodeURIComponent(g.id) + '/revoke', {}, err)));
+          box.appendChild(gr);
+        }
+      }
+    }
+    box.appendChild(err);
+    box.appendChild(el('div', 'acc-note', 'Always blocked: ' + v.always_blocked));
+    box.appendChild(el('div', 'acc-note', 'Read-only. This is a permission check inside Umbrous, not an operating-system sandbox.'));
   }
 
   // ---------- history: the open chat ----------
@@ -379,8 +661,10 @@
       'nothing leaves this machine. It is saved on this Mac once you send the first message.';
   }
 
-  function renderStoredReply(m) {
+  function renderStoredReply(m, receipts, tasks) {
     const reply = el('div', 'reply');
+    const mine = m.task_id ? receipts.filter((r) => r.task_id === m.task_id) : [];
+    if (mine.length) reply.appendChild(storedSteps(mine));
     const answer = el('p', 'answer plain', m.content);
     linkify(answer);
     const meta = el('div', 'reply-meta');
@@ -391,7 +675,36 @@
       meta.classList.add(m.status === 'stopped' ? 'warn' : 'bad');
     }
     reply.append(answer, meta);
+    const src = sourcesLine([].concat(...mine.filter((r) => r.decision === 'allowed').map((r) => r.evidence)));
+    if (src) reply.appendChild(src);
+    const task = m.task_id && (tasks || []).find((x) => x.task_id === m.task_id);
+    const tr = task && taskReport(task.report);
+    if (tr) reply.appendChild(tr);
     return reply;
+  }
+
+  // M5: a task the runtime was stopped in the middle of (a crash, a forced
+  // quit, a restart). Its message is shown with what was recorded, and Resume
+  // runs it again under the current settings.
+  function interruptedCard(task) {
+    const t = thread();
+    const u = el('div', 'msg-u', task.resume.text);
+    u.style.marginTop = '48px';
+    const reply = el('div', 'reply interrupted');
+    reply.dataset.taskId = task.task_id;
+    const head = el('div', 'notice warn small', 'Task interrupted: Umbrous stopped while this task was running, ' +
+      'so its outcome is unknown. Nothing was replayed. ');
+    const b = el('button', 'pill retry', 'Resume');
+    b.type = 'button';
+    b.dataset.act = 'resume';
+    b.title = task.resume.message;
+    b.onclick = () => { reply.remove(); u.remove(); send(task.resume.text, task.task_id); };
+    head.appendChild(b);
+    reply.appendChild(head);
+    reply.appendChild(el('div', 'reply-meta', task.resume.message));
+    const tr = taskReport(task.report);
+    if (tr) reply.appendChild(tr);
+    t.append(u, reply);
   }
 
   function archivedNotice() {
@@ -408,7 +721,10 @@
     const mine = ++view;
     let j;
     try { j = await getJson('/api/chats/' + encodeURIComponent(id)); } catch (e) { notice('Could not open that chat: ' + e.message, 'bad'); return; }
+    const hasTasks = j.messages.some((m) => m.task_id);
+    const [receipts, tasks] = await Promise.all([hasTasks ? receiptsFor(id) : [], tasksFor(id)]);
     if (mine !== view) return;  // another chat was opened meanwhile
+    const projectChanged = projectId !== j.chat.project_id;
     chatId = j.chat.id;
     chatArchived = j.chat.archived;
     projectId = j.chat.project_id;
@@ -423,13 +739,16 @@
         u.style.marginTop = '48px';
         t.appendChild(u);
       } else {
-        t.appendChild(renderStoredReply(m));
+        t.appendChild(renderStoredReply(m, receipts, tasks));
         if (m.model) { const sm = $('#sess-model'); if (sm) sm.textContent = m.model; }
       }
     }
+    const waiting = tasks.filter((x) => x.resume && x.resume.possible).pop();
+    if (waiting && !chatArchived) interruptedCard(waiting);
     if (chatArchived) archivedNotice();
     setComposer();
     showSessionProject();
+    if (projectChanged || !accessView) loadAccess();
     clearContext();
     markCurrent();
     scrollDown();
@@ -471,7 +790,7 @@
     $('.panel .head').appendChild(menu);
   }
 
-  async function send(q) {
+  async function send(q, resumeTask) {
     const t = thread();
     const u = el('div', 'msg-u');
     u.style.marginTop = '48px';
@@ -480,9 +799,12 @@
     const reply = el('div', 'reply');
     const ctxNote = el('div', 'notice small');
     ctxNote.hidden = true;
+    const steps = el('div', 'tool-steps');
+    steps.hidden = true;
     const answer = el('p', 'answer plain');
     const meta = el('div', 'reply-meta', 'Waiting for ' + selected + '…');
-    reply.append(ctxNote, answer, meta);
+    reply.append(ctxNote, steps, answer, meta);
+    const pending = [];   // step rows waiting for their result, oldest first
     t.appendChild(reply);
     scrollDown();
 
@@ -497,7 +819,9 @@
         if (mine !== view) return;
         chatId = j.chat.id;
       }
-      const r = await api.fetch('/api/chat', { json: { chat_id: chatId, model: selected, message: q }, signal: controller.signal });
+      const body = { chat_id: chatId, model: selected, approvals: true };
+      if (resumeTask) body.resume_task = resumeTask; else body.message = q;
+      const r = await api.fetch('/api/chat', { json: body, signal: controller.signal });
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
       const reader = r.body.getReader();
       const dec = new TextDecoder();
@@ -514,9 +838,30 @@
           const ev = JSON.parse(line);
           if (ev.type === 'start') {
             run.runId = ev.run_id;
-            meta.textContent = ev.model_requested + ' is answering…';
+            meta.textContent = ev.model_requested + (ev.resume_of ? ' is answering again (resumed)…' : ' is answering…');
             showContext(ev.context);
-            if (ev.context.notices.length) { ctxNote.textContent = ev.context.notices.join(' '); ctxNote.hidden = false; }
+            const notes = ev.context.notices.slice();
+            if (ev.tools && ev.tools.off_reason) notes.push(ev.tools.off_reason);
+            if (notes.length) { ctxNote.textContent = notes.join(' '); ctxNote.hidden = false; }
+          } else if (ev.type === 'tool_call') {
+            const row = stepRow(ev.tool, stepLabel(ev.tool, ev.args));
+            row.querySelector('.why').textContent = '· checking…';
+            steps.appendChild(row);
+            steps.hidden = false;
+            pending.push(row);
+            meta.textContent = 'Using the workspace…';
+            scrollDown();
+          } else if (ev.type === 'approval_required') {
+            const row = pending[pending.length - 1];
+            if (row) row.querySelector('.why').textContent = '· waiting for you';
+            steps.appendChild(approvalCard(ev));
+            meta.textContent = 'Waiting for your answer…';
+            scrollDown();
+          } else if (ev.type === 'tool_result') {
+            closeApprovals(steps, 'Answered.');
+            const row = pending.shift();
+            if (row) { settleStep(row, ev.decision, ev.summary || ev.message, ev.notice); row.title = ev.receipt_id; }
+            meta.textContent = selected + ' is answering…';
           } else if (ev.type === 'delta') {
             answer.appendChild(document.createTextNode(ev.text));
             scrollDown();
@@ -528,6 +873,10 @@
             meta.textContent = [ev.model, toks, secs].filter(Boolean).join(' · ');
             meta.title = 'Exact model reported by Ollama for this reply';
             const sm = $('#sess-model'); if (sm) sm.textContent = ev.model;
+            const src = sourcesLine(ev.evidence);
+            if (src) reply.appendChild(src);
+            const tr = taskReport(ev.report);
+            if (tr) reply.appendChild(tr);
           } else if (ev.type === 'error') {
             finished = true;
             if (answer.textContent) linkify(answer);
@@ -536,6 +885,11 @@
             meta.classList.add(ev.code === 'cancelled' ? 'warn' : 'bad');
             if (ev.code === 'ollama_unreachable') ollamaDown(ev.message);  // Retry button, same as at start
             if (ev.code === 'chat_archived') { chatArchived = true; archivedNotice(); setComposer(); }
+            if (ev.report) {  // a task that ended early still reports what it did
+              pending.splice(0).forEach((row) => settleStep(row, 'cancelled', 'Not run'));
+              const tr = taskReport(ev.report);
+              if (tr) reply.appendChild(tr);
+            }
           }
         }
       }
@@ -546,6 +900,7 @@
         meta.classList.add(controller.signal.aborted ? 'warn' : 'bad');
       }
     } finally {
+      closeApprovals(steps, 'Closed: the reply ended.');
       run = null;
       syncSend();
       if (mine === view && chatId) {  // the title and order may have changed
@@ -600,7 +955,7 @@
     $('#sec-projects').textContent = '';   // the prototype's placeholder projects and sessions
     $('#sec-sessions').textContent = '';
     $('[data-new]').click();  // the prototype's own New chat (sidebar state) plus ours
-    refreshSidebar().then(() => { showSessionProject(); newChatNotice(); });
+    refreshSidebar().then(() => { showSessionProject(); newChatNotice(); loadAccess(); });
     loadModels();
   }
 

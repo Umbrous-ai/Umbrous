@@ -10,12 +10,14 @@ use gpui::{px, App, AsyncApp, ListOffset, WindowHandle};
 use serde_json::{json, Value};
 
 use crate::workspace::{Phase, Workspace};
+use crate::transcript::Role;
 
 pub fn start(window: WindowHandle<Workspace>, cx: &mut App) {
     let (Ok(script), Ok(out)) = (std::env::var("UMBROUS_E2E_SCRIPT"), std::env::var("UMBROUS_E2E_OUT")) else { return };
     let Ok(text) = std::fs::read_to_string(script) else { return };
     let _ = std::fs::remove_file(&out);
     cx.spawn(async move |cx| {
+        let mut failed = false;
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let (cmd, arg) = line.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((line, ""));
             let res = run(cmd, arg, window, cx).await;
@@ -29,12 +31,18 @@ pub fn start(window: WindowHandle<Workspace>, cx: &mut App) {
                     let _ = writeln!(f, "{v}");
                 }
                 if v.get("error").is_some() {
+                    failed = true;
                     break;
                 }
             }
             if cmd == "quit" {
                 break;
             }
+        }
+        if failed {
+            // a failed step skips the script's own `quit`: quit anyway, so a
+            // harness waiting on the app (open -W) gets the failure instead of hanging
+            cx.update(|cx| cx.quit()).ok();
         }
     })
     .detach();
@@ -86,6 +94,9 @@ fn snapshot(ws: &Workspace, label: &str) -> Value {
         "metas": ws.msgs.iter().rev().take(4).rev().map(|m| m.meta.clone()).collect::<Vec<_>>(),
         "blocks_last": ws.msgs.last().map(|m| m.blocks.len()),
         "model": ws.model,
+        "access": ws.access.as_ref().map(|a| json!({"project": a.project_id, "profile": a.workspace.as_ref().map(|w| w.profile.clone())})),
+        "ask_notice": ws.asks_before_read(),
+        "interrupted": ws.interrupted.as_ref().map(|i| json!({"task": i.task_id, "text": i.text, "report": i.report})),
         "ollama": ws.models.as_ref().map(|m| json!({"reachable": m.reachable, "models": m.models.len()})),
         "perf": format!("{:?}", ws.perf),
     })
@@ -177,6 +188,31 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 ws.is_running() && ws.msgs.last().map(|m| m.streaming && m.text.len() > 20).unwrap_or(false)
             }).await?;
         }
+        "wait_access" => {
+            // until the selected project's access has loaded (M3)
+            wait_until(cx, window, 10, "access", |ws| ws.access.as_ref().map(|a| ws.project_id.as_deref() == Some(a.project_id.as_str())).unwrap_or(false)).await?;
+        }
+        "switch_workspace_read" => {
+            // what the notice's "Switch to Workspace read" button does
+            window.update(cx, |ws, _, cx| ws.switch_to_workspace_read(cx)).ok();
+            wait_until(cx, window, 10, "profile switched", |ws| !ws.asks_before_read()).await?;
+        }
+        "resume" => {
+            // what the interrupted notice's Resume button does (M5)
+            window.update(cx, |ws, _, cx| ws.resume_task(cx)).ok();
+            wait_until(cx, window, 10, "resume started", |ws| ws.is_running()).await?;
+        }
+        "stop" => {
+            // what the Stop button does; records how long until the reply has ended (M4)
+            let t0 = Instant::now();
+            window.update(cx, |ws, _, cx| ws.stop_reply(cx)).ok();
+            wait_until(cx, window, 10, "stopped", |ws| !ws.is_running()).await?;
+            return Ok(Some(json!({"step": "stop", "stop_to_idle_ms": t0.elapsed().as_millis()})));
+        }
+        "wait_meta" => {
+            // until the last reply's meta line contains the text (e.g. a running step)
+            wait_until(cx, window, 60, "meta", |ws| ws.msgs.last().map(|m| m.meta.contains(arg)).unwrap_or(false)).await?;
+        }
         "wait_idle" => {
             wait_until(cx, window, arg.parse().unwrap_or(60), "no reply running", |ws| !ws.is_running()).await?;
         }
@@ -187,15 +223,23 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "chat" => ws.chat.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "none".into()),
                 "running" => ws.is_running().to_string(),
                 "last_meta" => ws.msgs.last().map(|m| m.meta.clone()).unwrap_or_default(),
+                "last_text" => ws.msgs.last().map(|m| m.text.clone()).unwrap_or_default(),
+                "no_text" => (!ws.msgs.iter().any(|m| m.text.contains(val))).to_string(),
+                "user_meta_empty" => ws.msgs.iter().filter(|m| m.role == Role::User).all(|m| m.meta.is_empty()).to_string(),
+                "access" => ws.access.as_ref().and_then(|a| a.workspace.as_ref()).map(|w| w.profile.clone()).unwrap_or_else(|| "none".into()),
+                "ask_notice" => ws.asks_before_read().to_string(),
                 "last_text_len_over" => (ws.msgs.last().map(|m| m.text.len()).unwrap_or(0) > val.parse::<usize>().unwrap_or(0)).to_string(),
                 "phase" => match &ws.phase { Phase::Ready => "ready".into(), Phase::Starting => "starting".into(), Phase::Failed(f) => f.code.clone() },
                 "sessions" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),
                 "opening" => ws.opening_title().unwrap_or_else(|| "none".into()),
+                "interrupted" => ws.interrupted.as_ref().map(|i| i.text.clone()).unwrap_or_else(|| "none".into()),
                 _ => "?".into(),
             }).map_err(|_| "window gone".to_string())?;
             let ok = match what {
                 "chat" if val != "none" => got.contains(val),
-                "last_meta" | "sessions" => got.contains(val),
+                "last_meta" | "sessions" | "last_text" => got.contains(val),
+                "interrupted" if val != "none" => got.contains(val),
+                "no_text" | "user_meta_empty" => got == "true",
                 "last_text_len_over" => got == "true",
                 _ => got == val,
             };
@@ -249,6 +293,33 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             frames.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let pct = |p: f64| frames[((frames.len() as f64 - 1.0) * p) as usize];
             return Ok(Some(json!({"step": "scroll_test", "frames": frames.len(), "p50_ms": pct(0.5), "p95_ms": pct(0.95), "max_ms": pct(1.0)})));
+        }
+        "scroll_wheel_up" => {
+            // a real scroll-wheel event over the transcript (up by PX), then check that
+            // later frames do not move the view back toward the end
+            let dy: f32 = arg.parse().unwrap_or(40.);
+            let top = |ws: &Workspace| -f32::from(ws.list.scroll_px_offset_for_scrollbar().y);
+            let (top0, state0) = window.update(cx, |ws, _, _| (top(ws), ws.scroll_state())).map_err(|_| "window gone".to_string())?;
+            let at = window.update(cx, |ws, _, _| ws.list.viewport_bounds().center()).map_err(|_| "window gone".to_string())?;
+            let sent = scroll_wheel(f64::from(f32::from(at.x)), f64::from(f32::from(at.y)), dy as i32);
+            next_frame(window, cx).await;
+            let (top1, state1) = window.update(cx, |ws, _, _| (top(ws), ws.scroll_state())).map_err(|_| "window gone".to_string())?;
+            for _ in 0..20 {
+                next_frame(window, cx).await;
+            }
+            sleep(cx, 300).await;
+            next_frame(window, cx).await;
+            let (top2, state2) = window.update(cx, |ws, _, _| (top(ws), ws.scroll_state())).map_err(|_| "window gone".to_string())?;
+            let rec = json!({"step": "scroll_wheel_up", "top_before": top0, "top_after_event": top1, "top_after_frames": top2,
+                             "follow_reveal": [state0, state1, state2],
+                             "at": [f32::from(at.x), f32::from(at.y)], "sent": sent});
+            if top1 > top0 - 1. {
+                return Ok(Some(json!({"step": "scroll_wheel_up", "error": format!("the view is not above where it was (the wheel event did not scroll, or render undid it in the same frame): {rec}")})));
+            }
+            if top2 > top1 + 0.5 {
+                return Ok(Some(json!({"step": "scroll_wheel_up", "error": format!("the view moved back toward the end: {rec}")})));
+            }
+            return Ok(Some(rec));
         }
         "screenshot" => {
             next_frame(window, cx).await;
@@ -356,5 +427,61 @@ fn mouse_moved(x: f64, y_from_top: f64) {
         if !ev.is_null() {
             let _: () = msg_send![win, sendEvent: ev];
         }
+    }
+}
+
+/// A scroll-wheel event (pixel units, `dy` > 0 scrolls up) at a window point (from
+/// the top left), handed straight to our own window's content view, in-process.
+fn scroll_wheel(x: f64, y_from_top: f64, dy: i32) -> Value {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint { x: f64, y: f64 }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NSRect { x: f64, y: f64, w: f64, h: f64 }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateScrollWheelEvent(source: *const std::ffi::c_void, units: u32, count: u32, wheel1: i32, ...) -> *mut std::ffi::c_void;
+        fn CGEventSetLocation(ev: *mut std::ffi::c_void, p: CGPoint);
+        fn CGEventSetIntegerValueField(ev: *mut std::ffi::c_void, field: u32, value: i64);
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayPixelsHigh(display: u32) -> usize;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let windows: *mut Object = msg_send![app, windows];
+        let win: *mut Object = msg_send![windows, firstObject];
+        if win.is_null() { return json!("no window"); }
+        let view: *mut Object = msg_send![win, contentView];
+        let frame: NSRect = msg_send![view, frame];
+        let ev = CGEventCreateScrollWheelEvent(std::ptr::null(), 0 /* pixel */, 1, dy);
+        if ev.is_null() { return json!("no event"); }
+        CGEventSetIntegerValueField(ev, 88 /* kCGScrollWheelEventIsContinuous */, 1);
+        // an event with no window reports its screen point as locationInWindow; place it
+        // so that point is the window point we want (GPUI flips y with the view height)
+        let screen_h = CGDisplayPixelsHigh(CGMainDisplayID()) as f64;
+        CGEventSetLocation(ev, CGPoint { x, y: screen_h - (frame.h - y_from_top) });
+        let ns: *mut Object = msg_send![class!(NSEvent), eventWithCGEvent: ev];
+        let mut got = json!("no NSEvent or no GPUIView");
+        // GPUI's own view (GPUIView) is a subview of the window's content view
+        let subviews: *mut Object = msg_send![view, subviews];
+        let n: usize = msg_send![subviews, count];
+        let gpui_view = (0..n).map(|i| -> *mut Object { msg_send![subviews, objectAtIndex: i] })
+            .find(|&v| { let c: *const objc::runtime::Class = msg_send![v, class]; (*c).name() == "GPUIView" });
+        if let (false, Some(target)) = (ns.is_null(), gpui_view) {
+            let loc: CGPoint = msg_send![ns, locationInWindow];
+            let d: f64 = msg_send![ns, scrollingDeltaY];
+            let precise: i8 = msg_send![ns, hasPreciseScrollingDeltas];
+            let _: () = msg_send![target, scrollWheel: ns];
+            got = json!({"location_in_window": [loc.x, loc.y], "view_h": frame.h, "delta_y": d, "precise": precise != 0});
+        }
+        CFRelease(ev);
+        got
     }
 }
