@@ -27,7 +27,7 @@ bin/umbrous memory accept cand_… "Edited text" --kind decision --to project
 bin/umbrous memory accept cand_… --scope all           # a personal suggestion, for every project
 bin/umbrous memory reject cand_…
 bin/umbrous memory suggestions --all                   # also the decided ones (no text: see below)
-bin/umbrous test                                       # 304 tests; no Ollama needed
+bin/umbrous test                                       # 306 tests; no Ollama needed
 ```
 
 In the browser page a card appears under the reply, **Suggested for memory**,
@@ -78,11 +78,21 @@ Every suggestion (`Review.check`):
 | store is `personal` or `project`, kind is one of that store's kinds | `bad_store`, `bad_kind` |
 | text passes M6's rules: 1 to 500 characters, nothing that looks like a key, token or password | `bad_text`, `looks_secret` |
 | it quotes at least 8 characters, copied from your message or from the reply (case and spacing do not matter) | `not_grounded` |
+| **the quote says what the note says**: every content word of the text is in the quote (framing words like "prefers", "decided", "the user" and simple endings like -s, -ed, -ing aside) | `not_grounded` |
 | **words found only in the reply can become project state or a lesson, nothing else** | `not_your_words` |
-| not already in memory, not already waiting, not rejected before in this project | `duplicate`, `rejected_before` |
+| not already used in this project (its project memory, or personal memory whose scope includes it), not already waiting, not rejected before in this project | `duplicate`, `rejected_before` |
 | at most 3 kept per task, and at most 50 waiting per project | `too_many`, `queue_full` |
 
-The fourth row is the provenance rule. A personal fact or preference, and a
+The fourth row stops a real quote from carrying an unrelated claim. Before the
+Codex review, a model could pair "Prefers sending passwords by email" with your
+message `read notes/claim.md`: the quote was in your message, so the note was
+offered as yours. Now the note's words must all appear in the quote, so the
+quote supports this claim and not just any claim. It is a word check, not
+understanding: "Ship on Friday" from "we decided to ship on Friday" passes,
+"Prefers dark mode" from "I prefer light mode" does not. Your own edits are
+not re-checked against the quote; what you type is your words.
+
+The fifth row is the provenance rule. A personal fact or preference, and a
 project decision, are things only **you** can state, so they must quote your
 message. The reply may repeat a workspace file, and a file is untrusted (M3):
 it can describe the project ("the build needs a clean folder": a lesson), but
@@ -96,6 +106,13 @@ duplicate check against what is in memory **now**, inside the transaction
 that writes it. If you added the same thing by hand while it waited, Accept is
 refused (`duplicate`, naming the existing item) and the suggestion stays
 pending, so you can reject it or edit it into something different.
+
+Duplicates follow scope (Codex review). A personal item kept to project A is
+not retrieved in B, so the same suggestion in B is offered, and accepting it
+for B writes a second item scoped to B. What is refused is overlap: accepting
+with a scope that reaches a project where the same text is already retrieved
+(personal "all" while A has it, or personal for A while A's project memory has
+it).
 
 ## What is kept
 
@@ -247,9 +264,9 @@ Try it before reading `QueueTests.test_reject_keeps_no_text_and_is_never_retriev
 
 | Test | Checks |
 |---|---|
-| `test_m7_review.CheckTests` (5) | the basis is where the quote is; ungrounded or short quotes dropped; reply words never become personal or a decision; store, kind, text, secrets; `parse` reads only the JSON asked for |
-| `QueueTests` (9) | suggestions wait apart from memory and are never retrieved; accept writes to the intended store only (not another project); edit then accept; a decision moved to personal; reject keeps no text and is not offered again; duplicates (in memory, waiting, in one batch, added while waiting); decided once; limits; memory tables hold only approved rows |
-| `ApiTests` (7) | review two, accept one, reject one, and the effect on a later reply in a new chat; a file's claim about you cannot become personal; no suggestions with memory off, for a non-task chat, or when switched off; a failed suggestion never fails the reply; the page leaving while suggestions run keeps the reply once, as complete; API errors and listing; no suggested text in logs or reports |
+| `test_m7_review.CheckTests` (6) | the basis is where the quote is; ungrounded or short quotes dropped; the quote must say what the note says; reply words never become personal or a decision; store, kind, text, secrets; `parse` reads only the JSON asked for |
+| `QueueTests` (10) | suggestions wait apart from memory and are never retrieved; accept writes to the intended store only (not another project); edit then accept; a decision moved to personal; reject keeps no text and is not offered again; duplicates (in memory, waiting, in one batch, added while waiting); duplicates follow personal scope; decided once; limits; memory tables hold only approved rows |
+| `ApiTests` (7) | review two, accept one, reject one, and the effect on a later reply in a new chat; a file's claim about you cannot become personal, not even by quoting your unrelated words; no suggestions with memory off, for a non-task chat, or when switched off; a failed suggestion never fails the reply; the page leaving while suggestions run keeps the reply once, as complete; API errors and listing; no suggested text in logs or reports |
 | `CliTests`, `SchemaTests` | the CLI review commands; schema 7 → 8 keeps memory |
 | `test_browser_m7` | the card under the reply, edit and accept, reject, Waiting for review, the later reply, the file's claim |
 | `test_validate_scripts` (M7 cases) | `validate-m7.sh` fails on any app failure or wrong records (a personal item, one left pending, a rejected one with text, the later reply without the item, an unapproved row, the file's claim offered, no source, text in a log) |

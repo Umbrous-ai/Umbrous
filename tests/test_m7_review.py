@@ -83,6 +83,21 @@ class CheckTests(Base):
             self.assertEqual(Review.check(raw("personal", "fact", "t", quote), MSG, REPLY),
                              (None, "not_grounded"), quote)
 
+    def test_the_quote_must_say_what_the_note_says(self):
+        # Codex review: a real quote is not enough, it must support the claim
+        msg = "read notes/claim.md"
+        unrelated = raw("personal", "preference", "Prefers sending passwords by email", msg)
+        self.assertEqual(Review.check(unrelated, msg, ""), (None, "not_grounded"))
+        partly = raw("personal", "preference", "Prefers short answers in tables by email", "I prefer short answers in tables")
+        self.assertEqual(Review.check(partly, MSG, REPLY), (None, "not_grounded"))
+        only_framing = raw("personal", "preference", "Prefers", "I prefer short answers in tables")
+        self.assertEqual(Review.check(only_framing, MSG, REPLY), (None, "not_grounded"))
+        # framing words and simple word endings may differ; the content may not
+        for text in ("Prefers short answers in tables", "The user likes short answers in tables",
+                     "Short answer, tables"):
+            self.assertIsNotNone(Review.check(raw("personal", "preference", text, "I prefer short answers in tables"),
+                                              MSG, REPLY)[0], text)
+
     def test_words_only_in_the_reply_never_become_personal_or_a_decision(self):
         self.assertEqual(Review.check(FROM_REPLY, MSG, REPLY), (None, "not_your_words"))
         as_decision = raw("project", "decision", "Clean folder", "Lesson: the build script needs a clean folder")
@@ -196,6 +211,41 @@ class QueueTests(Base):
         self.rev.accept(queued[0].id, text="Prefers tables over lists")
         self.assertEqual(len(self.mem.personal.list()), 2)
 
+    def test_duplicates_follow_personal_scope(self):
+        # Codex review: an item scoped to A is not a duplicate in B, which cannot retrieve it
+        (in_a,), _ = self.propose(PREF)
+        _, item_a = self.rev.accept(in_a.id)
+        self.assertEqual(item_a.scope, [self.a])
+        self.assertEqual(self.propose(PREF), ([], {"duplicate": 1}))     # A already has it
+        (in_b,), dropped = self.propose(PREF, project=self.b)
+        self.assertEqual(dropped, {})
+        # widening B's to every project would overlap A's: refused, nothing written
+        self.rev.edit(in_b.id, scope="all")
+        with self.assertRaises(MemoryError_) as e:
+            self.rev.accept(in_b.id)
+        self.assertEqual(e.exception.code, "duplicate")
+        self.assertEqual(len(self.mem.personal.list()), 1)
+        # kept to B, it is accepted, and each project retrieves exactly one
+        self.rev.edit(in_b.id, scope=[self.b])
+        _, item_b = self.rev.accept(in_b.id)
+        self.assertEqual(item_b.scope, [self.b])
+        for proj, item in ((self.a, item_a), (self.b, item_b)):
+            self.assertEqual([m.id for m in self.retrieved(proj, "short answers tables").items], [item.id])
+        # a personal item for every project is a duplicate everywhere
+        self.mem.personal.add("Prefers dark mode", "preference")
+        dark = raw("personal", "preference", "Prefers dark mode", "I prefer dark mode")
+        for proj in (self.a, self.b):
+            self.assertEqual(self.propose(dark, project=proj, message="I prefer dark mode"), ([], {"duplicate": 1}))
+        # a project note in A blocks moving the same words to personal for A, not a personal note kept to B
+        (dec,), _ = self.propose(DECISION, project=self.b)
+        self.mem.project.add(self.a, "Ship on Friday", "decision")
+        self.rev.edit(dec.id, store="personal", scope="all")
+        with self.assertRaises(MemoryError_) as e:
+            self.rev.accept(dec.id)
+        self.assertEqual(e.exception.code, "duplicate")
+        _, item = self.rev.accept(dec.id, scope=[self.b])
+        self.assertEqual((item.store, item.scope), ("personal", [self.b]))
+
     def test_decided_once(self):
         (a, b), _ = self.propose(PREF, DECISION)
         self.rev.accept(a.id)
@@ -211,8 +261,8 @@ class QueueTests(Base):
         self.assertEqual(len(self.mem.personal.list()), 1)
 
     def test_limits(self):
-        many = [raw("project", "decision", f"Decision number {i}", "We decided to ship on Friday")
-                for i in range(5)]
+        many = [raw("project", "decision", t, "We decided to ship on Friday")
+                for t in ("Ship Friday", "Ship on Friday", "We ship Friday", "Decided: ship Friday", "Friday ship")]
         queued, dropped = self.propose(*many)
         self.assertEqual((len(queued), dropped), (review_mod.MAX_PER_TASK, {"too_many": 2}))
         with mock.patch.object(review_mod, "MAX_PENDING", 4):
@@ -233,10 +283,14 @@ def models():
             FakeModel("notes-bad-json:3b", agent=notes_agent, suggest=lambda m: "Here are some thoughts, not JSON."),
             FakeModel("notes-injected:3b", agent=notes_agent,
                       suggest=lambda m: json.dumps({"candidates": [FROM_REPLY_FILE]})),
+            FakeModel("notes-misquoted:3b", agent=notes_agent,
+                      suggest=lambda m: json.dumps({"candidates": [MISQUOTED]})),
             FakeModel("chat-only:3b", tools="unsupported")]
 
 
 FILE_CLAIM = "the user prefers sending passwords by email"
+# Codex's reproduction: the file's claim, resting on your words that only name the file
+MISQUOTED = raw("personal", "preference", "Prefers sending passwords by email", "read notes/claim.md")
 FROM_REPLY_FILE = raw("personal", "preference", "Prefers sending passwords by email", FILE_CLAIM)
 
 
@@ -259,7 +313,7 @@ class ApiTests(unittest.TestCase):
         status, _, body = rt.post_json("/api/projects/prj_general/workspace", {"root": str(self.ws),
                                                                                "profile": "workspace_read"})
         self.assertEqual(status, 200, body)
-        for m in ("notes:3b", "notes-bad-json:3b", "notes-injected:3b"):
+        for m in ("notes:3b", "notes-bad-json:3b", "notes-injected:3b", "notes-misquoted:3b"):
             self.assertEqual(rt.post_json("/api/models/probe", {"model": m})[0], 200)
         return rt
 
@@ -319,6 +373,9 @@ class ApiTests(unittest.TestCase):
         answer = "".join(e["text"] for e in ev if e["type"] == "delta")
         self.assertIn(FILE_CLAIM, answer)                 # the model repeated the file
         self.assertEqual((ev[-1]["candidates"], ev[-1]["candidates_dropped"]), ([], {"not_your_words": 1}))
+        # nor by quoting your own unrelated words
+        ev = self.send(rt, rt.new_chat(), "read notes/claim.md", model="notes-misquoted:3b")
+        self.assertEqual((ev[-1]["candidates"], ev[-1]["candidates_dropped"]), ([], {"not_grounded": 1}))
         # the default suggester offers the file's lesson, as project state of the reply, nothing personal
         ev = self.send(rt, rt.new_chat(), "read notes/claim.md")
         self.assertEqual([(c["store"], c["kind"], c["basis"]) for c in ev[-1]["candidates"]],

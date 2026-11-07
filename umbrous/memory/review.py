@@ -86,6 +86,42 @@ def norm(text: str) -> str:
     return " ".join(str(text).lower().split()).strip(" \"'“”‘’`").rstrip(".!;:,")
 
 
+# Words that frame a note rather than carry its content ("Prefers X",
+# "Decided: X", "The user likes X"). The rest of the note's words must be in
+# its quote.
+FRAMING = frozenset("the and for are but not you your with this that have has was were from into about there their "
+                    "them they then than its our user users user's prefers prefer preferred preference likes like "
+                    "liked wants want wanted decided decide decides decision lesson note remember project always "
+                    "should".split())
+WORD = re.compile(r"[a-z0-9]+")
+
+
+def _stem(w: str) -> str:
+    for suffix in ("ing", "ed", "es", "s"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            return w[: -len(suffix)]
+    return w
+
+
+def content_words(text: str) -> set:
+    """The words that carry a note's content: lower case, stemmed, without framing words."""
+    return {_stem(w) for w in WORD.findall(str(text).lower().replace("'s", "")) if len(w) >= 3 and w not in FRAMING}
+
+
+def grounded(text: str, quote: str) -> bool:
+    """Every content word of the note is in the quote it rests on, so the
+    quote supports this claim and not just any claim (Codex review, M7)."""
+    words = content_words(text)
+    return bool(words) and words <= content_words(quote)
+
+
+def overlap(a: object, b: object) -> bool:
+    """Do two scopes ("all" or a list of project ids) share a project?"""
+    if a == "all" or b == "all":
+        return True
+    return bool(set(a) & set(b))
+
+
 def text_hash(text: str) -> str:
     return hashlib.sha256(norm(text).encode()).hexdigest()
 
@@ -194,13 +230,29 @@ class Review:
         return [self._row(r) for r in rows]
 
     # ------------------------------------------------------------ checks
+    @staticmethod
+    def _same_in_scope(c: sqlite3.Connection, h: str, scope: object) -> Optional[str]:
+        """The id of an item with this text that a chat in `scope` ("all" or
+        project ids) already retrieves: a personal item whose scope overlaps,
+        or a project item of a project in scope. None if there is none."""
+        for i, text, sc in c.execute("SELECT id, text, scope FROM personal_memory"):
+            if text_hash(text) == h and overlap(scope, "all" if sc == "all" else json.loads(sc)):
+                return i
+        for i, text, pid in c.execute("SELECT id, text, project_id FROM project_memory"):
+            if text_hash(text) == h and overlap(scope, [pid]):
+                return i
+        return None
+
     def _known(self, c: sqlite3.Connection, project_id: str) -> Dict[str, str]:
-        """hash -> why it is not offered again: in memory, waiting, or rejected before (this project)."""
+        """hash -> why it is not offered again in this project: already retrieved
+        here (this project's memory, or personal memory whose scope includes it),
+        waiting, or rejected before here."""
         out: Dict[str, str] = {}
         for (text,) in c.execute("SELECT text FROM project_memory WHERE project_id = ?", (project_id,)):
             out[text_hash(text)] = "duplicate"
-        for (text,) in c.execute("SELECT text FROM personal_memory"):
-            out[text_hash(text)] = "duplicate"
+        for text, sc in c.execute("SELECT text, scope FROM personal_memory"):
+            if sc == "all" or project_id in json.loads(sc):
+                out[text_hash(text)] = "duplicate"
         for h, status in c.execute("SELECT text_hash, status FROM memory_candidates WHERE project_id = ?",
                                    (project_id,)):
             if status == "rejected":
@@ -236,6 +288,8 @@ class Review:
             basis = "reply"
         else:
             return None, "not_grounded"
+        if not grounded(text, quote):
+            return None, "not_grounded"     # the quote is real but does not say this
         if basis == "reply" and kind not in REPLY_KINDS:
             return None, "not_your_words"
         return {"store": store, "kind": kind, "text": text, "quote": quote, "basis": basis}, None
@@ -353,16 +407,14 @@ class Review:
                 if cand.status != "pending":
                     raise MemoryError_(f"That suggestion was already {cand.status}.", "already_decided")
                 e = self._edited(cand, None, None, None, None, project_exists)   # the same rules, once more
-                h = text_hash(e["text"])
-                if cand.store == "personal":
-                    rows = c.execute("SELECT id, text FROM personal_memory").fetchall()
-                else:
-                    rows = c.execute("SELECT id, text FROM project_memory WHERE project_id = ?",
-                                     (cand.project_id,)).fetchall()
-                same = next((i for i, t in rows if text_hash(t) == h), None)
+                # a duplicate only where both would be retrieved: the same text
+                # already reaches a project this item would reach
+                scope = [cand.project_id] if e["store"] == "project" else (
+                    "all" if e["scope"] == "all" else json.loads(e["scope"]))
+                same = self._same_in_scope(c, text_hash(e["text"]), scope)
                 if same:
-                    raise MemoryError_(f"Memory already has this ({same}). Reject the suggestion, or edit it first.",
-                                       "duplicate")
+                    raise MemoryError_(f"Memory already has this where it would be used ({same}). Reject the "
+                                       "suggestion, edit it, or narrow its scope.", "duplicate")
                 source = {"type": "task", "task_id": cand.task_id, "chat_id": cand.chat_id,
                           "candidate_id": cand.id, "basis": cand.basis, "edited": cand.edited,
                           "evidence": cand.evidence}
