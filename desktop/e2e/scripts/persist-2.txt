@@ -1,0 +1,13 @@
+wait_ready 30
+wait_models
+select_project Garden
+sleep 600
+record run2_garden
+open_chat tulips
+record run2_tulips
+screenshot @OUT@/persist.png
+send And in pots? One sentence.
+wait_reply 240
+sleep 600
+record run2_continued
+quit

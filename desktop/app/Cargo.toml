@@ -1,0 +1,34 @@
+[package]
+name = "umbrous-desktop"
+version = "0.2.0"
+description = "Umbrous for macOS: a native GPUI interface over the bundled Python runtime"
+license = "MIT"
+edition = "2021"
+publish = false
+
+[dependencies]
+# runtime_shaders: compile GPUI's Metal shaders when the app starts instead of at
+# build time, so building needs only the Command Line Tools, not full Xcode.
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
+futures = "0.3"
+libc = "0.2"
+objc = "0.2"
+pulldown-cmark = { version = "0.13", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-segmentation = "1"
+ureq = { version = "2", default-features = false, features = ["json"] }
+
+[lints.rust]
+# the objc crate's msg_send! macro checks cfg(feature = "cargo-clippy")
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+[features]
+# Test-only automation (src/e2e.rs): drives the UI from a script file. Never in release bundles.
+e2e = []
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+strip = true

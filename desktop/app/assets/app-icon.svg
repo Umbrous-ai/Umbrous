@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- macOS icon grid: 824x824 rounded square centred in 1024, drawn from brand/logo/eclipse-grid-white.svg -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#111114"/>
+  <g transform="translate(232 232) scale(2.1875)" fill="#ffffff">
+    <path d="M18 70 A52 52 0 1 0 122 70 A52 52 0 1 0 18 70 Z"/><path d="M225 35.6 A52 52 0 1 0 225 104.4 A52 52 0 0 1 225 35.6 Z"/><path d="M90 138 A52 52 0 1 0 90 234 A52 52 0 0 1 90 138 Z"/><path fill-rule="evenodd" d="M134 186 A52 52 0 1 0 238 186 A52 52 0 1 0 134 186 Z M144 186 A42 42 0 1 1 228 186 A42 42 0 1 1 144 186 Z"/>
+  </g>
+</svg>

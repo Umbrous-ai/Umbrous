@@ -1,0 +1,15 @@
+wait_ready 30
+wait_models
+add_project Garden
+send When should I plant tulips? One sentence.
+wait_reply 240
+send And daffodils? One sentence.
+wait_reply 240
+new_chat
+send Best soil for roses, in one sentence.
+wait_reply 240
+open_chat roses
+archive
+sleep 600
+record run1_end
+quit
