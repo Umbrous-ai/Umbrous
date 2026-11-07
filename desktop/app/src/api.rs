@@ -99,12 +99,18 @@ impl Api {
 
     /// POST /api/chat and call `on_event` for each JSON line as it arrives.
     /// Returns when the runtime closes the stream. Blocking: run it off the UI thread.
-    pub fn chat_stream(&self, chat_id: &str, model: &str, message: &str, mut on_event: impl FnMut(Value) -> bool) -> Result<()> {
+    /// `resume`: an interrupted task to run again (M5) instead of sending `message`.
+    pub fn chat_stream(&self, chat_id: &str, model: &str, message: &str, resume: Option<&str>,
+                       mut on_event: impl FnMut(Value) -> bool) -> Result<()> {
+        let body = match resume {
+            Some(task) => json!({"chat_id": chat_id, "model": model, "resume_task": task}),
+            None => json!({"chat_id": chat_id, "model": model, "message": message}),
+        };
         let resp = self
             .stream_agent
             .post(&format!("{}/api/chat", self.origin))
             .set("X-Umbrous-Token", &self.token)
-            .send_json(json!({"chat_id": chat_id, "model": model, "message": message}))
+            .send_json(body)
             .map_err(to_error)?;
         let reader = BufReader::new(resp.into_reader());
         for line in reader.lines() {
@@ -181,6 +187,21 @@ pub struct TaskBrief {
     pub task_id: String,
     #[serde(default)]
     pub report: Option<Value>,
+    /// M5: set for a task whose outcome is unknown (interrupted by a crash or restart)
+    #[serde(default)]
+    pub resume: Option<Resume>,
+}
+
+/// Whether an interrupted task can be resumed (umbrous/tasks/recover.py, M5).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Resume {
+    pub possible: bool,
+    /// what resuming means (when possible), or why it is not possible
+    #[serde(default)]
+    pub message: String,
+    /// the message that was waiting, when it can be resumed
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 /// One line summing up a task report (M4), for the reply's meta line, and
@@ -295,5 +316,23 @@ mod tests {
                            "uncertainty": [], "failures": [], "limits_hit": []});
         assert!(!report_line(&clean).unwrap().1);
         assert_eq!(report_line(&json!({})), None);
+    }
+
+    #[test]
+    fn interrupted_task_parses_with_its_resume_info() {
+        let list: TaskList = serde_json::from_value(json!({"tasks": [
+            {"task_id": "tsk_a", "status": "completed", "report": {"status": "completed"}},
+            {"task_id": "tsk_b", "status": "unknown", "report": {"status": "unknown", "steps": 1, "tool_calls": 1,
+             "actions": {"unknown": 1}, "uncertainty": ["x"]},
+             "resume": {"possible": true, "reason": null, "message": "Resuming runs the task again.", "text": "who?"}},
+            {"task_id": "tsk_c", "status": "unknown", "resume": {"possible": false, "reason": "already_resumed",
+             "message": "This task was already resumed."}}]})).unwrap();
+        assert!(list.tasks[0].resume.is_none());
+        let r = list.tasks[1].resume.as_ref().unwrap();
+        assert!(r.possible);
+        assert_eq!(r.text.as_deref(), Some("who?"));
+        assert_eq!(report_line(list.tasks[1].report.as_ref().unwrap()).unwrap().0,
+                   "Task outcome unknown · 1 step · 0 of 1 actions completed · 1 thing not fully checked");
+        assert!(!list.tasks[2].resume.as_ref().unwrap().possible);
     }
 }

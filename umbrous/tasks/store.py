@@ -21,7 +21,8 @@ pages. Copies already in backups (Time Machine) are outside Umbrous's reach.
 
 Statuses
   task    requested -> started -> completed | failed | cancelled
-          unknown is kept for M5 (a task found mid-run after a restart)
+          requested | started -> unknown | cancelled   (M5: only by recovery,
+          for a task found mid-run after a crash or restart; see recover.py)
   action  requested -> started -> completed | denied | failed | cancelled | unknown
           requested -> denied | failed | cancelled   (never started)
           (started -> denied: the file turned out to be a link or not a plain file)
@@ -50,6 +51,9 @@ TASK_NEXT = {"requested": {"started", "failed", "cancelled"},
              "started": {"completed", "failed", "cancelled"}}
 ACTION_NEXT = {"requested": {"started", "denied", "failed", "cancelled"},
                "started": {"completed", "denied", "failed", "cancelled", "unknown"}}
+# M5: recovery may end an action or task from any open state, because the
+# record of a step in between can be what the crash cut off.
+OPEN = ("requested", "started")
 MAX_TEXT = 300
 
 
@@ -139,6 +143,41 @@ class TaskStore:
             if receipt_id:
                 payload["receipt_id"] = receipt_id
             self._event(c, row[0], "action." + status, action_id, payload, now)
+
+    def recover_action(self, action_id: str, status: str, code: Optional[str], receipt_id: Optional[str] = None,
+                       **data) -> None:
+        """M5 recovery: end an action that was still open when the runtime stopped."""
+        if status not in ACTION_STATUSES or status in OPEN:
+            raise TaskError(f"recovery cannot set an action to {status!r}")
+        now = _now()
+        with self._lock, self._db() as c:
+            row = c.execute("SELECT task_id, status FROM task_actions WHERE action_id = ?", (action_id,)).fetchone()
+            if row is None or row[1] not in OPEN:
+                raise TaskError("only an open action can be reconciled")
+            c.execute("UPDATE task_actions SET status = ?, code = ?, receipt_id = COALESCE(?, receipt_id), ended_at = ? "
+                      "WHERE action_id = ?", (status, code, receipt_id, now, action_id))
+            self._event(c, row[0], "action.reconciled", action_id,
+                        dict(data, was=row[1], status=status, code=code, receipt_id=receipt_id), now)
+
+    def recover_task(self, task_id: str, status: str, code: str, **data) -> None:
+        """M5 recovery: end a task that was still open when the runtime stopped
+        (unknown: interrupted; cancelled: you had pressed Stop)."""
+        if status not in ("unknown", "cancelled"):
+            raise TaskError(f"recovery cannot set a task to {status!r}")
+        now = _now()
+        with self._lock, self._db() as c:
+            row = c.execute("SELECT status FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if row is None or row[0] not in OPEN:
+                raise TaskError("only an open task can be recovered")
+            c.execute("UPDATE tasks SET status = ?, code = ?, ended_at = ? WHERE task_id = ?", (status, code, now, task_id))
+            self._event(c, task_id, "task.interrupted" if status == "unknown" else "task.cancelled", None,
+                        dict(data, was=row[0], code=code), now)
+
+    def open_tasks(self) -> List[str]:
+        """Tasks still requested or started: after a restart, ones the runtime stopped in the middle of."""
+        with self._db() as c:
+            return [r[0] for r in c.execute("SELECT task_id FROM tasks WHERE status IN ('requested', 'started') "
+                                            "ORDER BY created_at").fetchall()]
 
     def event(self, task_id: str, kind: str, action_id: Optional[str] = None, **data) -> None:
         with self._lock, self._db() as c:

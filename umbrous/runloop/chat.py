@@ -34,6 +34,15 @@ timed out, interrupted), the message and the partial reply are kept and the
 partial reply is marked as incomplete for the page. If nothing arrived, the
 message is not kept, so sending it again does not duplicate it. A kept
 partial reply is stored with its status (stopped, timeout, interrupted, error).
+
+M5: while a task runs, its message waits in the history store's pending
+turns, so a crash or restart cannot lose it: at the next start the task is
+recovered as interrupted (tasks/recover.py) and can be resumed. Resuming
+(`resume_task`) runs it again as a new task from that message, under the
+current gate, profile, grants and approvals; the scope is checked first, and
+nothing from the interrupted attempt (results, approvals) is replayed. The
+exchange is stored before the task's report, so a crash between the two
+leaves a saved reply and an interrupted task that says so.
 """
 
 from __future__ import annotations
@@ -54,6 +63,7 @@ from umbrous.logging_setup import log_event
 from umbrous.model.base import CancelToken, Cancelled, ChatDelta, ChatDone, ChatToolCalls, Deadlines, ModelError
 from umbrous.model.router import ModelRouter
 from umbrous.receipts.model import new_action_id, new_task_id
+from umbrous.tasks.recover import resume_info, scope_check
 from umbrous.tasks.run import TaskRun
 from umbrous.tasks.store import TaskStore
 
@@ -61,6 +71,7 @@ log = logging.getLogger("umbrous.runloop")
 
 MAX_MESSAGE_CHARS = 32_000
 CHAT_ID_RE = re.compile(r"^chat_[A-Za-z0-9_-]{8,64}$")
+TASK_ID_RE = re.compile(r"^tsk_[0-9a-f]{28}$")
 
 
 class ChatBusy(Exception):
@@ -137,15 +148,24 @@ def deadlines_from(config: Config) -> Deadlines:
 
 def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: ChatLocks, runs: RunRegistry,
              chat_id: str, model_name: str, message: str, gate: Optional[Gate] = None,
-             approvals: bool = False, tasks: Optional[TaskStore] = None) -> Iterator[dict]:
+             approvals: bool = False, tasks: Optional[TaskStore] = None,
+             resume_task: Optional[str] = None) -> Iterator[dict]:
     """`approvals`: the client can show approval cards and answer them (the
     browser page says so). Without it, a read that needs approval is refused at
     once with `approval_unavailable` instead of waiting for an answer that
-    cannot come."""
-    if not isinstance(message, str) or not message.strip():
+    cannot come.
+
+    `resume_task` (M5): resume that interrupted task instead of sending a new
+    message; its waiting message is used and `message` is ignored."""
+    if resume_task is not None:
+        if not isinstance(resume_task, str) or not TASK_ID_RE.match(resume_task) or tasks is None:
+            yield {"type": "error", "code": "no_such_task", "message": "That task does not exist.", "partial": False}
+            return
+        message = ""
+    elif not isinstance(message, str) or not message.strip():
         yield {"type": "error", "code": "empty_message", "message": "Type a message first.", "partial": False}
         return
-    if len(message) > MAX_MESSAGE_CHARS:
+    elif len(message) > MAX_MESSAGE_CHARS:
         yield {"type": "error", "code": "message_too_long", "partial": False,
                "message": f"Messages are limited to {MAX_MESSAGE_CHARS:,} characters."}
         return
@@ -178,6 +198,25 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
         yield {"type": "error", "code": "chat_archived", "partial": False,
                "message": "This chat is archived. Restore it to continue."}
         return
+    old: Optional[dict] = None
+    if resume_task is not None:
+        # Checked under the chat lock: no other reply in this chat can start,
+        # resume or supersede it in between.
+        old = tasks.get(resume_task)
+        if old is None or old["task"]["chat_id"] != chat_id:
+            lock.release()
+            yield {"type": "error", "code": "no_such_task", "message": "That task does not exist in this chat.",
+                   "partial": False}
+            return
+        info = resume_info(tasks, history, resume_task, old)
+        pending = history.pending(resume_task) if info["possible"] else None
+        if pending is None:
+            lock.release()
+            yield {"type": "error", "code": "not_resumable", "reason": info.get("reason"),
+                   "message": info["message"], "partial": False}
+            return
+        message = pending.user_text
+        model_name = model_name or pending.model
 
     run_id, cancel = runs.start()
     started = time.monotonic()
@@ -187,6 +226,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
     time_up = threading.Event()
     watchdog: Optional[threading.Timer] = None
     report: Optional[dict] = None
+    pending_done = False      # M5: the waiting message was stored with its reply
 
     def end_task(status: str, code: Optional[str]) -> Optional[dict]:
         nonlocal report
@@ -196,9 +236,11 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
 
     def keep(status: str, model: str, prompt_tokens: Optional[int] = None, reply_tokens: Optional[int] = None) -> Optional[dict]:
         """Store the exchange. Returns an error event if storing failed."""
+        nonlocal pending_done
         try:
             history.append_exchange(chat_id, message, "".join(text_parts), model, status, prompt_tokens, reply_tokens,
                                     task_id=task_id)
+            pending_done = True
         except HistoryError as exc:  # e.g. archived from another tab mid-reply
             return {"type": "error", "code": exc.code, "message": "The reply was not saved: " + exc.message,
                     "partial": False}
@@ -221,6 +263,35 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             yield {"type": "error", "code": exc.code, "message": exc.message, "partial": False}
             return
 
+        if old is not None:
+            # M5: the current scope decides, not the one the task started under.
+            refused = None
+            if not tools_on:
+                refused = {"code": "resume_scope_changed",
+                           "message": ("This project no longer has a workspace, so the task cannot be resumed. "
+                                       if not ws else f"{model.name} cannot use the workspace (it has not passed "
+                                       "the tool check), so the task cannot be resumed with it. ")
+                           + "The task stays interrupted."}
+            else:
+                refused = scope_check(gate, chat_info.project_id, old, approvals)
+            if refused:
+                outcome = refused["code"]
+                try:
+                    tasks.event(resume_task, "resume.refused", code=refused["code"])
+                except Exception:
+                    pass
+                yield {"type": "error", "partial": False, **refused}
+                return
+        else:
+            # A new message replaces any interrupted one still waiting in this
+            # chat: resuming it after this would put it out of order.
+            for p in history.pending_for_chat(chat_id):
+                if history.drop_pending(p.task_id) and tasks is not None:
+                    try:
+                        tasks.event(p.task_id, "task.superseded")
+                    except Exception:
+                        pass
+
         if tools_on:
             task_id = new_task_id()
             trun = TaskRun(tasks, task_id, chat_info.project_id, chat_id, model.name, {
@@ -233,6 +304,30 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             watchdog = threading.Timer(config.task_timeout_s, times_up)
             watchdog.daemon = True
             watchdog.start()
+            stop_logged = []
+
+            def stop_requested() -> None:
+                # M5: recorded at once, so a crash right after Stop is recovered as
+                # cancelled (you asked for it to end), not as interrupted.
+                if not stop_logged:
+                    stop_logged.append(True)
+                    trun._safe(tasks and tasks.event, task_id, "stop.requested",
+                               by="time_limit" if time_up.is_set() else "you")
+            if old is not None:
+                trun._safe(tasks.event, resume_task, "task.resumed", by=task_id)
+                trun._safe(tasks.event, task_id, "task.resume_of", of=resume_task)
+                trun.resume_of = resume_task
+                trun.previous_reads = {e["ref"]: e["sha256"] for r in gate.receipts.for_task(resume_task)
+                                       if r["decision"] == "allowed" and r["action"] == "fs.read"
+                                       for e in r["evidence"] if e.get("kind") == "file" and e.get("sha256")}
+                history.move_pending(resume_task, task_id)
+            else:
+                try:
+                    history.begin_pending(task_id, chat_id, message, model.name)
+                except Exception as exc:   # without it a crash loses the message; the reply itself still works
+                    log_event(log, "task.pending_failed", level=logging.WARNING, task_id=task_id,
+                              error=exc.__class__.__name__)
+            cancel.on_cancel(stop_requested)
         log_event(log, "run.start", run_id=run_id, chat_id=chat_id, model=model.name, task_id=task_id,
                   turns_sent=plan.turns_included, est_tokens=plan.estimated_tokens, window=plan.window)
         tools_info = {"on": tools_on, "workspace": ws.name if ws else None,
@@ -243,7 +338,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             tools_info["off_reason"] = (f"{model.name} has not passed the tool check, so it cannot use the "
                                         "workspace. Run Check tools in the model menu, or pick a verified model.")
         yield {"type": "start", "run_id": run_id, "model_requested": model.name, "context": plan.summary(),
-               "task_id": task_id, "tools": tools_info}
+               "task_id": task_id, "tools": tools_info, "resume_of": resume_task}
 
         options = {"num_ctx": plan.window, "num_predict": plan.reply_tokens}
         messages = list(plan.messages)
@@ -370,8 +465,10 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             outcome = "ok"
             if watchdog:
                 watchdog.cancel()
-            final = end_task("completed", None)
+            # The exchange is stored first, then the report (M5: a crash in
+            # between leaves the reply saved, and recovery says so).
             failed = keep("complete", piece.model, piece.prompt_tokens, piece.reply_tokens)
+            final = end_task("completed", None)
             if failed:
                 outcome = failed["code"]
                 yield dict(failed, report=final)
@@ -409,6 +506,11 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
     finally:
         if watchdog:
             watchdog.cancel()
+        if task_id and not pending_done:
+            try:   # nothing was kept: the message is not kept either (M2), so it does not wait
+                history.drop_pending(task_id)
+            except Exception:
+                pass
         runs.finish(run_id)
         lock.release()
         log_event(log, "run.end", run_id=run_id, chat_id=chat_id, outcome=outcome,

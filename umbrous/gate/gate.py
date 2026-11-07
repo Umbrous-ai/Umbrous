@@ -41,13 +41,24 @@ MAX_QUERY = 200
 
 # What the model sees. Names use underscores (Ollama function names); each
 # maps to a capability in receipts and profiles.
+#
+# M5: `retry` is the tool's retry class, what may happen when a run of it was
+# cut off and its outcome is unknown (docs/m5-resume.md):
+#   repeat   read-only: may run again under the current gate, with a new
+#            receipt, and a warning that the data may have changed since.
+#   verify   (future writes) its effect must be checked before anything else;
+#            repeating it blindly could do it twice. Not resumable until a
+#            check for that tool exists.
+# A tool without a class is treated as verify.
 TOOLS: Dict[str, dict] = {
     "list_files": {
+        "retry": "repeat",
         "action": "fs.list",
         "description": "List the files and folders in a folder of the workspace.",
         "params": {"path": (str, False, "Folder path relative to the workspace root. Default: the root.")},
     },
     "read_file": {
+        "retry": "repeat",
         "action": "fs.read",
         "description": "Read a text file from the workspace. Returns numbered lines.",
         "params": {
@@ -57,6 +68,7 @@ TOOLS: Dict[str, dict] = {
         },
     },
     "search_files": {
+        "retry": "repeat",
         "action": "fs.search",
         "description": "Find lines containing some text (case-insensitive, plain text) in the workspace.",
         "params": {

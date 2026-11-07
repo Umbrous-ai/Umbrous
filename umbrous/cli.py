@@ -290,6 +290,12 @@ def tasks_command(config: Config, chat: Optional[str], task: Optional[str], last
             print(f"  {e['seq']:>3} {e['at']}  {e['kind']:<18} {e['action_id'] or '':<32} {data}")
         print("report:")
         print(_json.dumps(t["report"], indent=2))
+        if tk["status"] == "unknown":   # M5: interrupted by a crash or restart
+            from umbrous.history.store import HistoryStore
+            from umbrous.tasks.recover import resume_info
+            info = resume_info(store, HistoryStore(config.db_path), task, t)
+            print("resume: " + ("possible (in the app or the browser page). " if info["possible"] else "not possible: ")
+                  + info["message"])
         return 0
     rows = store.for_chat(chat) if chat else store.latest(last)
     for r in rows:

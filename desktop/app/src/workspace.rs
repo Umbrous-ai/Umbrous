@@ -35,6 +35,18 @@ pub enum Phase {
     Ready,
 }
 
+/// An interrupted task of the open chat that can be resumed (M5).
+#[derive(Clone, Debug)]
+pub struct Interrupted {
+    pub task_id: String,
+    /// the message that was waiting when the runtime stopped
+    pub text: String,
+    /// the recovered report, in one line
+    pub report: String,
+    /// what resuming does (the runtime's words)
+    pub note: String,
+}
+
 struct Run {
     /// unique per send; stream events carry it, and only the current run's are applied
     token: u64,
@@ -79,6 +91,9 @@ pub struct Workspace {
     project_error: Option<String>,
     run: Option<Run>,
     notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
+    /// M5: the open chat's last task, if the runtime was stopped in the middle
+    /// of it and it can be resumed: shown as a notice with a Resume button.
+    pub interrupted: Option<Interrupted>,
     /// The selected project's workspace access (M3). This app cannot show approval
     /// requests yet, so a project on Ask before read gets an explanation and an
     /// explicit switch, never a silent change or a request left waiting.
@@ -225,6 +240,7 @@ impl Workspace {
             project_error: None,
             run: None,
             notice: None,
+            interrupted: None,
             access: None,
             access_seq: 0,
             access_error: None,
@@ -470,6 +486,7 @@ impl Workspace {
         self.rebuild_rows();
         self.selection = Selection::default();
         self.notice = None;
+        self.interrupted = None;
         self.options_menu = false;
         self.composer.update(cx, |c, cx| c.set_disabled(false, cx));
         cx.notify();
@@ -498,9 +515,20 @@ impl Workspace {
             move |api| {
                 let t: api::Transcript = api.get(&format!("/api/chats/{id}"))?;
                 let mut msgs: Vec<Msg> = t.messages.iter().map(stored_msg).collect();
-                // M4: replies that were tasks get their report line back
-                if t.messages.iter().any(|m| m.task_id.is_some()) {
-                    if let Ok(list) = api.get::<api::TaskList>(&format!("/api/tasks?chat_id={id}")) {
+                let mut interrupted = None;
+                // M4: replies that were tasks get their report line back.
+                // M5: and a task the runtime was stopped in the middle of is offered for resuming.
+                if let Ok(list) = api.get::<api::TaskList>(&format!("/api/tasks?chat_id={id}")) {
+                    interrupted = list.tasks.iter().rev().find_map(|x| {
+                        let r = x.resume.as_ref().filter(|r| r.possible)?;
+                        Some(Interrupted {
+                            task_id: x.task_id.clone(),
+                            text: r.text.clone().unwrap_or_default(),
+                            report: x.report.as_ref().and_then(api::report_line).map(|(l, _)| l).unwrap_or_default(),
+                            note: r.message.clone(),
+                        })
+                    });
+                    {
                         for (m, msg) in t.messages.iter().zip(msgs.iter_mut()) {
                             // the user's message carries the same task id; the report belongs to the reply only
                             if m.role == "user" {
@@ -517,7 +545,7 @@ impl Workspace {
                         }
                     }
                 }
-                Ok((t.chat, msgs))
+                Ok((t.chat, msgs, interrupted))
             },
             move |this, r, cx| {
                 if view != this.view {
@@ -526,11 +554,12 @@ impl Workspace {
                 this.loading_chat = false;
                 this.opening = None;
                 match r {
-                    Ok((chat, msgs)) => {
+                    Ok((chat, msgs, interrupted)) => {
                         let archived = chat.archived;
                         this.chat = Some(chat);
                         this.context = None;
                         this.msgs = msgs;
+                        this.interrupted = interrupted;
                         this.rebuild_rows();
                         this.selection = Selection::default();
                         this.notice = None;
@@ -651,14 +680,32 @@ impl Workspace {
 
     // ---------- sending and streaming ----------
     pub fn send(&mut self, text: String, _window: &mut Window, cx: &mut Context<Self>) {
+        self.send_inner(text, None, cx)
+    }
+
+    /// M5: run the interrupted task again, from its waiting message, under the
+    /// current settings. Nothing from the interrupted attempt is replayed.
+    pub fn resume_task(&mut self, cx: &mut Context<Self>) {
+        let Some(it) = self.interrupted.clone() else { return };
+        if self.chat.is_none() || !self.can_send() {
+            return;
+        }
+        logfile::event("ui.resume", &[]);
+        self.send_inner(it.text, Some(it.task_id), cx)
+    }
+
+    fn send_inner(&mut self, text: String, resume: Option<String>, cx: &mut Context<Self>) {
         if !self.can_send() || text.trim().is_empty() {
             return;
         }
+        self.interrupted = None;
         let model = self.model.clone().unwrap();
         let project_id = self.project_id.clone().unwrap_or_else(|| "prj_general".into());
         let existing = self.chat.as_ref().map(|c| c.id.clone());
         let existing_for_ui = existing.clone();
-        self.composer.update(cx, |c, cx| c.set_text("", cx));
+        if resume.is_none() {
+            self.composer.update(cx, |c, cx| c.set_text("", cx));
+        }
         self.notice = None;
         // show the message and an empty reply at once; the runtime saves both together
         let n = self.msgs.len();
@@ -712,7 +759,7 @@ impl Workspace {
                         }
                     },
                 };
-                let r = api2.chat_stream(&chat_id, &model, &text, |ev| {
+                let r = api2.chat_stream(&chat_id, &model, &text, resume.as_deref(), |ev| {
                     let _ = tx.unbounded_send(StreamMsg::Event(ev));
                     !stop.load(Ordering::SeqCst)
                 });
@@ -782,7 +829,8 @@ impl Workspace {
                                 run.run_id = ev.get("run_id").and_then(Value::as_str).map(str::to_string);
                             }
                             if let Some(m) = ev.get("model_requested").and_then(Value::as_str) {
-                                msg.meta = format!("{m} is answering…");
+                                let again = if ev.get("resume_of").map(|v| !v.is_null()).unwrap_or(false) { " again (resumed)" } else { "" };
+                                msg.meta = format!("{m} is answering{again}…");
                             }
                             let c = &ev["context"];
                             if let (Some(est), Some(win)) = (c["estimated_tokens"].as_u64(), c["window"].as_u64()) {
@@ -1567,6 +1615,23 @@ impl Workspace {
                             .child("Switch to Workspace read")
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.switch_to_workspace_read(cx))),
                     )
+                    .into_any_element(),
+            );
+        }
+        if let (Some(it), false) = (self.interrupted.clone(), archived) {
+            let can = self.can_send();
+            notices.push(
+                ui::notice(Some(ui::NoticeKind::Warn))
+                    .child(
+                        div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
+                            .child("Task interrupted: Umbrous stopped while this task was running, so its outcome is unknown. Nothing was replayed.")
+                            .child(div().text_color(text_subtle()).child(format!("Your message: “{}”", it.text.chars().take(200).collect::<String>())))
+                            .when(!it.report.is_empty(), |d| d.child(div().text_color(text_subtle()).child(it.report.clone())))
+                            .child(div().text_color(text_subtle()).child(it.note.clone())),
+                    )
+                    .when(can, |d| {
+                        d.child(ui::pill("resume-task").child("Resume").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.resume_task(cx))))
+                    })
                     .into_any_element(),
             );
         }

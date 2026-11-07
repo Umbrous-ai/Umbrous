@@ -96,6 +96,7 @@ fn snapshot(ws: &Workspace, label: &str) -> Value {
         "model": ws.model,
         "access": ws.access.as_ref().map(|a| json!({"project": a.project_id, "profile": a.workspace.as_ref().map(|w| w.profile.clone())})),
         "ask_notice": ws.asks_before_read(),
+        "interrupted": ws.interrupted.as_ref().map(|i| json!({"task": i.task_id, "text": i.text, "report": i.report})),
         "ollama": ws.models.as_ref().map(|m| json!({"reachable": m.reachable, "models": m.models.len()})),
         "perf": format!("{:?}", ws.perf),
     })
@@ -196,6 +197,11 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             window.update(cx, |ws, _, cx| ws.switch_to_workspace_read(cx)).ok();
             wait_until(cx, window, 10, "profile switched", |ws| !ws.asks_before_read()).await?;
         }
+        "resume" => {
+            // what the interrupted notice's Resume button does (M5)
+            window.update(cx, |ws, _, cx| ws.resume_task(cx)).ok();
+            wait_until(cx, window, 10, "resume started", |ws| ws.is_running()).await?;
+        }
         "stop" => {
             // what the Stop button does; records how long until the reply has ended (M4)
             let t0 = Instant::now();
@@ -226,11 +232,13 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "phase" => match &ws.phase { Phase::Ready => "ready".into(), Phase::Starting => "starting".into(), Phase::Failed(f) => f.code.clone() },
                 "sessions" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),
                 "opening" => ws.opening_title().unwrap_or_else(|| "none".into()),
+                "interrupted" => ws.interrupted.as_ref().map(|i| i.text.clone()).unwrap_or_else(|| "none".into()),
                 _ => "?".into(),
             }).map_err(|_| "window gone".to_string())?;
             let ok = match what {
                 "chat" if val != "none" => got.contains(val),
                 "last_meta" | "sessions" | "last_text" => got.contains(val),
+                "interrupted" if val != "none" => got.contains(val),
                 "no_text" | "user_meta_empty" => got == "true",
                 "last_text_len_over" => got == "true",
                 _ => got == val,

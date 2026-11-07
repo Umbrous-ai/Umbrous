@@ -30,6 +30,9 @@ pass)     printf '{"expect":"x","ok":true}\n{"record":"end"}\n' > "$OUT"
           if [ "$name" = m4-task ]; then   # play the M4 run: its records in the data folder, Stop timing
             printf '{"step":"stop","stop_to_idle_ms":%s}\n{"record":"end"}\n' "${STOP_MS:-120}" > "$OUT"
             PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-tasks "$H/umbrous.db" "${TASKS:-good}"
+          fi
+          if [ "$name" = m5-resume ]; then  # play the M5 run: interrupted, then resumed
+            PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-resume "$H/umbrous.db" "${RESUME:-good}"
           fi;;
 assert)   printf '{"expect":"x","ok":true}\n{"step":"expect y","error":"got z"}\n' > "$OUT";;
 noend)    printf '{"expect":"x","ok":true}\n' > "$OUT";;
@@ -123,8 +126,28 @@ class NativeValidationExitStatus(unittest.TestCase):
             self.assertIn(why, r.stdout, extra)
             self.assertIn("m4-task: FAIL", r.stdout, extra)
 
+    # ---- validate-m5.sh
+    def test_m5_only_a_clean_complete_run_passes(self):
+        r = self.run_script("validate-m5.sh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("m5-resume: PASS", r.stdout)
+        for mode, why in (("assert", "a step failed"), ("noend", "did not reach its end"),
+                          ("none", "no results"), ("panic", "m5-resume: the app panicked"),
+                          ("openfail", "could not be launched")):
+            r = self.run_script("validate-m5.sh", mode)
+            self.assertEqual(r.returncode, 1, (mode, r.stdout))
+            self.assertIn(why, r.stdout, mode)
+            self.assertIn("m5-resume: FAIL", r.stdout, mode)
+
+    def test_m5_checks_the_records(self):
+        for kind in ("not-recovered", "not-resumed", "pending-left", "old-receipt-only", "leak"):
+            r = self.run_script("validate-m5.sh", RESUME=kind)
+            self.assertEqual(r.returncode, 1, (kind, r.stdout + r.stderr))
+            self.assertIn("FAIL task records", r.stdout, kind)
+            self.assertIn("m5-resume: FAIL", r.stdout, kind)
+
     def test_usage_errors(self):
-        for script in ("validate-m3.sh", "validate-m4.sh", "validate-native.sh"):
+        for script in ("validate-m3.sh", "validate-m4.sh", "validate-m5.sh", "validate-native.sh"):
             self.assertEqual(self.run_script(script, args=[]).returncode, 2, script)
 
     # ---- validate-native.sh, the whole run
@@ -172,6 +195,11 @@ class NativeValidationExitStatus(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout[-2000:])
         self.assertIn("FAIL validate-m4.sh", r.stdout)
 
+    def test_native_fails_on_an_m5_failure(self):
+        r = self.run_script("validate-native.sh", "assert", bad="m5-resume")
+        self.assertEqual(r.returncode, 1, r.stdout[-2000:])
+        self.assertIn("FAIL validate-m5.sh", r.stdout)
+
     def test_every_scenario_script_ends_with_its_end_record(self):
         for f in (ROOT / "desktop" / "e2e" / "scripts").glob("*.txt"):
             lines = [l.strip() for l in f.read_text().splitlines() if l.strip() and not l.startswith("#")]
@@ -201,8 +229,60 @@ def seed_tasks(db_path: str, kind: str) -> None:
     sys.exit(0)
 
 
+def seed_resume(db_path: str, kind: str) -> None:
+    """What the M5 scenario leaves: a completed task, one recovered as
+    interrupted and resumed, and the resumed one, with four messages. Any
+    other `kind` breaks one thing for the checks to catch."""
+    import sys
+    from datetime import datetime, timedelta, timezone
+    from umbrous.history.store import HistoryStore
+    from umbrous.persistence import db
+    from umbrous.receipts.model import Receipt, new_action_id, new_task_id
+    from umbrous.receipts.store import ReceiptStore
+    from umbrous.tasks.store import TaskStore
+    db.connect(Path(db_path)).close()
+    tasks, history, receipts = TaskStore(Path(db_path)), HistoryStore(Path(db_path)), ReceiptStore(Path(db_path))
+    chat = history.create_chat("prj_general").id
+
+    def receipt(tid):
+        aid, now = new_action_id(), datetime.now(timezone.utc)
+        tasks.add_action(tid, aid, 1, "list_files", ".")
+        tasks.action_status(aid, "started")
+        receipts.add(Receipt(tid, aid, "fs.list", "project:prj_general", "allowed", now,
+                             now + timedelta(milliseconds=3)), "prj_general", chat)
+        tasks.action_status(aid, "completed", "ok")
+
+    first, cut, resumed = new_task_id(), new_task_id(), new_task_id()
+    for tid in (first, cut, resumed):
+        tasks.create(tid, "prj_general", chat, "m", {})
+        tasks.set_status(tid, "started")
+    receipt(first)
+    tasks.set_status(first, "completed")
+    history.append_exchange(chat, "What is the plan? Resume check", "Ship it.", "m", "complete", task_id=first)
+    receipt(cut)
+    if kind != "not-recovered":
+        tasks.recover_task(cut, "unknown", "interrupted")
+    if kind != "not-resumed":
+        tasks.event(cut, "task.resumed", by=resumed)
+        tasks.event(resumed, "task.resume_of", of=cut)
+    if kind != "old-receipt-only":
+        receipt(resumed)
+    tasks.artifact(resumed, "report", {"status": "completed", "resume_of": cut})
+    tasks.set_status(resumed, "completed")
+    text = "Walk through the workspace ZEBRA-CANARY-552"
+    history.append_exchange(chat, text, "Looking through the workspace, step by step.", "m", "complete",
+                            task_id=resumed)
+    if kind == "pending-left":
+        history.begin_pending(cut, chat, text, "m")
+    if kind == "leak":
+        tasks.event(resumed, "note", text=text)   # what the checks must catch
+    sys.exit(0)
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "seed-tasks":
         seed_tasks(sys.argv[2], sys.argv[3])
+    if len(sys.argv) > 1 and sys.argv[1] == "seed-resume":
+        seed_resume(sys.argv[2], sys.argv[3])
     unittest.main()

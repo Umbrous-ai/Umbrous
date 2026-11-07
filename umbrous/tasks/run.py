@@ -84,6 +84,10 @@ class TaskRun:
         self.read_ranges: Dict[str, List[Tuple[int, int]]] = {}
         self.search_lines: Dict[str, set] = {}
         self.citations_checked = 0
+        # M5: set when this task resumes an interrupted one: its id, and the
+        # hash of each file the interrupted task read (from its receipts).
+        self.resume_of: Optional[str] = None
+        self.previous_reads: Dict[str, str] = {}
         self._safe(store.create if store else None, task_id, project_id, chat_id, model, self.limits)
         self._safe(store.set_status if store else None, task_id, "started")
 
@@ -204,7 +208,24 @@ class TaskRun:
             else:
                 self.note(f"The answer cites {path}, which was not read in this task.")
 
+    def compare_with_previous(self) -> None:
+        """M5: a resumed task read the files again. Say which ones changed
+        since the interrupted attempt read them, and which did not."""
+        if not self.resume_of:
+            return
+        self.note("This task resumed an interrupted one. Its reads were repeated under the current settings, "
+                  "with new receipts; nothing from the interrupted attempt was reused.")
+        now = {e["ref"]: e.get("sha256") for e in self.evidence if e.get("kind") == "file" and e.get("sha256")}
+        for path, old in list(self.previous_reads.items())[:10]:
+            if path not in now:
+                continue
+            if now[path] != old:
+                self.note(f"{path} changed since the interrupted attempt read it.")
+            else:
+                self.note(f"{path} is unchanged since the interrupted attempt read it.")
+
     def finish(self, status: str, code: Optional[str], answer: str = "") -> dict:
+        self.compare_with_previous()
         if status == "completed":
             self.verify(answer)
         report = {
@@ -213,6 +234,8 @@ class TaskRun:
             "failures": self.failures, "uncertainty": self.uncertainty, "limits_hit": self.limits_hit,
             "limits": self.limits, "ms": self.ms(), "citations_checked": self.citations_checked,
         }
+        if self.resume_of:
+            report["resume_of"] = self.resume_of
         self._safe(self.store and self.store.artifact, self.task_id, "report", report)
         self._safe(self.store and self.store.set_status, self.task_id, status, code,
                    steps=self.step, tool_calls=self.tool_calls)

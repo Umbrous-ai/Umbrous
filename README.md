@@ -1,6 +1,6 @@
 # Umbrous
 
-A local-first agent harness. Status: **M4, durable task state: trace, limits, Stop and a report for each task** (see the milestone plan).
+A local-first agent harness. Status: **M5, recover and resume: a task cut off by a crash or restart is shown honestly and can be resumed under the current settings** (see the milestone plan).
 
 ```sh
 bin/umbrous          # start the local runtime and open the app (Python 3.9+, no dependencies)
@@ -17,6 +17,7 @@ desktop/scripts/build-native.sh   # build dist/Umbrous.app and its .dmg (docs/de
 - [docs/m2-history.md](docs/m2-history.md): saved chats and projects, archive vs delete, where copies of your chats live
 - [docs/m3-gate.md](docs/m3-gate.md): the tool gate, read-only workspace access, approvals and grants, receipts, confinement limits
 - [docs/m4-tasks.md](docs/m4-tasks.md): task state, the event log and report, limits, Stop, evidence and uncertainty, privacy of task records
+- [docs/m5-resume.md](docs/m5-resume.md): recovery after a crash, unknown vs failed, retry classes, resume under current scope, what a future write needs
 - [docs/desktop.md](docs/desktop.md): Umbrous.app for macOS (native GPUI interface, bundled Python): build, validation, measurements, limits
 - [docs/receipts.md](docs/receipts.md): receipt format and redaction rules
 - [prototypes/](prototypes/): the front-end prototype the app is built on

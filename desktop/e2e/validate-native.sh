@@ -65,6 +65,9 @@ echo "### M3: Ask before read in the app, the switch, reads (validate-m3.sh)"
 "$ROOT/desktop/e2e/validate-m3.sh" "$W" || fail "validate-m3.sh: M3 in the app failed (see above)"
 echo "### M4: a task's report, Stop during a step, a forced limit (validate-m4.sh)"
 "$ROOT/desktop/e2e/validate-m4.sh" "$W" || fail "validate-m4.sh: M4 in the app failed (see above)"
+
+echo "### M5: kill the runtime mid-task, restart, resume (validate-m5.sh)"
+"$ROOT/desktop/e2e/validate-m5.sh" "$W" || fail "validate-m5.sh: M5 in the app failed (see above)"
 echo "### a runtime started from a terminal is reported and left running"
 mkdir -p "$W/h-cli"
 PYTHONPATH="$ROOT" python3 -m umbrous --home "$W/h-cli" serve --no-open --port 0 >/dev/null 2>&1 & CLI=$!; sleep 2

@@ -683,6 +683,30 @@
     return reply;
   }
 
+  // M5: a task the runtime was stopped in the middle of (a crash, a forced
+  // quit, a restart). Its message is shown with what was recorded, and Resume
+  // runs it again under the current settings.
+  function interruptedCard(task) {
+    const t = thread();
+    const u = el('div', 'msg-u', task.resume.text);
+    u.style.marginTop = '48px';
+    const reply = el('div', 'reply interrupted');
+    reply.dataset.taskId = task.task_id;
+    const head = el('div', 'notice warn small', 'Task interrupted: Umbrous stopped while this task was running, ' +
+      'so its outcome is unknown. Nothing was replayed. ');
+    const b = el('button', 'pill retry', 'Resume');
+    b.type = 'button';
+    b.dataset.act = 'resume';
+    b.title = task.resume.message;
+    b.onclick = () => { reply.remove(); u.remove(); send(task.resume.text, task.task_id); };
+    head.appendChild(b);
+    reply.appendChild(head);
+    reply.appendChild(el('div', 'reply-meta', task.resume.message));
+    const tr = taskReport(task.report);
+    if (tr) reply.appendChild(tr);
+    t.append(u, reply);
+  }
+
   function archivedNotice() {
     const n = notice('This chat is archived. All its messages are kept and shown here read-only. Restore it to continue.', 'warn');
     n.id = 'archived-notice';
@@ -698,7 +722,7 @@
     let j;
     try { j = await getJson('/api/chats/' + encodeURIComponent(id)); } catch (e) { notice('Could not open that chat: ' + e.message, 'bad'); return; }
     const hasTasks = j.messages.some((m) => m.task_id);
-    const [receipts, tasks] = hasTasks ? await Promise.all([receiptsFor(id), tasksFor(id)]) : [[], []];
+    const [receipts, tasks] = await Promise.all([hasTasks ? receiptsFor(id) : [], tasksFor(id)]);
     if (mine !== view) return;  // another chat was opened meanwhile
     const projectChanged = projectId !== j.chat.project_id;
     chatId = j.chat.id;
@@ -719,6 +743,8 @@
         if (m.model) { const sm = $('#sess-model'); if (sm) sm.textContent = m.model; }
       }
     }
+    const waiting = tasks.filter((x) => x.resume && x.resume.possible).pop();
+    if (waiting && !chatArchived) interruptedCard(waiting);
     if (chatArchived) archivedNotice();
     setComposer();
     showSessionProject();
@@ -764,7 +790,7 @@
     $('.panel .head').appendChild(menu);
   }
 
-  async function send(q) {
+  async function send(q, resumeTask) {
     const t = thread();
     const u = el('div', 'msg-u');
     u.style.marginTop = '48px';
@@ -793,7 +819,9 @@
         if (mine !== view) return;
         chatId = j.chat.id;
       }
-      const r = await api.fetch('/api/chat', { json: { chat_id: chatId, model: selected, message: q, approvals: true }, signal: controller.signal });
+      const body = { chat_id: chatId, model: selected, approvals: true };
+      if (resumeTask) body.resume_task = resumeTask; else body.message = q;
+      const r = await api.fetch('/api/chat', { json: body, signal: controller.signal });
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
       const reader = r.body.getReader();
       const dec = new TextDecoder();
@@ -810,7 +838,7 @@
           const ev = JSON.parse(line);
           if (ev.type === 'start') {
             run.runId = ev.run_id;
-            meta.textContent = ev.model_requested + ' is answering…';
+            meta.textContent = ev.model_requested + (ev.resume_of ? ' is answering again (resumed)…' : ' is answering…');
             showContext(ev.context);
             const notes = ev.context.notices.slice();
             if (ev.tools && ev.tools.off_reason) notes.push(ev.tools.off_reason);

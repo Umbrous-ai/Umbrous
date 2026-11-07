@@ -38,9 +38,9 @@ class TaskStoreTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_schema_5_tables(self):
+    def test_schema_has_task_tables(self):
         conn = db.connect(self.path)
-        self.assertEqual(db.schema_version(conn), 5)
+        self.assertGreaterEqual(db.schema_version(conn), 5)
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         conn.close()
         self.assertTrue({"tasks", "task_actions", "task_events", "task_checkpoints", "task_artifacts"} <= names)

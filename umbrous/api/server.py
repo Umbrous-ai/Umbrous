@@ -35,6 +35,8 @@ There is deliberately no route that deletes a chat or project (docs/m2-history.m
     GET  /api/receipts?chat_id=… | task_id=…        receipts, for inspection (M3)
     GET  /api/tasks?chat_id=…                       a chat's tasks with their reports (M4)
     GET  /api/tasks/<tsk_id>                        one task: actions, event log, checkpoints, report (M4)
+                                                    and whether it can be resumed (M5: "resume")
+    POST /api/chat {chat_id, model, resume_task}    resume an interrupted task under the current settings (M5)
 """
 
 from __future__ import annotations
@@ -66,6 +68,7 @@ from umbrous.gate.gate import Gate, GateError
 from umbrous.history.store import HistoryError, HistoryStore
 from umbrous.receipts.store import ReceiptStore
 from umbrous.runloop.chat import ChatLocks, RunRegistry, run_chat
+from umbrous.tasks.recover import recover, resume_info
 from umbrous.tasks.store import TaskStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -147,6 +150,7 @@ class Runtime:
         self.chat_locks = ChatLocks()
         self.runs = RunRegistry()
         self.exposure: Optional[ExposureReport] = None
+        self.recovered: list = []      # M5: tasks closed at startup (set by make_server)
         self._ollama_cache = (0.0, None)
 
     def refresh_exposure(self) -> ExposureReport:
@@ -298,13 +302,18 @@ class Handler(BaseHTTPRequestHandler):
             if not (chat_id and CHAT_PATH.match("/api/chats/" + chat_id)):
                 self._send_json(400, {"error": "give chat_id"})
                 return 400, "bad_query"
-            self._send_json(200, {"tasks": rt.tasks.for_chat(chat_id)})
+            listed = rt.tasks.for_chat(chat_id)
+            for t in listed:     # M5: say whether an interrupted task can be resumed
+                if t["status"] == "unknown":
+                    t["resume"] = resume_info(rt.tasks, rt.history, t["task_id"])
+            self._send_json(200, {"tasks": listed})
             return 200, "tasks"
         task_id = path[len("/api/tasks/"):]
         task = rt.tasks.get(task_id) if TASK_ID_RE.match(task_id) else None
         if task is None:
             self._send_json(404, {"error": "no_such_task"})
             return 404, "no_such_task"
+        task["resume"] = resume_info(rt.tasks, rt.history, task_id, task)
         self._send_json(200, task)
         return 200, "task"
 
@@ -469,7 +478,8 @@ class Handler(BaseHTTPRequestHandler):
         rt = self.runtime
         events = run_chat(rt.config, rt.router, rt.history, rt.chat_locks, rt.runs, str(body.get("chat_id", "")),
                           str(body.get("model", "")), body.get("message"), gate=rt.gate,
-                          approvals=body.get("approvals") is True, tasks=rt.tasks)
+                          approvals=body.get("approvals") is True, tasks=rt.tasks,
+                          resume_task=body.get("resume_task") if "resume_task" in body else None)
         self.send_response(200)
         for k, v in BASE_HEADERS.items():
             self.send_header(k, v)
@@ -522,5 +532,7 @@ def make_server(config: Config, schema_version: int, launches: int,
         raise RuntimeError(f"refusing to serve on non-loopback address {bound_host}")
     policy = policy_factory(bound_port)
     runtime = Runtime(config, policy, schema_version, launches, router=router)
+    # M5: close tasks a previous run stopped in the middle of, before serving.
+    runtime.recovered = recover(runtime.tasks, runtime.receipts, runtime.history)
     server.RequestHandlerClass = type("BoundHandler", (Handler,), {"runtime": runtime})
     return server, runtime

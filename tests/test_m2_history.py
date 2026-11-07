@@ -112,7 +112,10 @@ class StoreTests(unittest.TestCase):
         self.h.append_exchange(c.id, "more", "yes", "m:1b", "complete")  # restored: can continue
 
     def test_store_has_no_delete_operation(self):
-        names = [n for n in dir(HistoryStore) if not n.startswith("__")]
+        # M5's drop_pending is the one exception, and it never touches the transcript:
+        # it removes a running task's waiting message (pending_turns), which is not a
+        # chat message. Checked in test_m5_resume (PendingTurnTests).
+        names = [n for n in dir(HistoryStore) if not n.startswith("__") and n != "drop_pending"]
         self.assertFalse([n for n in names if any(w in n.lower() for w in ("delete", "remove", "purge", "drop"))])
 
     def test_failed_exchange_writes_nothing(self):

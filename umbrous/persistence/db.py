@@ -16,6 +16,10 @@ Versions so far:
           `receipts` (one per tool attempt), and `messages.task_id`.
   5 (M4)  Durable task state: `tasks`, `task_actions`, `task_events`,
           `task_checkpoints`, `task_artifacts`. Separate from chats and memory.
+  6 (M5)  `pending_turns`: the message of a task that is still running, so a
+          crash or restart can offer to resume it. One row per running task,
+          removed when the exchange is stored or dropped, and with its task
+          when tasks are purged.
 """
 
 from __future__ import annotations
@@ -189,6 +193,20 @@ MIGRATIONS = (
         body        TEXT NOT NULL
     );
     CREATE INDEX task_artifacts_by_task ON task_artifacts (task_id);
+    """,
+    # version 6 (M5): the message of a running task, kept only until its
+    # exchange is stored (or dropped), so an interrupted task can be resumed
+    # after a crash or restart. It is chat content, written by the history
+    # store, and it goes with its task when tasks are purged.
+    """
+    CREATE TABLE pending_turns (
+        task_id     TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE,
+        chat_id     TEXT NOT NULL REFERENCES chats(id),
+        user_text   TEXT NOT NULL,
+        model       TEXT NOT NULL,
+        created_at  TEXT NOT NULL
+    );
+    CREATE INDEX pending_turns_by_chat ON pending_turns (chat_id);
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)

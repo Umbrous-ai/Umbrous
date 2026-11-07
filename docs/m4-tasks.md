@@ -42,7 +42,7 @@ line under the reply.
 task      requested ──▶ started ──▶ completed     the model answered (maybe with things not fully checked)
                             ├─────▶ failed        a model error, a timeout, the task time limit, no answer
                             └─────▶ cancelled     you pressed Stop, or the page went away
-          (unknown: kept for M5, a task found mid-run after a restart)
+          (unknown: a task found mid-run after a crash or restart, since M5: docs/m5-resume.md)
 
 action    requested ──▶ started ──▶ completed     the tool ran and returned
               │             ├─────▶ denied        refused while running (it turned out to be a link)
@@ -285,7 +285,8 @@ The tests below exist; try writing them yourself first, then compare.
 ## Not in M4
 
 - Resuming a task after a restart, or marking one `unknown` because the
-  runtime died mid-task: M5, using the checkpoints.
+  runtime died mid-task: done in M5 (docs/m5-resume.md), from the action
+  rows, events and receipts.
 - Tools that write, run or reach the network.
 - A trace view in the native app (it is in the page and the CLI).
 - A retention period: kept until purge, pending the decision.
