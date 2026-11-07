@@ -3,15 +3,20 @@
     browser page ──HTTP──▶ 127.0.0.1:<port> ──▶ Handler ──▶ evaluate() ──▶ route
                                                              (security.py)
 
-Python's standard-library `http.server` is enough for M0: two static files and
-two JSON endpoints. Nothing here is reachable from another machine because the
+Python's standard-library `http.server` is enough: a few static files and
+small JSON endpoints. Nothing here is reachable from another machine because the
 socket is bound to 127.0.0.1 only.
 
-Routes:
+Routes (everything under /api/ needs the session credential, see security.py):
     GET  /                    the prototype page (prototypes/umbrous-harness.html)
-    GET  /runtime-bridge.js   the script that connects the page to this API
+    GET  /runtime-bridge.js   connects the page to this API (M0)
+    GET  /chat.js             real chat in the page (M1)
     POST /api/session/claim   trade the one-time launch code for the session credential
     GET  /api/health          runtime status, shown in the Details panel
+    GET  /api/models          Ollama status, installed models, probe results, exposure check (M1)
+    POST /api/models/probe    run the tool-call probe on one model (M1)
+    POST /api/chat            send a message; the reply streams back as JSON lines (M1)
+    POST /api/chat/cancel     stop a reply that is streaming (M1)
 """
 
 from __future__ import annotations
@@ -32,12 +37,18 @@ from umbrous import MILESTONE, __version__
 from umbrous.api.security import CLAIM_PATH, LAUNCH_HEADER, AccessPolicy, evaluate
 from umbrous.config import Config, ensure_loopback
 from umbrous.logging_setup import log_event
+from umbrous.model.base import Deadlines
+from umbrous.model.exposure import ExposureReport, check_exposure
+from umbrous.model.ollama import OllamaAdapter
+from umbrous.model.router import ModelRouter
 from umbrous.receipts.redaction import default_redactor
+from umbrous.runloop.chat import ChatStore, RunRegistry, run_chat
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PAGE_PATH = REPO_ROOT / "prototypes" / "umbrous-harness.html"
-BRIDGE_PATH = Path(__file__).resolve().parents[1] / "web" / "runtime-bridge.js"
-MAX_BODY = 16 * 1024
+WEB_DIR = Path(__file__).resolve().parents[1] / "web"
+STATIC_FILES = {"/runtime-bridge.js": WEB_DIR / "runtime-bridge.js", "/chat.js": WEB_DIR / "chat.js"}
+MAX_BODY = 256 * 1024  # a chat message is capped at 32,000 characters (up to ~6 bytes each as JSON)
 
 log = logging.getLogger("umbrous.api")
 
@@ -77,10 +88,10 @@ def content_security_policy(html: str) -> str:
 
 
 class Runtime:
-    """State shared by request handlers. Read-only after startup, so no locking."""
+    """State shared by request handlers."""
 
     def __init__(self, config: Config, policy: AccessPolicy, schema_version: int, launches: int,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 router: Optional[ModelRouter] = None, clock: Callable[[], float] = time.monotonic) -> None:
         self.config = config
         self.policy = policy
         self.schema_version = schema_version
@@ -90,7 +101,31 @@ class Runtime:
         self.started_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         self.page = PAGE_PATH.read_bytes()
         self.page_csp = content_security_policy(self.page.decode("utf-8"))
-        self.bridge = BRIDGE_PATH.read_bytes()
+        self.static = {path: f.read_bytes() for path, f in STATIC_FILES.items()}
+        self.router = router or ModelRouter(
+            OllamaAdapter(config.ollama_url, Deadlines(first_token=config.first_token_timeout_s,
+                                                       idle=config.idle_timeout_s, total=config.total_timeout_s)),
+            config.db_path)
+        self.chats = ChatStore()
+        self.runs = RunRegistry()
+        self.exposure: Optional[ExposureReport] = None
+        self._ollama_cache = (0.0, None)
+
+    def refresh_exposure(self) -> ExposureReport:
+        self.exposure = check_exposure(self.router.adapter.port)
+        return self.exposure
+
+    def ollama_summary(self) -> dict:
+        """Cheap Ollama status for the 5-second health poll (cached 4 s)."""
+        at, cached = self._ollama_cache
+        if cached is not None and self._clock() - at < 4:
+            return cached
+        try:
+            summary = {"reachable": True, "version": self.router.adapter.version()}
+        except Exception as exc:
+            summary = {"reachable": False, "error": getattr(exc, "message", str(exc))}
+        self._ollama_cache = (self._clock(), summary)
+        return summary
 
     def health(self) -> dict:
         # Exercise from docs/m0-runtime.md: add a harmless field here and watch it appear.
@@ -103,6 +138,8 @@ class Runtime:
             "uptime_s": int(self._clock() - self._started_mono),
             "bind": f"{self.config.host}:{self.policy.port}",
             "launches": self.launches,
+            "ollama": self.ollama_summary(),
+            "ollama_exposure": self.exposure.as_dict() if self.exposure else None,
         }
 
 
@@ -161,9 +198,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             self._send(200, rt.page, "text/html; charset=utf-8", {"Content-Security-Policy": rt.page_csp})
             return 200, "page"
-        if path == "/runtime-bridge.js":
-            self._send(200, rt.bridge, "text/javascript; charset=utf-8")
-            return 200, "bridge"
+        if path in rt.static:
+            self._send(200, rt.static[path], "text/javascript; charset=utf-8")
+            return 200, "static"
         if path == CLAIM_PATH:
             token = rt.policy.claim(self.headers.get(LAUNCH_HEADER))
             if token is None:
@@ -174,8 +211,73 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health" and self.command in ("GET", "HEAD"):
             self._send_json(200, rt.health())
             return 200, "health"
+        if path == "/api/models" and self.command == "GET":
+            status = rt.router.status()
+            status["exposure"] = rt.refresh_exposure().as_dict()
+            self._send_json(200, status)
+            return 200, "models"
+        if self.command == "POST" and path in ("/api/models/probe", "/api/chat", "/api/chat/cancel"):
+            body = self._read_json()
+            if body is None:
+                self._send_json(400, {"error": "expected a JSON object with Content-Type: application/json"})
+                return 400, "bad_json"
+            if path == "/api/models/probe":
+                return self._probe(body)
+            if path == "/api/chat":
+                return self._chat(body)
+            ok = rt.runs.cancel(str(body.get("run_id", "")))
+            self._send_json(200 if ok else 404, {"cancelled": ok})
+            return (200, "cancelled") if ok else (404, "no_such_run")
         self._send_json(404, {"error": "not_found"})
         return 404, "not_found"
+
+    def _read_json(self) -> Optional[dict]:
+        """Only JSON bodies are accepted. Requiring the JSON content type also
+        means a plain HTML form on another site could never send one."""
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+            return None
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            data = json.loads(self.rfile.read(length) or b"null")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _probe(self, body: dict) -> Tuple[int, str]:
+        from umbrous.model.base import ModelError
+        try:
+            result, model = self.runtime.router.probe(str(body.get("model", "")))
+        except ModelError as exc:
+            self._send_json(409, {"error": exc.code, "message": exc.message})
+            return 409, exc.code
+        self._send_json(200, {"model": model.name, "passed": result.passed, "stage": result.stage,
+                              "detail": result.detail, "ms": result.ms})
+        log_event(log, "model.probe", model=model.name, passed=result.passed, stage=result.stage, ms=result.ms)
+        return 200, "probe_passed" if result.passed else "probe_failed"
+
+    def _chat(self, body: dict) -> Tuple[int, str]:
+        """Stream the reply as JSON lines. No Content-Length: the response ends
+        when the connection closes (HTTP/1.0), which the page treats as the end."""
+        rt = self.runtime
+        events = run_chat(rt.config, rt.router, rt.chats, rt.runs, str(body.get("chat_id", "")),
+                          str(body.get("model", "")), body.get("message"))
+        self.send_response(200)
+        for k, v in BASE_HEADERS.items():
+            self.send_header(k, v)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        last = "ok"
+        try:
+            for event in events:
+                if event["type"] == "error":
+                    last = event["code"]
+                self.wfile.write((json.dumps(event) + "\n").encode("utf-8"))
+                self.wfile.flush()
+        except OSError:  # the page closed the connection: stop the model too
+            events.close()
+            return 200, "client_gone"
+        return 200, "chat_" + last
 
     def _send(self, status: int, body: bytes, ctype: str, extra: Optional[Dict[str, str]] = None) -> None:
         self.send_response(status)
@@ -200,7 +302,8 @@ class LoopbackServer(ThreadingHTTPServer):
 
 
 def make_server(config: Config, schema_version: int, launches: int,
-                policy_factory: Callable[[int], AccessPolicy] = AccessPolicy) -> Tuple[LoopbackServer, Runtime]:
+                policy_factory: Callable[[int], AccessPolicy] = AccessPolicy,
+                router: Optional[ModelRouter] = None) -> Tuple[LoopbackServer, Runtime]:
     """Bind to 127.0.0.1 (never anything else) and build the request handler."""
     host = ensure_loopback(config.host)
     server = LoopbackServer((host, config.port), Handler, bind_and_activate=True)
@@ -209,6 +312,6 @@ def make_server(config: Config, schema_version: int, launches: int,
         server.server_close()
         raise RuntimeError(f"refusing to serve on non-loopback address {bound_host}")
     policy = policy_factory(bound_port)
-    runtime = Runtime(config, policy, schema_version, launches)
+    runtime = Runtime(config, policy, schema_version, launches, router=router)
     server.RequestHandlerClass = type("BoundHandler", (Handler,), {"runtime": runtime})
     return server, runtime

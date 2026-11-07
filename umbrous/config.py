@@ -23,7 +23,26 @@ from typing import Any, Mapping, Optional
 
 LOOPBACK_HOST = "127.0.0.1"
 DEFAULT_PORT = 8417
-_ALLOWED_KEYS = {"host", "port", "log_level", "open_browser"}
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_SYSTEM_PROMPT = (
+    "You are Umbrous, a helpful assistant running locally on the user's computer. "
+    "Answer clearly and concisely. You cannot read files or use tools yet."
+)
+_ALLOWED_KEYS = {
+    "host", "port", "log_level", "open_browser",
+    # M1: local model chat
+    "ollama_url", "system_prompt", "recent_turns", "context_tokens", "reply_tokens",
+    "first_token_timeout_s", "idle_timeout_s", "total_timeout_s",
+}
+# Integer settings: (minimum, maximum)
+_INT_RANGES = {
+    "recent_turns": (1, 500),
+    "context_tokens": (512, 1_048_576),
+    "reply_tokens": (64, 65_536),
+    "first_token_timeout_s": (1, 3600),
+    "idle_timeout_s": (1, 3600),
+    "total_timeout_s": (1, 86_400),
+}
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 
 
@@ -38,6 +57,15 @@ class Config:
     port: int = DEFAULT_PORT  # 0 lets the OS pick a free port (used by tests)
     log_level: str = "INFO"
     open_browser: bool = True
+    # M1: local model chat. See docs/m1-chat.md.
+    ollama_url: str = DEFAULT_OLLAMA_URL   # must be loopback; Umbrous never sends chats elsewhere
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    recent_turns: int = 20                 # at most this many earlier messages go to the model
+    context_tokens: int = 8192             # context window asked of the model (capped by the model's own)
+    reply_tokens: int = 1024               # part of the window kept free for the reply
+    first_token_timeout_s: int = 180       # includes loading the model into memory
+    idle_timeout_s: int = 60               # longest silence allowed mid-reply
+    total_timeout_s: int = 600             # hard limit for one reply
 
     @property
     def db_path(self) -> Path:
@@ -78,6 +106,30 @@ def ensure_loopback(host: str) -> str:
     return LOOPBACK_HOST
 
 
+def ensure_loopback_url(url: str) -> str:
+    """Ollama must be reached on this machine's loopback address over plain HTTP.
+
+    This is what "local model" means in M1: chat text never leaves the machine.
+    Hostnames (even "localhost") are refused because they can resolve elsewhere.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme != "http" or parts.username or parts.password or parts.path not in ("", "/") \
+            or parts.query or parts.fragment:
+        raise ConfigError(f"ollama_url must look like http://127.0.0.1:11434, got {url!r}")
+    try:
+        port = parts.port
+    except ValueError:
+        raise ConfigError(f"ollama_url has an invalid port: {url!r}") from None
+    host = parts.hostname or ""
+    try:
+        ensure_loopback(host)
+    except ConfigError:
+        raise ConfigError(f"ollama_url must point at 127.0.0.1 (local only), got {url!r}") from None
+    return f"http://127.0.0.1:{port or 11434}"
+
+
 def _validate(values: Mapping[str, Any]) -> dict:
     unknown = set(values) - _ALLOWED_KEYS
     if unknown:
@@ -94,6 +146,15 @@ def _validate(values: Mapping[str, Any]) -> dict:
         if level not in _LOG_LEVELS:
             raise ConfigError(f"log_level must be one of {sorted(_LOG_LEVELS)}")
         out["log_level"] = level
+    for key, (lo, hi) in _INT_RANGES.items():
+        if key in out:
+            v = out[key]
+            if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+                raise ConfigError(f"{key} must be an integer from {lo} to {hi}, got {v!r}")
+    if "ollama_url" in out:
+        out["ollama_url"] = ensure_loopback_url(str(out["ollama_url"]))
+    if "system_prompt" in out and (not isinstance(out["system_prompt"], str) or len(out["system_prompt"]) > 8000):
+        raise ConfigError("system_prompt must be text of at most 8000 characters")
     if "open_browser" in out and not isinstance(out["open_browser"], bool):
         raise ConfigError("open_browser must be true or false")
     return out

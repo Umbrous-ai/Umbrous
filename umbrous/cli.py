@@ -4,6 +4,8 @@
     bin/umbrous serve --no-open start the runtime and print the one-time URL instead
     bin/umbrous test            run the test suite
     bin/umbrous purge logs      delete the runtime's log files (asks for --yes)
+    bin/umbrous models          list installed Ollama models, probe results and the exposure check
+    bin/umbrous probe MODEL     run the tool-call probe on one model (or --all)
     bin/umbrous prototype       open the static prototype file, as before M0 (handled in bin/umbrous)
     bin/umbrous version
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
 import sys
@@ -92,6 +95,19 @@ def serve(config: Config, open_browser: bool) -> int:
         print(f"  {launch_url}")
     sys.stdout.flush()
 
+    def _check_ollama_exposure() -> None:
+        report = runtime.refresh_exposure()
+        level = logging.WARNING if report.status == "exposed" else logging.INFO
+        log_event(log, "ollama.exposure", level=level, **report.as_dict())
+        prefix = "WARNING: " if report.status == "exposed" else ""
+        print(f"{prefix}Ollama exposure check: {report.summary}. {report.limits}")
+        if report.status == "exposed":
+            print("  Anyone on those networks can use your models. Unset OLLAMA_HOST "
+                  "(launchctl unsetenv OLLAMA_HOST) and restart Ollama to keep it on loopback.")
+        sys.stdout.flush()
+
+    threading.Thread(target=_check_ollama_exposure, daemon=True).start()
+
     def _stop(signum, frame):  # Ctrl-C (SIGINT) and SIGTERM both stop cleanly
         threading.Thread(target=server.shutdown, daemon=True).start()
 
@@ -137,6 +153,54 @@ def purge_logs(config: Config, yes: bool) -> int:
 
 
 
+def models_command(config: Config, command: str, names: List[str], probe_all: bool) -> int:
+    from umbrous.model.base import Deadlines, ModelError
+    from umbrous.model.exposure import check_exposure
+    from umbrous.model.ollama import OllamaAdapter
+    from umbrous.model.router import ModelRouter
+    from umbrous.persistence import db
+
+    make_private_dir(config.home)
+    db.connect(config.db_path).close()  # make sure the schema is current
+    adapter = OllamaAdapter(config.ollama_url, Deadlines(first_token=config.first_token_timeout_s))
+    router = ModelRouter(adapter, config.db_path)
+    status = router.status()
+    if not status["reachable"]:
+        print(status["error"], file=sys.stderr)
+        return 1
+    if command == "models":
+        print(f"Ollama {status['version']} at {status['url']}")
+        report = check_exposure(adapter.port)
+        print(f"Exposure: {report.summary}. {report.limits}")
+        if report.ollama_host:
+            print(f"OLLAMA_HOST is set to {report.ollama_host!r}")
+        if not status["models"]:
+            print("No models installed. Try: ollama pull qwen2.5:3b")
+        for m in status["models"]:
+            probe = m["probe"]
+            label = ("tool calls verified" if probe and probe["passed"] else
+                     f"plain chat only ({probe['detail']})" if probe else "not probed yet")
+            ctx = f"ctx {m['context_length']}" if m["context_length"] else "ctx ?"
+            print(f"  {m['name']:<32} {m['parameter_size']:>6} {ctx:<12} {label}")
+        return 0
+    targets = [m["name"] for m in status["models"]] if probe_all else names
+    if not targets:
+        print("Name a model to probe, or use --all.", file=sys.stderr)
+        return 2
+    failed = 0
+    for name in targets:
+        print(f"Probing {name} (loading the model can take a while)…", flush=True)
+        try:
+            result, _ = router.probe(name)
+        except ModelError as exc:
+            print(f"  error: {exc.message}")
+            failed += 1
+            continue
+        print(f"  {'PASS' if result.passed else 'FAIL'} at stage '{result.stage}' in {result.ms / 1000:.1f}s: {result.detail}")
+        failed += 0 if result.passed else 1
+    return 0 if failed == 0 else 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="umbrous", description="Umbrous local agent harness runtime")
     parser.add_argument("--home", type=Path, help="data directory (default: ~/Library/Application Support/Umbrous)")
@@ -150,6 +214,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_purge.add_argument("what", choices=["logs"], help="what to purge (receipts arrive in M3)")
     p_purge.add_argument("--yes", action="store_true", help="really delete")
     sub.add_parser("version")
+    sub.add_parser("models", help="list Ollama models, probe results and the exposure check")
+    p_probe = sub.add_parser("probe", help="run the tool-call probe")
+    p_probe.add_argument("model", nargs="*", help="model name(s)")
+    p_probe.add_argument("--all", action="store_true", help="probe every installed model")
 
     args = parser.parse_args(argv)
     command = args.command or "serve"
@@ -170,5 +238,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if command == "purge":
         return purge_logs(config, args.yes)
+    if command in ("models", "probe"):
+        return models_command(config, command, getattr(args, "model", []), getattr(args, "all", False))
     open_browser = config.open_browser and not (args.command == "serve" and args.no_open)
     return serve(config, open_browser)

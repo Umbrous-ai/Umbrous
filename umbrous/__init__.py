@@ -5,5 +5,5 @@ prototype page on loopback, protects its small local API, and lays out the
 modules later milestones fill in. See docs/m0-runtime.md.
 """
 
-__version__ = "0.0.1"
-MILESTONE = "M0"
+__version__ = "0.1.0"
+MILESTONE = "M1"

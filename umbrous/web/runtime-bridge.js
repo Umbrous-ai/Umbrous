@@ -9,6 +9,9 @@
 //    It is sent as X-Umbrous-Token on every API call.
 // 4. Every 5 s it calls GET /api/health and fills in the Details panel's
 //    Runtime section. Values are written with textContent, never as HTML.
+// 5. (M1) Other scripts on the page (chat.js) call the API through
+//    window.umbrousApi.fetch(), which adds the credential itself. The
+//    credential is never handed out, only used.
 (() => {
   'use strict';
   const POLL_MS = 5000;
@@ -60,11 +63,33 @@
       set('rt-schema', 'v' + h.schema_version);
       set('rt-uptime', uptime(h.uptime_s));
       set('rt-bind', h.bind);
+      if (h.ollama) set('rt-ollama', h.ollama.reachable ? 'Running · ' + h.ollama.version : 'Not running');
+      const ex = h.ollama_exposure;
+      if (ex) {
+        set('rt-exposure', ex.status === 'exposed' ? 'EXPOSED on network' : ex.status === 'loopback_only' ? 'Loopback only' : 'n/a');
+        const row = $('rt-exposure-row');
+        if (row) { row.title = ex.summary + '. ' + ex.limits; row.dataset.state = ex.status; }
+      }
       return true;
     } catch (_) {
       status('bad', 'Unreachable', 'The runtime is not answering. Is bin/umbrous still running?');
       return true; // keep trying: it may come back
     }
+  }
+
+  function exposeApi(token) {
+    const api = Object.freeze({
+      fetch(path, opts = {}) {
+        if (typeof path !== 'string' || !path.startsWith('/api/')) throw new Error('only /api/ paths');
+        const headers = { 'X-Umbrous-Token': token };
+        let body;
+        if (opts.json !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(opts.json); }
+        return fetch(path, { method: opts.method || (body ? 'POST' : 'GET'), headers, body,
+          signal: opts.signal, cache: 'no-store', credentials: 'omit' });
+      },
+    });
+    Object.defineProperty(window, 'umbrousApi', { value: api, writable: false, configurable: false });
+    document.dispatchEvent(new Event('umbrous:connected'));
   }
 
   async function start() {
@@ -74,6 +99,7 @@
       return;
     }
     if (!(await poll(token))) return;
+    exposeApi(token);
     const timer = setInterval(async () => { if (!(await poll(token))) clearInterval(timer); }, POLL_MS);
   }
 

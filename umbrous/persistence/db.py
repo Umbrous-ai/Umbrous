@@ -8,9 +8,10 @@ Rules for later milestones:
 - Never edit a migration that has shipped; append a new one.
 - A database newer than this code is refused rather than guessed at.
 
-M0's schema is deliberately tiny: a key/value `meta` table and a `launches`
-table that records each start and stop of the runtime. Chats arrive in M2,
-receipts in M3, task state in M4.
+Versions so far:
+  1 (M0)  `meta` key/value table and `launches`, one row per start and stop.
+  2 (M1)  `model_probes`, the result of the tool-call probe per model digest.
+Chats arrive in M2, receipts in M3, task state in M4.
 """
 
 from __future__ import annotations
@@ -35,6 +36,20 @@ MIGRATIONS = (
         version    TEXT NOT NULL
     );
     INSERT INTO meta (key, value) VALUES ('created_at', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    """,
+    # version 2 (M1): results of the tool-call probe, one row per model digest.
+    # A re-pulled model has a new digest, so it must pass the probe again.
+    """
+    CREATE TABLE model_probes (
+        model      TEXT NOT NULL,
+        digest     TEXT NOT NULL,
+        passed     INTEGER NOT NULL CHECK (passed IN (0, 1)),
+        stage      TEXT NOT NULL,
+        detail     TEXT NOT NULL,
+        ms         INTEGER NOT NULL,
+        probed_at  TEXT NOT NULL,
+        PRIMARY KEY (model, digest)
+    );
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -101,3 +116,18 @@ def launch_count(conn: sqlite3.Connection) -> int:
 def get_meta(conn: sqlite3.Connection, key: str) -> Optional[str]:
     row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     return row[0] if row else None
+
+
+def save_probe(conn: sqlite3.Connection, model: str, digest: str, passed: bool, stage: str, detail: str, ms: int) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO model_probes (model, digest, passed, stage, detail, ms, probed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (model, digest, 1 if passed else 0, stage, detail[:500], ms, _now()),
+    )
+
+
+def load_probes(conn: sqlite3.Connection) -> dict:
+    """{(model, digest): {...}} for every stored probe result."""
+    rows = conn.execute("SELECT model, digest, passed, stage, detail, ms, probed_at FROM model_probes").fetchall()
+    return {(r[0], r[1]): {"passed": bool(r[2]), "stage": r[3], "detail": r[4], "ms": r[5], "probed_at": r[6]}
+            for r in rows}

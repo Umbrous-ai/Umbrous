@@ -2,6 +2,7 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Umbrous · Option B</title>
 <script src="/runtime-bridge.js" defer></script><!-- M0: connects to the local runtime; harmless when opened as a file -->
+<script src="/chat.js" defer></script><!-- M1: real chat with a local Ollama model once connected -->
 <style>
 :root{
   /* Type: SF Pro, 400 + 500 only */
@@ -108,6 +109,28 @@ textarea:focus-visible,input:focus-visible{outline:none}
 .kv .v{color:var(--text-strong);display:flex;align-items:center;gap:6px}
 .kv .dot{background:var(--success)}
 .kv .dot[data-state=off]{background:var(--text-subtle)}.kv .dot[data-state=bad]{background:var(--danger)}
+/* M1: real chat */
+.kv[data-state=exposed] .v{color:var(--danger)}
+.answer.plain{white-space:pre-wrap;overflow-wrap:anywhere}
+.answer a.ext{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.reply{margin-bottom:var(--sp-16)}
+.reply-meta{font-size:var(--fs-12);color:var(--text-subtle);margin:var(--sp-8) 0 0}
+.reply-meta.warn,.notice.warn{color:var(--warning)}.reply-meta.bad,.notice.bad{color:var(--danger)}
+.notice{font-size:var(--fs-13);color:var(--text-subtle);border:1px solid var(--border);border-radius:var(--r-8);padding:8px 12px;margin:var(--sp-16) 0;display:flex;align-items:center;gap:12px}
+.notice[hidden]{display:none}
+.notice.small{font-size:var(--fs-12);padding:4px 10px;margin:0 0 var(--sp-12)}
+.notice .retry{margin-left:auto}
+.bar{position:relative}
+.model-menu{position:absolute;bottom:36px;left:32px;z-index:5;width:380px;max-height:360px;overflow:auto;background:var(--bg-raised);border:1px solid var(--border-strong);border-radius:var(--r-12);padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.mm-row{display:flex;align-items:center;gap:6px;border-radius:var(--r-8)}
+.mm-row:hover,.mm-row.on{background:var(--bg-selected)}
+.mm-pick{flex:1;display:flex;flex-direction:column;align-items:flex-start;padding:6px 8px;text-align:left;min-width:0}
+.mm-name{color:var(--text-strong);font-size:var(--fs-13)}
+.mm-sub{color:var(--text-subtle);font-size:var(--fs-12)}
+.mm-check{font-size:var(--fs-12);color:var(--text-default);border:1px solid var(--border);border-radius:var(--r-full);padding:2px 8px;margin-right:6px;white-space:nowrap}
+.mm-check:hover{color:var(--text-strong)}
+.mm-empty,.mm-foot{font-size:var(--fs-12);color:var(--text-subtle);padding:8px}
+.mm-foot{border-top:1px solid var(--border);margin-top:4px}
 .row{display:flex;align-items:center;gap:10px;height:32px;padding:0 8px;margin:0 -8px;border-radius:var(--r-6);font-size:var(--fs-13);color:var(--text-default)}
 .row:hover{background:var(--bg-hover)}
 .row .i{color:var(--text-subtle)}
@@ -273,7 +296,7 @@ h3{font-size:var(--fs-16);font-weight:var(--fw-medium);color:var(--text-strong);
         <textarea id="input" rows="2" placeholder="Ask a follow-up…"></textarea>
         <div class="bar">
           <button type="button" class="icon-btn" title="Attach"><svg class="i"><use href="#clip"/></svg></button>
-          <button type="button" class="pill"><svg class="i"><use href="#cpu"/></svg>umbra-large<svg class="i"><use href="#chevron-down"/></svg></button>
+          <button type="button" class="pill" id="model-pill"><svg class="i"><use href="#cpu"/></svg><span id="model-pill-name">umbra-large</span><svg class="i"><use href="#chevron-down"/></svg></button>
           <button type="button" class="pill"><svg class="i"><use href="#sliders"/></svg>Tools · 4</button>
           <button class="send" id="send" disabled title="Send"><svg class="i"><use href="#arrow-up"/></svg></button>
         </div>
@@ -291,13 +314,15 @@ h3{font-size:var(--fs-16);font-weight:var(--fw-medium);color:var(--text-strong);
         <div class="kv"><span class="k">Schema</span><span class="v" id="rt-schema">–</span></div>
         <div class="kv"><span class="k">Uptime</span><span class="v" id="rt-uptime">–</span></div>
         <div class="kv"><span class="k">Address</span><span class="v" id="rt-bind">–</span></div>
+        <div class="kv"><span class="k">Ollama</span><span class="v" id="rt-ollama">–</span></div>
+        <div class="kv" id="rt-exposure-row"><span class="k">Exposure</span><span class="v" id="rt-exposure">–</span></div>
       </div>
       <div class="rsec">
         <h4>Session</h4>
-        <div class="kv"><span class="k">Model</span><span class="v">umbra-large</span></div>
+        <div class="kv"><span class="k">Model</span><span class="v" id="sess-model">umbra-large</span></div>
         <div class="kv"><span class="k">Runs on</span><span class="v"><span class="dot"></span>Local</span></div>
         <div class="kv"><span class="k">Project</span><span class="v"><svg class="i"><use href="#folder"/></svg>Eval harness</span></div>
-        <div class="kv" style="height:auto;padding-top:6px;display:block"><div style="display:flex;justify-content:space-between;font-size:var(--fs-12);color:var(--text-subtle)"><span>Context</span><span>48k / 128k</span></div><div class="ctx"><i></i></div></div>
+        <div class="kv" id="ctx-row" style="height:auto;padding-top:6px;display:block"><div style="display:flex;justify-content:space-between;font-size:var(--fs-12);color:var(--text-subtle)"><span>Context</span><span id="ctx-label">48k / 128k</span></div><div class="ctx"><i id="ctx-bar"></i></div></div>
       </div>
       <div class="rsec">
         <h4>Tools</h4>

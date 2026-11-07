@@ -56,8 +56,8 @@ class LocalApiTests(unittest.TestCase):
         status, body = self.rt.json("GET", "/api/health", token=self.token, headers={"Origin": self.rt.origin})
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ok")
-        self.assertEqual(body["milestone"], "M0")
-        self.assertEqual(body["schema_version"], 1)
+        self.assertEqual(body["milestone"], "M1")
+        self.assertEqual(body["schema_version"], 2)
         self.assertEqual(body["bind"], self.rt.host)
         self.assertGreaterEqual(body["launches"], 1)
 
@@ -116,7 +116,7 @@ class LocalApiTests(unittest.TestCase):
                 self.assertEqual(self.rt.request("GET", path)[0], 404)
 
     def test_oversized_body_is_refused(self):
-        status, _, _ = self.rt.request("POST", CLAIM_PATH, body=b"x" * 20000)
+        status, _, _ = self.rt.request("POST", CLAIM_PATH, body=b"x" * 300_000)
         self.assertEqual(status, 413)
 
     def test_write_methods_on_page_are_refused(self):

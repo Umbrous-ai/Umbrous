@@ -20,11 +20,14 @@ from umbrous.receipts.redaction import default_redactor
 class RunningRuntime:
     """Context manager: starts the runtime exactly as `serve` does, minus the browser."""
 
+    def __init__(self, **overrides) -> None:
+        self.overrides = overrides
+
     def __enter__(self) -> "RunningRuntime":
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name) / "home"
         make_private_dir(self.home)
-        self.config = load_config(self.home, {"port": 0})
+        self.config = load_config(self.home, {"port": 0, **self.overrides})
         self.log_stream = io.StringIO()
         setup_logging(self.config, stream=self.log_stream)
         self.conn = db.connect(self.config.db_path)
@@ -65,6 +68,18 @@ class RunningRuntime:
             return r.status, {k.lower(): v for k, v in r.getheaders()}, r.read()
         finally:
             conn.close()
+
+    def post_json(self, path: str, obj: dict, token: Optional[str] = None,
+                  headers: Optional[Dict[str, str]] = None) -> Tuple[int, Dict[str, str], bytes]:
+        h = {"Content-Type": "application/json", "Origin": self.origin, **(headers or {})}
+        return self.request("POST", path, headers=h, body=json.dumps(obj).encode(),
+                            token=token or self.policy.session_token)
+
+    def chat(self, chat_id: str, model: str, message: str) -> list:
+        """Send a chat message and return the streamed events."""
+        status, _, body = self.post_json("/api/chat", {"chat_id": chat_id, "model": model, "message": message})
+        assert status == 200, status
+        return [json.loads(line) for line in body.decode().splitlines() if line.strip()]
 
     def json(self, *args, **kwargs) -> Tuple[int, dict]:
         status, _, body = self.request(*args, **kwargs)
