@@ -1623,11 +1623,11 @@ impl Workspace {
             notices.push(
                 ui::notice(Some(ui::NoticeKind::Warn))
                     .child(
-                        div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
-                            .child("Task interrupted: Umbrous stopped while this task was running, so its outcome is unknown. Nothing was replayed.")
-                            .child(div().text_color(text_subtle()).child(format!("Your message: “{}”", it.text.chars().take(200).collect::<String>())))
-                            .when(!it.report.is_empty(), |d| d.child(div().text_color(text_subtle()).child(it.report.clone())))
-                            .child(div().text_color(text_subtle()).child(it.note.clone())),
+                        div().flex_1().min_w_0()
+                            .child(div().child("Task interrupted: Umbrous stopped while this task was running, so its outcome is unknown. Nothing was replayed."))
+                            .child(div().mt(px(4.)).text_color(text_subtle()).child(format!("Your message: “{}”", it.text.chars().take(200).collect::<String>())))
+                            .when(!it.report.is_empty(), |d| d.child(div().mt(px(4.)).text_color(text_subtle()).child(it.report.clone())))
+                            .child(div().mt(px(4.)).text_color(text_subtle()).child(it.note.clone())),
                     )
                     .when(can, |d| {
                         d.child(ui::pill("resume-task").child("Resume").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.resume_task(cx))))
@@ -1651,22 +1651,26 @@ impl Workspace {
             );
         }
         let notice_col = |notices: Vec<AnyElement>, top: f32| {
+            // block layout, not a centring flex row: a flex row measured the notices' text
+            // without a definite width (one line per text), so a wrapping notice was given
+            // too little height and ran on under the composer
             div()
                 .w_full()
-                .flex()
-                .justify_center()
                 .px(px(SP_32))
                 .pt(px(top))
-                .child(div().w_full().max_w(px(696.)).flex().flex_col().gap(px(SP_16)).children(notices))
+                .child(div().w_full().max_w(px(696.)).mx_auto().flex().flex_col().gap(px(SP_16)).children(notices))
         };
         if self.msgs.is_empty() {
             return div().flex_1().min_h_0().child(notice_col(notices, SP_48)).into_any_element();
         }
         let host = cx.entity();
         let state = self.list.clone();
+        // w_full: with an auto width here the notices' text was measured without a
+        // definite width (one line per text), so a wrapping notice got too little height
         div()
             .flex_1()
             .min_h_0()
+            .w_full()
             .flex()
             .flex_col()
             .child(
