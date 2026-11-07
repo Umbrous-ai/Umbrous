@@ -3,4 +3,5 @@ wait_models
 sleep 500
 record state
 screenshot @OUT@/@NAME@.png
+record end
 quit

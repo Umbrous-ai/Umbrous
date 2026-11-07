@@ -10,7 +10,7 @@ set -u
 [ $# -eq 1 ] && [ -n "$1" ] || { echo "usage: $0 WORKDIR" >&2; exit 2; }
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 STATUS=0
-fail() { echo "FAIL: $*"; STATUS=1; }
+. "$ROOT/desktop/e2e/lib.sh"   # fail, alive, wait_gone, check_clean, check_results, e2e
 FAKE=""
 cleanup() { [ -n "$FAKE" ] && kill "$FAKE" 2>/dev/null; }
 trap cleanup EXIT
@@ -29,24 +29,9 @@ mkdir -p "$H" && echo "{\"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/confi
 U() { PYTHONPATH="$ROOT" python3 -m umbrous --home "$H" "$@"; }
 U probe workspace-reader:3b >/dev/null || abort "tool check on the fake model"
 U workspace General "$WS" --profile ask_before_read >/dev/null || abort "could not attach the workspace"
-sed -e "s|@OUT@|$W|g" "$ROOT/desktop/e2e/scripts/m3-access.txt" > "$W/m3-access.txt" || abort "could not write the e2e script"
-
-open -n -W --env UMBROUS_HOME="$H" --env UMBROUS_E2E_SCRIPT="$W/m3-access.txt" --env UMBROUS_E2E_OUT="$W/m3-access.jsonl" "$E2E" \
-  || fail "the app could not be opened"
+S="$ROOT/desktop/e2e/scripts"
+e2e m3-access m3-access.txt "$H"
 cleanup; FAKE=""
-
-OUT="$W/m3-access.jsonl"
-echo "== m3-access"; cut -c1-500 "$OUT" 2>/dev/null
-if [ ! -s "$OUT" ]; then
-  fail "m3-access wrote no results"
-else
-  grep -q '"error"' "$OUT" && fail "m3-access assertions failed"
-  if [ "$(tail -1 "$OUT" | grep -c '"record":"end"')" = 1 ]; then
-    echo "ok   m3-access reached its end: $(grep -c '"ok":true' "$OUT") assertions passed"
-  else
-    fail "m3-access did not reach its end"
-  fi
-fi
 grep -h '"app.panic"' "$H/logs/desktop.log" 2>/dev/null && fail "the app panicked"
 echo "receipts:"; U receipts --last 10
 echo "profile now: $(U workspace General)"

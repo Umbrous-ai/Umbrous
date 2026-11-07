@@ -12,4 +12,5 @@ open_chat roses
 archive
 sleep 600
 record run1_end
+record end
 quit

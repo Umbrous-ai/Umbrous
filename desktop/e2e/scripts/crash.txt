@@ -7,4 +7,5 @@ screenshot @OUT@/crash.png
 retry
 wait_ready 30
 record restarted
+record end
 quit

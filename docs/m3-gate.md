@@ -213,11 +213,27 @@ throwaway data folder, the M3 fixture and a fake Ollama. The script
    `../outside/secret.txt`, `link.txt` and `notes/.ENV` is still refused, and no
    secret appears.
 
-At the end it lists the receipts. It exits 0 only when setup worked, every
-assertion passed, the script reached its end and the app didn't panic.
-`validate-native.sh` passes that failure on and exits nonzero if any of its
-own checks printed FAIL. `tests/test_validate_scripts.py` checks both on any
-platform, using stand-ins for `open` and `ditto`.
+At the end it lists the receipts.
+
+Both validation scripts run each scenario through `desktop/e2e/lib.sh`. A
+scenario passes only when all of these hold:
+
+- the app launched (`open` succeeded);
+- it wrote results;
+- no step failed;
+- the last line is the `record end` that every scenario script writes just
+  before `quit`;
+- the app exited and cleaned up.
+
+`validate-m3.sh` exits 1 on any failure, including setup failures (it then
+stops before running the app). `validate-native.sh` exits 1 if any check
+printed FAIL, including a failure in `validate-m3.sh`. Both exit 2 for a usage
+error.
+
+`tests/test_validate_scripts.py` runs both scripts for real, with stand-ins for
+`open`, `ditto`, `hdiutil`, `osascript`, `pgrep` and `sleep`, so it works on any
+platform. It covers a clean run and every kind of scenario failure, among them
+a failed launch that leaves no results.
 
 The native approval cards, Access view and Sources are the next step.
 
