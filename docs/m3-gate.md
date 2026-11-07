@@ -223,6 +223,7 @@ scenario passes only when all of these hold:
 - no step failed;
 - the last line is the `record end` that every scenario script writes just
   before `quit`;
+- the app logged no panic while the scenario ran;
 - the app exited and cleaned up.
 
 `validate-m3.sh` exits 1 on any failure, including setup failures (it then
@@ -233,7 +234,7 @@ error.
 `tests/test_validate_scripts.py` runs both scripts for real, with stand-ins for
 `open`, `ditto`, `hdiutil`, `osascript`, `pgrep` and `sleep`, so it works on any
 platform. It covers a clean run and every kind of scenario failure, among them
-a failed launch that leaves no results.
+a failed launch that leaves no results, and a panic in each of the last scenarios.
 
 The native approval cards, Access view and Sources are the next step.
 

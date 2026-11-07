@@ -32,7 +32,6 @@ U workspace General "$WS" --profile ask_before_read >/dev/null || abort "could n
 S="$ROOT/desktop/e2e/scripts"
 e2e m3-access m3-access.txt "$H"
 cleanup; FAKE=""
-grep -h '"app.panic"' "$H/logs/desktop.log" 2>/dev/null && fail "the app panicked"
 echo "receipts:"; U receipts --last 10
 echo "profile now: $(U workspace General)"
 [ $STATUS -eq 0 ] && echo "m3-access: PASS" || echo "m3-access: FAIL"

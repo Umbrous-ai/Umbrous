@@ -61,7 +61,6 @@ python3 "$ROOT/desktop/e2e/stress.py" seed-reference "$W/h-nav" >/dev/null
 echo '{"ollama_url": "http://127.0.0.1:18558"}' > "$W/h-nav/config.json"
 e2e nav-stream nav-stream.txt "$W/h-nav"; kill $FAKE
 if grep -q '"error"' "$W"/*.jsonl 2>/dev/null; then fail "e2e assertions failed:"; grep -h '"error"' "$W"/*.jsonl; fi
-grep -h '"app.panic"' "$W"/h-*/logs/desktop.log && fail "the app panicked" || echo "ok   no panics logged"
 echo "### M3: Ask before read in the app, the switch, reads (validate-m3.sh)"
 "$ROOT/desktop/e2e/validate-m3.sh" "$W" || fail "validate-m3.sh: M3 in the app failed (see above)"
 echo "### a runtime started from a terminal is reported and left running"
@@ -75,5 +74,7 @@ kill -0 $CLI 2>/dev/null && kill -TERM $CLI 2>/dev/null; wait $CLI 2>/dev/null
 mkdir -p "$W/h-badconfig"; echo '{"host": "0.0.0.0"}' > "$W/h-badconfig/config.json"
 e2e bad-config failure.txt "$W/h-badconfig"
 if grep -q '"error"' "$W"/*.jsonl 2>/dev/null; then fail "e2e assertions failed in: $(grep -l '"error"' "$W"/*.jsonl | tr '\n' ' ')"; fi
+# and once more over every data folder, after the last scenario (also catches the release-build launches)
+grep -h '"app.panic"' "$W"/h-*/logs/desktop.log 2>/dev/null && fail "the app panicked (see above)" || echo "ok   no panics logged in any scenario"
 [ $STATUS -eq 0 ] && echo "validate-native: PASS" || echo "validate-native: FAIL"
 exit $STATUS

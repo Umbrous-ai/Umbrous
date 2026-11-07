@@ -80,7 +80,7 @@ class NativeValidationExitStatus(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("m3-access: PASS", r.stdout)
         for mode, why in (("assert", "a step failed"), ("noend", "did not reach its end"),
-                          ("none", "no results"), ("panic", "the app panicked"),
+                          ("none", "no results"), ("panic", "m3-access: the app panicked"),
                           ("openfail", "could not be launched")):
             r = self.run_script("validate-m3.sh", mode)
             self.assertEqual(r.returncode, 1, (mode, r.stdout))
@@ -124,6 +124,15 @@ class NativeValidationExitStatus(unittest.TestCase):
                 self.assertIn(f"FAIL {scenario}: {why}", r.stdout, (mode, scenario))
                 self.assertNotIn(f"ok   {scenario}: reached its end", r.stdout, (mode, scenario))
                 self.assertIn("validate-native: FAIL", r.stdout, (mode, scenario))
+
+    def test_native_panic_in_any_scenario_fails(self):
+        # the reviewer's case: the panic check ran before the last two scenarios
+        for scenario in ("persist-2", "nav-stream", "already-running", "bad-config"):
+            r = self.run_script("validate-native.sh", "panic", bad=scenario)
+            self.assertEqual(r.returncode, 1, (scenario, r.stdout[-2000:]))
+            self.assertIn(f"FAIL {scenario}: the app panicked", r.stdout, scenario)
+            self.assertNotIn(f"ok   {scenario}: no panic logged", r.stdout, scenario)
+            self.assertIn("validate-native: FAIL", r.stdout, scenario)
 
     def test_native_passes_on_an_m3_failure(self):
         r = self.run_script("validate-native.sh", "noend", bad="m3-access")
