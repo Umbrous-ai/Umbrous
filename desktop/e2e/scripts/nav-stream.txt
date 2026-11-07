@@ -55,5 +55,35 @@ archive
 sleep 800
 expect last_meta Stopped
 expect running false
+# 8. A -> B -> A: back to the chat on screen before B has loaded; A must win
+open_chat Draft the 0.4
+expect chat Draft the 0.4
+open_chat_nowait Fix tool router
+open_chat_nowait Draft the 0.4
+sleep 1000
+expect chat Draft the 0.4
+expect messages 2
+expect opening none
+# 9. A -> B -> A from a new chat (nothing on screen yet)
+new_chat
+open_chat_nowait Draft the 0.4
+open_chat_nowait Fix tool router
+open_chat_nowait Draft the 0.4
+sleep 1000
+expect chat Draft the 0.4
+expect opening none
+# 10. A -> B -> A while A's reply streams: back on A, the stopped reply is there
+open_chat Design a tool
+sleep 300
+send Another chapter
+wait_streaming
+open_chat_nowait Fix tool router
+open_chat_nowait Design a tool
+sleep 2000
+expect chat Design a tool
+expect running false
+expect messages 4
+expect last_meta Stopped
+expect opening none
 record end
 quit

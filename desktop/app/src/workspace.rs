@@ -444,8 +444,12 @@ impl Workspace {
     }
 
     fn open_chat_inner(&mut self, id: String, force: bool, cx: &mut Context<Self>) {
-        let showing = self.chat.as_ref().map(|c| c.id == id).unwrap_or(false) && self.run.is_none();
-        if !force && (showing || self.opening.as_deref() == Some(id.as_str())) {
+        // A → B → A: while B is loading, A is still on screen but no longer what
+        // you asked for, so clicking A again must open A (and cancel B).
+        let showing = self.opening.is_none() && self.run.is_none()
+            && self.chat.as_ref().map(|c| c.id == id).unwrap_or(false);
+        let already_opening = self.opening.as_deref() == Some(id.as_str());
+        if !force && (showing || already_opening) {
             return;
         }
         let view = self.begin_view(cx);
@@ -855,6 +859,13 @@ impl Workspace {
             // you came back to that chat while its stopped reply was being saved
             self.open_chat_inner(showing.unwrap(), true, cx);
         }
+    }
+
+    /// Title of the chat a pending open is for (e2e checks that nothing is left loading).
+    #[cfg(feature = "e2e")]
+    pub fn opening_title(&self) -> Option<String> {
+        let id = self.opening.as_ref()?;
+        Some(self.chats.iter().chain(self.archived.iter()).find(|c| &c.id == id).map(|c| c.title.clone()).unwrap_or_else(|| id.clone()))
     }
 
     #[cfg(feature = "e2e")]

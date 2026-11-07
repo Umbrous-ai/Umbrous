@@ -191,7 +191,9 @@ and is dropped if you have moved on. Leaving a chat while its reply streams
 detaches the reply: the app stops reading it, the runtime stops the model and
 saves what arrived as "stopped", and the lists refresh when it is saved (the
 transcript too, if you went back to that chat). Lists and model checks keep a
-request number, so an older response never overwrites a newer one.
+request number, so an older response never overwrites a newer one. Going back to
+the chat still on screen while another one loads (A → B → A) cancels that load
+and keeps A: "already showing" only counts when nothing else is loading.
 
 Before this, a reply's late updates were applied to whatever transcript was on
 screen: into another chat's last message, or, in an empty new chat, an
@@ -267,7 +269,7 @@ Run on a MacBook Pro (Apple Silicon, macOS 26.6.2, 120 Hz display), Ollama
 | App force-killed | Runtime exited on its own within 0.4 s |
 | Ollama not running | Pill "Ollama not running", notice with Retry, Send disabled |
 | No models installed | Pill "No models installed", menu tells you `ollama pull`, Send disabled |
-| Leave a streaming reply (regression, `nav-stream.txt`) | 7 scenarios with a slow fake model, 15 assertions: New chat, another chat, another project, archive while streaming; a chat clicked then abandoned; two quick clicks. All pass, no panic logged. The previous build crashed on the first scenario (`panicked at src/workspace.rs:613`, SIGABRT) |
+| Leave a streaming reply (regression, `nav-stream.txt`) | 10 scenarios with a slow fake model, 26 assertions: New chat, another chat, another project, archive while streaming; a chat clicked then abandoned; two quick clicks; A → B → A from a chat on screen, from a new chat, and while A's reply streams. All pass, no panic logged. The build before the first fix crashed on scenario 1 (`panicked at src/workspace.rs:613`, SIGABRT); the build before the A → B → A fix showed B in scenario 8 |
 | Already running, after the startup deadline (regression, `already-running.txt`) | Still "already running" after 50 s (previously replaced by "took too long to start" at 45 s); the terminal runtime kept running |
 | Bad config (`host: 0.0.0.0`) | Error screen "Umbrous settings are invalid", no runtime left |
 | Already running from a terminal | With your real `bin/umbrous` (pid 89154) on your real data: "Umbrous is already running … started from a terminal"; that runtime kept running and `umbrous.db` was unchanged (checksum) |

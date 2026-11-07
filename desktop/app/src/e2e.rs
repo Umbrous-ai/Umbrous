@@ -190,6 +190,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "last_text_len_over" => (ws.msgs.last().map(|m| m.text.len()).unwrap_or(0) > val.parse::<usize>().unwrap_or(0)).to_string(),
                 "phase" => match &ws.phase { Phase::Ready => "ready".into(), Phase::Starting => "starting".into(), Phase::Failed(f) => f.code.clone() },
                 "sessions" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),
+                "opening" => ws.opening_title().unwrap_or_else(|| "none".into()),
                 _ => "?".into(),
             }).map_err(|_| "window gone".to_string())?;
             let ok = match what {
