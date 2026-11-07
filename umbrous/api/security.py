@@ -99,6 +99,21 @@ class AccessPolicy:
             self._launch_used = True
             return self.session_token
 
+    def reissue_launch_code(self, launch_ttl: float = LAUNCH_CODE_TTL) -> str:
+        """Make a fresh one-time launch code (desktop app only, see umbrous/desktop.py).
+
+        The desktop shell asks for one when its window has to load the page
+        again (a reload, or the web view's process restarted). It grants the
+        same session credential as the first code, and the old code stops
+        working. Only the process that started the runtime can ask: the
+        request arrives on the runtime's stdin pipe, never over HTTP.
+        """
+        with self._lock:
+            self.launch_code = new_secret()
+            self._launch_expires = self._clock() + launch_ttl
+            self._launch_used = False
+            return self.launch_code
+
     def launch_code_available(self) -> bool:
         with self._lock:
             return not self._launch_used and self._clock() <= self._launch_expires
