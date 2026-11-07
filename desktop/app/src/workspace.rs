@@ -1055,20 +1055,22 @@ impl Workspace {
                 StreamMsg::Ended(err) => {
                     ended = true;
                     let Some(msg) = self.msgs.get_mut(ix) else { return };
+                    let ended_early = msg.meta.ends_with('…');
                     if let Some(e) = err {
-                        if msg.meta.ends_with('…') {
+                        if ended_early {
                             msg.meta = e.message;
                             msg.meta_kind = MetaKind::Bad;
                         }
-                    } else if msg.meta.ends_with('…') {
+                    } else if ended_early {
                         msg.meta = "Stopped.".into();
                         msg.meta_kind = MetaKind::Warn;
-                        // the runtime keeps text that had arrived, with its memory ids
-                        if !msg.text.trim().is_empty() {
-                            let ids = self.run.as_ref().map(|r| r.memory_ids.clone()).unwrap_or_default();
-                            if let Some(n) = api::memory_note(&ids) {
-                                msg.meta = format!("Stopped. · {n}");
-                            }
+                    }
+                    // the runtime keeps text that had arrived, with its memory ids (Stop or a
+                    // transport error alike), so the meta line names them as well
+                    if ended_early && !msg.text.trim().is_empty() {
+                        let ids = self.run.as_ref().map(|r| r.memory_ids.clone()).unwrap_or_default();
+                        if let Some(n) = api::memory_note(&ids) {
+                            msg.meta = format!("{} · {n}", msg.meta.trim_end());
                         }
                     }
                 }

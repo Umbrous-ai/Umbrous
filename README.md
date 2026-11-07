@@ -1,6 +1,6 @@
 # Umbrous
 
-A local-first agent harness. Status: **M6, personal and project memory: notes you save are given to later replies in the right projects, each reply lists the memory it used, and deleting an item stops it being used** (see the milestone plan).
+A local-first agent harness. Status: **M6, personal and project memory: notes you save are given to later replies in the right projects, each reply lists the memory it used, and deleting an item stops further retrieval** (see the milestone plan).
 
 ```sh
 bin/umbrous          # start the local runtime and open the app (Python 3.9+, no dependencies)
