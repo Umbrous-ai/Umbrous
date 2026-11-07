@@ -1914,6 +1914,17 @@ impl Render for Workspace {
         use theme::*;
         let t0 = Instant::now();
         let wide = window.viewport_size().width >= px(1180.); // the page's @media (max-width:1180px)
+        // reveal_end scrolls with the heights the list measured last frame, so a row that
+        // just grew (a reply's closing meta line) can end up below the view; once the
+        // list has measured it, scroll again while following the end
+        if self.follow.get() && !self.rows.is_empty() {
+            let last = self.rows.len() - 1;
+            let below = self.list.bounds_for_item(last).is_some_and(|b| b.bottom() > self.list.viewport_bounds().bottom() + px(0.5));
+            if below {
+                self.list.scroll_to_reveal_item(last);
+                window.request_animation_frame();
+            }
+        }
         let root = div()
             .id("workspace")
             .key_context("Workspace")
