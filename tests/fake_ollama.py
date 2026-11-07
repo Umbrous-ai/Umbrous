@@ -30,6 +30,8 @@ class FakeModel:
     # M3: when tools are offered in a streamed chat, this decides the next step:
     # agent(messages) -> {"tool_calls": [(name, args), ...]} or {"content": "..."}
     agent: Optional[Callable[[list], dict]] = None
+    # M6: the reply text from the messages sent (for a model whose answer depends on its prompt)
+    answer: Optional[Callable[[list], str]] = None
 
     def __post_init__(self):
         if not self.digest:
@@ -116,6 +118,8 @@ class FakeOllama:
                 self._json(404, {"error": "not found"})
 
             def _text(self, m, body):
+                if m.answer is not None:
+                    return m.answer(body["messages"])
                 if m.reply is not None:
                     return m.reply
                 last = next((x["content"] for x in reversed(body["messages"]) if x["role"] == "user"), "")
@@ -276,6 +280,21 @@ def workspace_agent(messages: list) -> dict:
     return {"tool_calls": [("search_files", {"query": word})]}
 
 
+MEMORY_LINE = re.compile(r"^- \[(mem_[0-9a-f]{16})\] \((personal|project) (\w+)\) (.*)$", re.M)
+
+
+def memory_answer(messages: list) -> str:
+    """M6: a model that says plainly which memory lines its system message had,
+    so the effect of memory on a reply is visible (and testable)."""
+    system = next((x["content"] for x in messages if x["role"] == "system"), "")
+    last = next((x["content"] for x in reversed(messages) if x["role"] == "user"), "")
+    found = MEMORY_LINE.findall(system)
+    if not found:
+        return f"You asked: {last} I was given no memory for this reply."
+    told = " ".join(f"[{i}] {text}" for i, _store, _kind, text in found)
+    return f"You asked: {last} Using what you saved: {told}"
+
+
 def demo_models() -> List[FakeModel]:
     """The models the browser check and the demo use."""
     return [
@@ -291,6 +310,8 @@ def demo_models() -> List[FakeModel]:
         FakeModel("multi-step:3b", chunk_delay=0.02, agent=scripted(
             ("list_files", {}), ("search_files", {"query": "Ship"}), ("read_file", {"path": "notes/plan.md"}),
             final=lambda m: "The plan is to ship on Friday (notes/plan.md:2). Owner details are in notes/team.md:4.")),
+        # M6: repeats the memory lines it was given, so a reply visibly changes with memory.
+        FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer),
     ]
 
 

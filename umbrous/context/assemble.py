@@ -2,7 +2,8 @@
 
 The model sees three things, in this order:
 
-    1. system instructions   (config: system_prompt)
+    1. system instructions   (config: system_prompt), followed by the memory
+                              block when memory items were retrieved (M6)
     2. recent turns           earlier messages of this chat, newest kept first
     3. the new message
 
@@ -16,7 +17,9 @@ Two limits drop older turns, and both are reported, never silent:
   - the token budget: if they still do not fit, the oldest go first.
 
 If the system instructions plus the new message alone do not fit, nothing is
-sent and the person is told the message is too long.
+sent and the person is told the message is too long. If they fit only without
+the memory block, the memory block is left out (and that is reported): memory
+never pushes out the message itself.
 
 Token counts here are an *estimate* (about 4 characters per token, plus a few
 per message for formatting). Models count differently; after the reply,
@@ -64,6 +67,7 @@ class ContextPlan:
     dropped_by_budget: int
     recent_turns_limit: int
     notices: List[str] = field(default_factory=list)
+    memory_included: bool = False     # M6: the memory block went into the system message
 
     def summary(self) -> dict:
         return {
@@ -71,15 +75,25 @@ class ContextPlan:
             "estimated_tokens": self.estimated_tokens, "turns_available": self.turns_available,
             "turns_included": self.turns_included, "dropped_by_turn_limit": self.dropped_by_turn_limit,
             "dropped_by_budget": self.dropped_by_budget, "recent_turns_limit": self.recent_turns_limit,
-            "notices": self.notices,
+            "notices": self.notices, "memory_included": self.memory_included,
         }
 
 
 def assemble(system_prompt: str, history: Sequence[Turn], new_message: str, *, recent_turns: int,
-             context_tokens: int, reply_tokens: int, model_context: Optional[int] = None) -> ContextPlan:
+             context_tokens: int, reply_tokens: int, model_context: Optional[int] = None,
+             memory_block: str = "") -> ContextPlan:
     window = min(context_tokens, model_context) if model_context else context_tokens
     reply_tokens = min(reply_tokens, window // 2)  # never reserve more than half the window
     budget = window - reply_tokens
+
+    notices = []
+    memory_included = False
+    if memory_block:
+        with_memory = system_prompt + "\n\n" + memory_block
+        if estimate_tokens(with_memory) + estimate_tokens(new_message) <= budget:
+            system_prompt, memory_included = with_memory, True
+        else:
+            notices.append("Memory left out: with it, this message would not fit the context budget.")
 
     fixed = estimate_tokens(system_prompt) + estimate_tokens(new_message)
     if fixed > budget:
@@ -102,7 +116,6 @@ def assemble(system_prompt: str, history: Sequence[Turn], new_message: str, *, r
     kept.reverse()
     dropped_by_budget = len(candidates) - len(kept)
 
-    notices = []
     if dropped_by_turn_limit:
         notices.append(f"{dropped_by_turn_limit} earlier message(s) left out: only the last {recent_turns} are sent (recent_turns).")
     if dropped_by_budget:
@@ -112,4 +125,4 @@ def assemble(system_prompt: str, history: Sequence[Turn], new_message: str, *, r
     messages += [{"role": t.role, "content": t.content} for t in kept]
     messages.append({"role": "user", "content": new_message})
     return ContextPlan(messages, window, budget, reply_tokens, used, len(history), len(kept),
-                       dropped_by_turn_limit, dropped_by_budget, recent_turns, notices)
+                       dropped_by_turn_limit, dropped_by_budget, recent_turns, notices, memory_included)

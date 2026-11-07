@@ -336,6 +336,7 @@
     newChat();
     loadChats();
     loadAccess();
+    loadMemory();
   }
 
 
@@ -618,6 +619,149 @@
     box.appendChild(el('div', 'acc-note', 'Read-only. This is a permission check inside Umbrous, not an operating-system sandbox.'));
   }
 
+  // ---------- M6: memory ----------
+  // Two stores the runtime keeps apart: personal memory (facts and
+  // preferences, for every project or only some) and this project's memory
+  // (decisions, state, lessons). Items you add here are retrieved for later
+  // replies; each reply lists the ids it was given. Deleting an item stops it
+  // being used from now on; replies already written are not changed.
+  let memoryView = null, useMemory = true, lastMemory = null;
+  const KIND_LABEL = { fact: 'fact', preference: 'preference', decision: 'decision', state: 'state', lesson: 'lesson' };
+  function memoryLine(ids) {
+    if (!ids || !ids.length) return null;
+    const d = el('div', 'reply-mem', 'Memory used: ' + ids.join(', '));
+    d.title = 'The memory items this reply was given. Deleting one later does not change this reply.';
+    return d;
+  }
+  function showMemoryUsed(mem) {
+    lastMemory = mem;
+    const u = $('#mem-used');
+    if (!u) return;
+    if (!mem.enabled) u.textContent = 'Last reply: memory was off.';
+    else if (!mem.used.length) u.textContent = 'Last reply: no memory items' + (mem.candidates ? ` (${mem.left_out} left out)` : '') + '.';
+    else u.textContent = 'Last reply used: ' + mem.used.map((m) => m.id).join(', ') + (mem.left_out ? ` (${mem.left_out} left out by the limits)` : '');
+  }
+  async function loadMemory() {
+    const box = $('#memory-body');
+    if (!box) return;
+    $('#memory').hidden = false;
+    const want = projectId;
+    let v;
+    try { v = await getJson('/api/memory?project_id=' + encodeURIComponent(want)); }
+    catch (e) { box.textContent = ''; box.appendChild(el('div', 'acc-err', e.message)); return; }
+    if (want !== projectId) return;
+    memoryView = v;
+    renderMemory(v);
+  }
+  async function memoryPost(path, body, err) {
+    try { await getJson(path, { json: body || {} }); await loadMemory(); }
+    catch (e) { err.textContent = e.message; err.hidden = false; }
+  }
+  function memButton(text, fn, cls) {
+    const b = el('button', cls || '', text);
+    b.type = 'button';
+    b.onclick = (e) => { e.stopPropagation(); fn(b); };
+    return b;
+  }
+  function stopKeys(input) {
+    input.addEventListener('keydown', (e) => e.stopPropagation());
+    input.addEventListener('click', (e) => e.stopPropagation());
+    return input;
+  }
+  function memItem(m, err, applies) {
+    const row = el('div', 'mem-item' + (applies === false ? ' off' : ''));
+    row.dataset.memId = m.id;
+    const text = el('div', 'mem-text', m.text);
+    let where = '';
+    if (m.store === 'personal') where = m.scope === 'all' ? 'all projects' : m.scope.map(projectName).join(', ');
+    text.appendChild(el('span', 'mem-tag', `${m.id} · ${KIND_LABEL[m.kind] || m.kind}${where ? ' · ' + where : ''}` +
+      (applies === false ? ' · not used here' : '')));
+    text.title = `Added ${m.created_at}` + (m.updated_at !== m.created_at ? `, edited ${m.updated_at}` : '') + ' · source: ' + m.source.type;
+    const edit = memButton('Edit', () => {
+      row.textContent = '';
+      const input = stopKeys(el('input'));
+      input.value = m.text;
+      input.setAttribute('aria-label', 'Memory text');
+      const r = el('div', 'acc-row');
+      r.append(input, memButton('Save', () => memoryPost('/api/memory/' + m.id, { text: input.value }, err)),
+        memButton('Cancel', () => renderMemory(memoryView)));
+      row.appendChild(r);
+      row.style.display = 'block';
+      input.focus();
+    });
+    const del = memButton('Delete', (b) => {
+      if (b.dataset.armed) { memoryPost('/api/memory/' + m.id + '/delete', {}, err); return; }
+      b.dataset.armed = '1';
+      b.textContent = 'Delete?';
+      b.title = 'Click again to delete. Future replies will not use it; old chats keep their text.';
+      b.classList.add('danger');
+    });
+    row.append(text, edit, del);
+    return row;
+  }
+  function addRow(store, kinds, err) {
+    const wrap = el('div');
+    const r = el('div', 'acc-row');
+    const input = stopKeys(el('input'));
+    input.placeholder = store === 'personal' ? 'Add a fact or preference' : 'Add a decision, state or lesson';
+    input.setAttribute('aria-label', store === 'personal' ? 'New personal memory' : 'New project memory');
+    input.dataset.memAdd = store;
+    r.appendChild(input);
+    const r2 = el('div', 'acc-row');
+    const sel = el('select');
+    sel.setAttribute('aria-label', 'Kind');
+    for (const k of kinds) { const o = el('option', '', k); o.value = k; sel.appendChild(o); }
+    sel.addEventListener('click', (e) => e.stopPropagation());
+    r2.appendChild(sel);
+    let only = null;
+    if (store === 'personal') {
+      const lab = el('label', 'acc-note');
+      only = el('input');
+      only.type = 'checkbox';
+      lab.append(only, document.createTextNode(' only ' + projectName(projectId)));
+      lab.style.margin = '0';
+      r2.appendChild(lab);
+    }
+    r2.appendChild(memButton('Add', () => {
+      const body = { store, text: input.value, kind: sel.value };
+      if (store === 'project') body.project_id = projectId;
+      else if (only && only.checked) body.scope = [projectId];
+      memoryPost('/api/memory', body, err);
+    }));
+    wrap.append(r, r2);
+    return wrap;
+  }
+  function renderMemory(v) {
+    const box = $('#memory-body');
+    box.textContent = '';
+    const err = el('div', 'acc-err');
+    err.hidden = true;
+    const tog = el('label', 'acc-row');
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.id = 'use-memory';
+    cb.checked = useMemory;
+    cb.onchange = () => { useMemory = cb.checked; };
+    tog.append(cb, document.createTextNode(' Use memory for the next reply'));
+    box.appendChild(tog);
+    const used = el('div', 'acc-note');
+    used.id = 'mem-used';
+    box.appendChild(used);
+    if (lastMemory) showMemoryUsed(lastMemory);
+    box.appendChild(el('div', 'mem-h', 'Personal'));
+    if (!v.personal.length) box.appendChild(el('div', 'acc-note', 'Nothing saved.'));
+    for (const m of v.personal) box.appendChild(memItem(m, err, m.applies));
+    box.appendChild(addRow('personal', ['fact', 'preference'], err));
+    box.appendChild(el('div', 'mem-h', 'This project: ' + projectName(projectId)));
+    if (!v.project.length) box.appendChild(el('div', 'acc-note', 'Nothing saved.'));
+    for (const m of v.project) box.appendChild(memItem(m, err));
+    box.appendChild(addRow('project', ['decision', 'state', 'lesson'], err));
+    box.appendChild(err);
+    box.appendChild(el('div', 'acc-note', `Each reply is given at most ${v.limits.max_items} items (about ` +
+      `${v.limits.max_tokens} tokens), picked by shared words. Project memory never reaches another project. ` +
+      'Deleting an item does not change old chats, which may still mention it.'));
+  }
+
   // ---------- history: the open chat ----------
   function setTitle(text) { $('#title').textContent = text; }
   function setComposer() {
@@ -677,6 +821,8 @@
     reply.append(answer, meta);
     const src = sourcesLine([].concat(...mine.filter((r) => r.decision === 'allowed').map((r) => r.evidence)));
     if (src) reply.appendChild(src);
+    const ml = memoryLine(m.memory_ids);
+    if (ml) reply.appendChild(ml);
     const task = m.task_id && (tasks || []).find((x) => x.task_id === m.task_id);
     const tr = task && taskReport(task.report);
     if (tr) reply.appendChild(tr);
@@ -749,6 +895,7 @@
     setComposer();
     showSessionProject();
     if (projectChanged || !accessView) loadAccess();
+    if (projectChanged || !memoryView) loadMemory();
     clearContext();
     markCurrent();
     scrollDown();
@@ -821,6 +968,7 @@
       }
       const body = { chat_id: chatId, model: selected, approvals: true };
       if (resumeTask) body.resume_task = resumeTask; else body.message = q;
+      if (!useMemory) body.use_memory = false;
       const r = await api.fetch('/api/chat', { json: body, signal: controller.signal });
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
       const reader = r.body.getReader();
@@ -842,6 +990,7 @@
             showContext(ev.context);
             const notes = ev.context.notices.slice();
             if (ev.tools && ev.tools.off_reason) notes.push(ev.tools.off_reason);
+            if (ev.memory) showMemoryUsed(ev.memory);
             if (notes.length) { ctxNote.textContent = notes.join(' '); ctxNote.hidden = false; }
           } else if (ev.type === 'tool_call') {
             const row = stepRow(ev.tool, stepLabel(ev.tool, ev.args));
@@ -875,6 +1024,8 @@
             const sm = $('#sess-model'); if (sm) sm.textContent = ev.model;
             const src = sourcesLine(ev.evidence);
             if (src) reply.appendChild(src);
+            const ml = memoryLine(ev.memory_ids);
+            if (ml) reply.appendChild(ml);
             const tr = taskReport(ev.report);
             if (tr) reply.appendChild(tr);
           } else if (ev.type === 'error') {
@@ -955,7 +1106,7 @@
     $('#sec-projects').textContent = '';   // the prototype's placeholder projects and sessions
     $('#sec-sessions').textContent = '';
     $('[data-new]').click();  // the prototype's own New chat (sidebar state) plus ours
-    refreshSidebar().then(() => { showSessionProject(); newChatNotice(); loadAccess(); });
+    refreshSidebar().then(() => { showSessionProject(); newChatNotice(); loadAccess(); loadMemory(); });
     loadModels();
   }
 

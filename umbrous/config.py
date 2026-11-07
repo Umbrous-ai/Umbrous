@@ -35,6 +35,8 @@ _ALLOWED_KEYS = {
     "first_token_timeout_s", "idle_timeout_s", "total_timeout_s",
     # M4: task limits
     "task_timeout_s", "task_max_steps", "task_max_tool_calls", "tool_timeout_s",
+    # M6: memory retrieval limits
+    "memory_max_items", "memory_tokens",
 }
 # Integer settings: (minimum, maximum)
 _INT_RANGES = {
@@ -48,6 +50,8 @@ _INT_RANGES = {
     "task_max_steps": (1, 50),
     "task_max_tool_calls": (1, 400),
     "tool_timeout_s": (1, 3600),
+    "memory_max_items": (0, 50),
+    "memory_tokens": (0, 8192),
 }
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 
@@ -77,6 +81,9 @@ class Config:
     task_max_steps: int = 6                # model steps that may ask for tools
     task_max_tool_calls: int = 24          # tool calls in the whole task
     tool_timeout_s: int = 30               # one tool action, from when it starts running
+    # M6: memory given to one reply. 0 turns memory off. See docs/m6-memory.md.
+    memory_max_items: int = 8              # at most this many memory items per reply
+    memory_tokens: int = 600               # and at most about this many tokens of them
 
     @property
     def db_path(self) -> Path:

@@ -100,12 +100,16 @@ impl Api {
     /// POST /api/chat and call `on_event` for each JSON line as it arrives.
     /// Returns when the runtime closes the stream. Blocking: run it off the UI thread.
     /// `resume`: an interrupted task to run again (M5) instead of sending `message`.
-    pub fn chat_stream(&self, chat_id: &str, model: &str, message: &str, resume: Option<&str>,
+    /// `use_memory`: false sends the reply without memory items (M6), to compare.
+    pub fn chat_stream(&self, chat_id: &str, model: &str, message: &str, resume: Option<&str>, use_memory: bool,
                        mut on_event: impl FnMut(Value) -> bool) -> Result<()> {
-        let body = match resume {
+        let mut body = match resume {
             Some(task) => json!({"chat_id": chat_id, "model": model, "resume_task": task}),
             None => json!({"chat_id": chat_id, "model": model, "message": message}),
         };
+        if !use_memory {
+            body["use_memory"] = json!(false);
+        }
         let resp = self
             .stream_agent
             .post(&format!("{}/api/chat", self.origin))
@@ -174,6 +178,38 @@ pub struct Message {
     /// the task this reply was (M4): its report is fetched from /api/tasks
     #[serde(default)]
     pub task_id: Option<String>,
+    /// the memory items this reply was given (M6), as a reference
+    #[serde(default)]
+    pub memory_ids: Option<Vec<String>>,
+}
+
+/// GET /api/memory?project_id= (umbrous/memory/store.py, M6): personal memory
+/// and the selected project's memory, two separate stores.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryItem {
+    pub id: String,
+    pub store: String,
+    pub kind: String,
+    pub text: String,
+    /// personal only: whether its scope includes the selected project
+    #[serde(default)]
+    pub applies: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryView {
+    pub project_id: Option<String>,
+    pub personal: Vec<MemoryItem>,
+    pub project: Vec<MemoryItem>,
+}
+
+/// The reply's meta line names the memory items it was given (M6).
+pub fn memory_note(ids: &[String]) -> Option<String> {
+    if ids.is_empty() {
+        None
+    } else {
+        Some(format!("memory {}", ids.join(", ")))
+    }
 }
 
 /// GET /api/tasks?chat_id= (umbrous/tasks/store.py, M4): each task with its report.
@@ -316,6 +352,26 @@ mod tests {
                            "uncertainty": [], "failures": [], "limits_hit": []});
         assert!(!report_line(&clean).unwrap().1);
         assert_eq!(report_line(&json!({})), None);
+    }
+
+    #[test]
+    fn memory_view_and_ids_parse() {
+        let v: MemoryView = serde_json::from_value(json!({"project_id": "prj_general", "limits": {},
+            "personal": [{"id": "mem_0123456789abcdef", "store": "personal", "kind": "preference", "text": "tea",
+                          "scope": "all", "source": {"type": "manual"}, "approval": "approved",
+                          "created_at": "x", "updated_at": "x", "applies": true}],
+            "project": [{"id": "mem_1123456789abcdef", "store": "project", "kind": "decision", "text": "ship",
+                         "scope": "prj_general", "source": {"type": "manual"}, "approval": "approved",
+                         "created_at": "x", "updated_at": "x"}]})).unwrap();
+        assert_eq!(v.personal[0].applies, Some(true));
+        assert_eq!(v.project[0].applies, None);
+        let m: Message = serde_json::from_value(json!({"role": "assistant", "content": "x", "model": "m",
+            "status": "complete", "prompt_tokens": 1, "reply_tokens": 1, "memory_ids": ["mem_a", "mem_b"]})).unwrap();
+        assert_eq!(memory_note(m.memory_ids.as_deref().unwrap()).unwrap(), "memory mem_a, mem_b");
+        let old: Message = serde_json::from_value(json!({"role": "assistant", "content": "x", "model": "m",
+            "status": "complete", "prompt_tokens": null, "reply_tokens": null, "memory_ids": null})).unwrap();
+        assert!(old.memory_ids.is_none());
+        assert_eq!(memory_note(&[]), None);
     }
 
     #[test]

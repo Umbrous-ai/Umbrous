@@ -20,6 +20,9 @@ Versions so far:
           crash or restart can offer to resume it. One row per running task,
           removed when the exchange is stored or dropped, and with its task
           when tasks are purged.
+  7 (M6)  `personal_memory` and `project_memory`, two memory stores with no
+          link to chats; `messages.memory_ids` records which items a reply
+          was given.
 """
 
 from __future__ import annotations
@@ -207,6 +210,35 @@ MIGRATIONS = (
         created_at  TEXT NOT NULL
     );
     CREATE INDEX pending_turns_by_chat ON pending_turns (chat_id);
+    """,
+    # version 7 (M6): two memory stores, separate from chats and tasks. No
+    # column here points at a chat or a message, so nothing that happens to a
+    # transcript reaches memory. A reply records the ids of the memory items
+    # it was given (messages.memory_ids) as a plain reference: deleting an
+    # item later leaves that reference, and the old reply, as they were.
+    """
+    CREATE TABLE personal_memory (
+        id          TEXT PRIMARY KEY,
+        kind        TEXT NOT NULL CHECK (kind IN ('fact', 'preference')),
+        text        TEXT NOT NULL,
+        scope       TEXT NOT NULL,
+        source      TEXT NOT NULL,
+        approval    TEXT NOT NULL CHECK (approval IN ('approved', 'proposed', 'rejected')),
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+    CREATE TABLE project_memory (
+        id          TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL REFERENCES projects(id),
+        kind        TEXT NOT NULL CHECK (kind IN ('decision', 'state', 'lesson')),
+        text        TEXT NOT NULL,
+        source      TEXT NOT NULL,
+        approval    TEXT NOT NULL CHECK (approval IN ('approved', 'proposed', 'rejected')),
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+    CREATE INDEX project_memory_by_project ON project_memory (project_id, created_at);
+    ALTER TABLE messages ADD COLUMN memory_ids TEXT;
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)

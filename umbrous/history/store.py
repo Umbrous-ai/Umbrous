@@ -2,7 +2,7 @@
 
 Its own logical store, in the `projects`, `chats` and `messages` tables of the
 runtime's SQLite file. Nothing else writes there, and nothing here touches
-other stores: memory (M6) and task records/receipts (M3, M4) will live in their
+other stores: memory (M6) and task records/receipts (M3, M4) live in their
 own tables, and no operation in this module reaches into them.
 
 What each word means here:
@@ -27,6 +27,7 @@ when tasks are purged. It is never sent to a model as context.
 
 from __future__ import annotations
 
+import json
 import secrets
 import sqlite3
 import threading
@@ -116,6 +117,7 @@ class Message:
     reply_tokens: Optional[int]
     created_at: str
     task_id: Optional[str] = None   # M3: links a reply to its tool receipts
+    memory_ids: Optional[List[str]] = None   # M6: ids of the memory items this reply was given
 
     def as_dict(self) -> dict:
         return dict(self.__dict__)
@@ -212,8 +214,9 @@ class HistoryStore:
         self.get_chat(chat_id)
         with self._db() as c:
             rows = c.execute("""SELECT seq, role, content, model, status, prompt_tokens, reply_tokens, created_at,
-                                       task_id FROM messages WHERE chat_id = ? ORDER BY seq""", (chat_id,)).fetchall()
-        return [Message(*r) for r in rows]
+                                       task_id, memory_ids FROM messages WHERE chat_id = ? ORDER BY seq""",
+                             (chat_id,)).fetchall()
+        return [Message(*r[:9], memory_ids=json.loads(r[9]) if r[9] else None) for r in rows]
 
     def turns(self, chat_id: str) -> List[Turn]:
         """The transcript as context turns, oldest first (M1's context assembly)."""
@@ -221,8 +224,10 @@ class HistoryStore:
 
     def append_exchange(self, chat_id: str, user_text: str, reply_text: str, model: str, status: str,
                         prompt_tokens: Optional[int] = None, reply_tokens: Optional[int] = None,
-                        task_id: Optional[str] = None) -> None:
-        """Store one message and its reply together, in one transaction."""
+                        task_id: Optional[str] = None, memory_ids: Optional[List[str]] = None) -> None:
+        """Store one message and its reply together, in one transaction.
+        `memory_ids` (M6) is a reference only: the memory items stay in their
+        own store, and nothing here reads or changes them."""
         if status not in STATUSES:
             raise HistoryError(f"unknown status {status!r}")
         if not reply_text.strip():  # an empty reply is an error, never a saved answer
@@ -241,8 +246,9 @@ class HistoryStore:
                 c.execute("INSERT INTO messages (chat_id, seq, role, content, model, status, created_at, task_id) "
                           "VALUES (?, ?, 'user', ?, NULL, 'complete', ?, ?)", (chat_id, last + 1, user_text, now, task_id))
                 c.execute("INSERT INTO messages (chat_id, seq, role, content, model, status, prompt_tokens, "
-                          "reply_tokens, created_at, task_id) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
-                          (chat_id, last + 2, reply_text, model, status, prompt_tokens, reply_tokens, now, task_id))
+                          "reply_tokens, created_at, task_id, memory_ids) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (chat_id, last + 2, reply_text, model, status, prompt_tokens, reply_tokens, now, task_id,
+                           json.dumps(memory_ids) if memory_ids else None))
                 new_title = make_title(user_text) if last == 0 else title
                 c.execute("UPDATE chats SET updated_at = ?, title = ? WHERE id = ?", (now, new_title, chat_id))
                 if task_id:   # M5: the message is in the transcript now, so it is no longer pending

@@ -572,7 +572,7 @@ class PendingTurnTests(unittest.TestCase):
         with mock.patch.object(db, "MIGRATIONS", db.MIGRATIONS[:5]), mock.patch.object(db, "SCHEMA_VERSION", 5):
             db.migrate(conn)
         conn.execute("INSERT INTO tasks (task_id, status, created_at, limits) VALUES ('tsk_x', 'started', 'now', '{}')")
-        self.assertEqual(db.migrate(conn), 6)
+        self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
         self.assertEqual(conn.execute("SELECT status FROM tasks").fetchone()[0], "started")
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM pending_turns").fetchone()[0], 0)
         conn.close()

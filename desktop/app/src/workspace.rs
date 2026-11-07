@@ -59,6 +59,13 @@ struct Run {
     stop: Arc<AtomicBool>,
 }
 
+/// What the Memory section's inline field is for (M6).
+#[derive(Clone, Debug, PartialEq)]
+pub enum MemTarget {
+    Add(&'static str), // "personal" | "project"
+    Edit(String),      // a memory id
+}
+
 enum StreamMsg {
     Event(Value),
     Ended(Option<api::ApiError>),
@@ -105,6 +112,18 @@ pub struct Workspace {
     pub access: Option<api::Access>,
     access_seq: u64,
     pub access_error: Option<String>,
+    /// M6: the selected project's memory view (personal memory and this
+    /// project's memory). Add, edit and delete go to the runtime; this is
+    /// only what it last returned.
+    pub memory: Option<api::MemoryView>,
+    memory_seq: u64,
+    pub memory_error: Option<String>,
+    /// the inline field for adding or editing a memory item, and what it is for
+    memory_input: Option<(Entity<Composer>, MemTarget)>,
+    /// a memory item whose delete button was pressed once (press again to delete)
+    memory_armed: Option<String>,
+    /// send replies with memory (the default) or without, to compare
+    pub use_memory: bool,
     sidebar: bool,
     /// the right sidebar (Changes and Sources), shown and hidden by the header's panel button
     details: bool,
@@ -252,6 +271,12 @@ impl Workspace {
             notice: None,
             interrupted: None,
             access: None,
+            memory: None,
+            memory_seq: 0,
+            memory_error: None,
+            memory_input: None,
+            memory_armed: None,
+            use_memory: true,
             access_seq: 0,
             access_error: None,
             sidebar: true,
@@ -369,6 +394,7 @@ impl Workspace {
     }
 
     pub fn load_chats(&mut self, cx: &mut Context<Self>) {
+        self.load_memory(cx);
         let Some(pid) = self.project_id.clone() else { return };
         self.load_access(cx);
         let show_archived = self.show_archived;
@@ -422,6 +448,103 @@ impl Workspace {
         });
     }
 
+    // ---------- memory (M6) ----------
+    /// Personal memory and the selected project's memory, asked again whenever
+    /// the chat list is, so a change made in the browser or the CLI shows up.
+    pub fn load_memory(&mut self, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        self.memory_seq += 1;
+        let seq = self.memory_seq;
+        let path = format!("/api/memory?project_id={pid}");
+        self.api_call(cx, move |api| api.get::<api::MemoryView>(&path), move |this, r, _| {
+            if seq != this.memory_seq || this.project_id.as_deref() != Some(pid.as_str()) {
+                return;
+            }
+            match r {
+                Ok(v) => this.memory = Some(v),
+                Err(e) => this.memory_error = Some(e.message),
+            }
+        });
+    }
+
+    /// The memory item with this id, in either list.
+    pub fn memory_item(&self, id: &str) -> Option<&api::MemoryItem> {
+        let v = self.memory.as_ref()?;
+        v.personal.iter().chain(v.project.iter()).find(|m| m.id == id)
+    }
+
+    fn memory_done(&mut self, r: Result<Value, api::ApiError>, cx: &mut Context<Self>) {
+        match r {
+            Ok(_) => {
+                self.memory_input = None;
+                self.memory_error = None;
+                self.memory_armed = None;
+                self.load_memory(cx);
+            }
+            Err(e) => self.memory_error = Some(e.message),
+        }
+    }
+
+    /// Add an item: personal (a fact, for every project) or this project's (a decision).
+    /// The kind and a narrower scope are set in the browser page or the CLI.
+    pub fn add_memory(&mut self, store: &'static str, text: String, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        logfile::event("ui.memory_add", &[("store", store.into())]); // never the text
+        let body = if store == "personal" {
+            json!({"store": "personal", "text": text, "kind": "fact"})
+        } else {
+            json!({"store": "project", "project_id": pid, "text": text, "kind": "decision"})
+        };
+        self.api_call(cx, move |api| api.post::<Value>("/api/memory", body), |this, r, cx| this.memory_done(r, cx));
+    }
+
+    pub fn edit_memory(&mut self, id: String, text: String, cx: &mut Context<Self>) {
+        logfile::event("ui.memory_edit", &[("id", id.clone())]);
+        let path = format!("/api/memory/{id}");
+        self.api_call(cx, move |api| api.post::<Value>(&path, json!({"text": text})), |this, r, cx| this.memory_done(r, cx));
+    }
+
+    /// Delete an item. Chats that already used it are not changed.
+    pub fn delete_memory(&mut self, id: String, cx: &mut Context<Self>) {
+        logfile::event("ui.memory_delete", &[("id", id.clone())]);
+        let path = format!("/api/memory/{id}/delete");
+        self.api_call(cx, move |api| api.post::<Value>(&path, json!({})), |this, r, cx| this.memory_done(r, cx));
+    }
+
+    fn begin_memory_input(&mut self, target: MemTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let initial = match &target {
+            MemTarget::Edit(id) => self.memory_item(id).map(|m| m.text.clone()).unwrap_or_default(),
+            MemTarget::Add(_) => String::new(),
+        };
+        let placeholder = match &target {
+            MemTarget::Add(s) if *s == "personal" => "A fact about you, then Enter",
+            MemTarget::Add(_) => "A decision for this project, then Enter",
+            MemTarget::Edit(_) => "Edit, then Enter",
+        };
+        let input = cx.new(|cx| {
+            let mut c = Composer::new(cx);
+            c.set_placeholder(placeholder, cx);
+            c.set_compact(cx);
+            if !initial.is_empty() {
+                c.set_text(&initial, cx);
+            }
+            c
+        });
+        let t = target.clone();
+        let sub = cx.subscribe_in(&input, window, move |this, _, ev: &ComposerEvent, _window, cx| match ev {
+            ComposerEvent::Submit(text) => match &t {
+                MemTarget::Add(store) => this.add_memory(*store, text.clone(), cx),
+                MemTarget::Edit(id) => this.edit_memory(id.clone(), text.clone(), cx),
+            },
+        });
+        self._subs.push(sub);
+        window.focus(&input.focus_handle(cx));
+        self.memory_input = Some((input, target));
+        self.memory_error = None;
+        self.memory_armed = None;
+        cx.notify();
+    }
+
     pub fn asks_before_read(&self) -> bool {
         self.access
             .as_ref()
@@ -456,6 +579,10 @@ impl Workspace {
             self.show_archived = false;
             self.access = None;
             self.access_error = None;
+            self.memory = None;
+            self.memory_error = None;
+            self.memory_input = None;
+            self.memory_armed = None;
             self.new_chat(cx);
             self.load_chats(cx);
         }
@@ -710,6 +837,7 @@ impl Workspace {
         }
         self.interrupted = None;
         let model = self.model.clone().unwrap();
+        let use_memory = self.use_memory;
         let project_id = self.project_id.clone().unwrap_or_else(|| "prj_general".into());
         let existing = self.chat.as_ref().map(|c| c.id.clone());
         let existing_for_ui = existing.clone();
@@ -769,7 +897,7 @@ impl Workspace {
                         }
                     },
                 };
-                let r = api2.chat_stream(&chat_id, &model, &text, resume.as_deref(), |ev| {
+                let r = api2.chat_stream(&chat_id, &model, &text, resume.as_deref(), use_memory, |ev| {
                     let _ = tx.unbounded_send(StreamMsg::Event(ev));
                     !stop.load(Ordering::SeqCst)
                 });
@@ -858,6 +986,10 @@ impl Workspace {
                             if let Some(ms) = g("ms") {
                                 parts.push(format!("{:.1}s", ms as f64 / 1000.0));
                             }
+                            // M6: the memory items this reply was given
+                            let ids: Vec<String> = ev.get("memory_ids").and_then(Value::as_array)
+                                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+                            parts.extend(api::memory_note(&ids));
                             msg.meta = parts.join(" · ");
                             msg.meta_kind = MetaKind::Normal;
                             // M4: a task's report, in one line (the trace is in the browser page)
@@ -1099,7 +1231,10 @@ impl Workspace {
         cx.notify();
     }
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model_menu || self.options_menu || self.project_input.is_some() || self.card_menu {
+        if self.model_menu || self.options_menu || self.project_input.is_some() || self.card_menu
+            || self.memory_input.is_some() || self.memory_armed.is_some() {
+            self.memory_input = None;
+            self.memory_armed = None;
             self.card_menu = false;
             self.model_menu = false;
             self.options_menu = false;
@@ -1129,10 +1264,11 @@ fn stored_msg(m: &api::Message) -> Msg {
             _ => String::new(),
         };
         let model = m.model.clone().unwrap_or_default();
+        let mem = m.memory_ids.as_deref().and_then(api::memory_note).map(|n| format!(" · {n}")).unwrap_or_default();
         match m.status.as_str() {
-            "complete" => ([model, toks].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "), MetaKind::Normal),
-            "stopped" => (format!("{model} · Stopped by you. Incomplete."), MetaKind::Warn),
-            other => (format!("{model} · Incomplete ({other})."), MetaKind::Warn),
+            "complete" => ([model, toks].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ") + &mem, MetaKind::Normal),
+            "stopped" => (format!("{model} · Stopped by you. Incomplete.{mem}"), MetaKind::Warn),
+            other => (format!("{model} · Incomplete ({other}).{mem}"), MetaKind::Warn),
         }
     };
     Msg { role, text: m.content.clone(), parsed_len: m.content.len(), blocks: Arc::new(blocks), meta, meta_kind: kind, streaming: false }
@@ -1587,7 +1723,158 @@ impl Workspace {
             .child(title_row("Sources".into(), ui::icon_btn("card-add-source", "plus", false)))
             .child(web)
             .child(all)
+            .child(div().mx(px(20.)).mt(px(7.)).mb(px(6.)).h(px(1.)).bg(card_divider()))
+            .child(self.render_memory(cx))
             .children(menu)
+            .into_any_element()
+    }
+
+    /// M6: Memory, under Sources: personal memory and this project's memory,
+    /// two separate stores. Click an item to edit it; × twice deletes it; + adds.
+    /// Replies list the ids of the items they were given in their meta line.
+    fn render_memory(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use theme::*;
+        let title = |id: &'static str, label: String, button: Option<gpui::Stateful<gpui::Div>>| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(30.))
+                .px(px(20.))
+                .text_size(fs_13())
+                .text_color(text_default())
+                .child(label)
+                .children(button.map(|b| b.mr(px(-6.))))
+        };
+        let note = |text: String| div().px(px(20.)).py(px(3.)).text_size(fs_12()).text_color(text_subtle()).child(text);
+        let mut col = div().id("memory").flex().flex_col().flex_1().min_h_0().overflow_y_scroll().pb(px(12.));
+        let on = self.use_memory;
+        col = col.child(title("mem-title", "Memory".into(), None)).child(
+            div()
+                .id("mem-use")
+                .group("mem-use")
+                .flex()
+                .items_center()
+                .gap(px(14.))
+                .h(px(30.))
+                .px(px(20.))
+                .cursor_pointer()
+                .child(ui::hover_icon(if on { "check" } else { "x" }, &"mem-use".into(), if on { success() } else { text_subtle() }, text_strong()))
+                .child(div().text_size(fs_13()).text_color(text_default()).group_hover("mem-use", |s| s.text_color(text_strong()))
+                    .child(if on { "Used in replies" } else { "Off for the next replies" }))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.use_memory = !this.use_memory;
+                    logfile::event("ui.memory_toggle", &[("on", this.use_memory.to_string())]);
+                    cx.notify();
+                })),
+        );
+        let Some(view) = self.memory.clone() else {
+            return col.child(note(self.memory_error.clone().unwrap_or_else(|| "Loading…".into()))).into_any_element();
+        };
+        let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
+        let sections: [(&'static str, &'static str, String, &Vec<api::MemoryItem>); 2] = [
+            ("personal", "mem-add-personal", "Personal".to_string(), &view.personal),
+            ("project", "mem-add-project", format!("This project: {project}"), &view.project),
+        ];
+        for (store, add_id, label, items) in sections {
+            let plus = ui::icon_btn(add_id, "plus", false).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.begin_memory_input(MemTarget::Add(store), window, cx);
+            }));
+            col = col.child(title(if store == "personal" { "mem-h-personal" } else { "mem-h-project" }, label, Some(plus)));
+            if items.is_empty() {
+                col = col.child(note("Nothing saved.".into()));
+            }
+            for m in items.iter() {
+                let editing = matches!(&self.memory_input, Some((_, MemTarget::Edit(id))) if *id == m.id);
+                if editing {
+                    col = col.child(self.memory_field());
+                    continue;
+                }
+                let armed = self.memory_armed.as_deref() == Some(m.id.as_str());
+                let off = m.applies == Some(false);
+                let gid = SharedString::from(format!("mem-{}", m.id));
+                let (id_edit, id_del) = (m.id.clone(), m.id.clone());
+                let mut tag = format!("{} · {}", m.id, m.kind);
+                if off {
+                    tag.push_str(" · not for this project");
+                }
+                col = col.child(
+                    div()
+                        .id(gpui::ElementId::Name(gid.clone()))
+                        .group(gid.clone())
+                        .flex()
+                        .items_start()
+                        .gap(px(8.))
+                        .px(px(20.))
+                        .py(px(5.))
+                        .child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("mem-{}-text", m.id).into()))
+                                .flex_1()
+                                .min_w_0()
+                                .cursor_pointer()
+                                .child(div().text_size(fs_13()).line_height(px(18.))
+                                    .text_color(if off { text_subtle() } else { text_strong() }).child(m.text.clone()))
+                                .child(div().text_size(fs_12()).text_color(text_subtle()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(tag))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.begin_memory_input(MemTarget::Edit(id_edit.clone()), window, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("mem-{}-del", m.id).into()))
+                                .flex_none()
+                                .h(px(20.))
+                                .px(px(4.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(R_6))
+                                .cursor_pointer()
+                                .text_size(fs_12())
+                                .when(armed, |d| d.text_color(danger()).child("Delete?"))
+                                .when(!armed, |d| d.child(ui::hover_icon("x", &gid, text_subtle(), text_strong())))
+                                .hover(|s| s.bg(bg_hover()))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    if this.memory_armed.as_deref() == Some(id_del.as_str()) {
+                                        this.delete_memory(id_del.clone(), cx);
+                                    } else {
+                                        this.memory_armed = Some(id_del.clone());
+                                        this.memory_input = None;
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            }
+            if matches!(&self.memory_input, Some((_, MemTarget::Add(s))) if *s == store) {
+                col = col.child(self.memory_field());
+            }
+        }
+        if let Some(err) = &self.memory_error {
+            col = col.child(div().px(px(20.)).py(px(4.)).text_size(fs_12()).text_color(danger()).child(err.clone()));
+        }
+        col = col.child(note("Deleting an item stops later replies from using it. Old chats keep their text.".into()));
+        col.into_any_element()
+    }
+
+    /// The inline field for adding or editing a memory item (like the new-project field).
+    fn memory_field(&self) -> AnyElement {
+        use theme::*;
+        let Some((input, _)) = &self.memory_input else { return div().into_any_element() };
+        div()
+            .mx(px(20.))
+            .my(px(4.))
+            .h(px(32.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(border_strong())
+            .rounded(px(R_8))
+            .bg(bg_raised())
+            .text_size(fs_13())
+            .child(input.clone())
             .into_any_element()
     }
 

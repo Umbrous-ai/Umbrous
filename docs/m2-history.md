@@ -21,7 +21,7 @@ Quit with Ctrl-C, start again, and your projects and chats are still there.
 | **Project** | A named group of chats. Every chat is in exactly one. A fresh install has **General** | `projects` table |
 | **Archived chat** | Hidden from the normal list, read-only, **every message kept**. Restore puts it back unchanged | `chats.archived_at` is set; nothing else changes |
 | **Deleted chat** | Does not exist yet. No function, endpoint or button deletes | – |
-| **Memory** (M6) | Facts the agent keeps across chats. Not built. Will be its own store; archiving a chat will not touch it | – |
+| **Memory** (M6) | Notes given to later replies across chats. Its own two stores (docs/m6-memory.md); archiving a chat does not touch it | `personal_memory`, `project_memory` |
 | **Task records / receipts** (M3, M4) | What tools did and what they changed. Not built. Their own store, kept even if a chat is later deleted | – |
 
 These are separate stores on purpose: archiving or (one day) deleting a chat

@@ -62,13 +62,13 @@ check, is not a task. It is stored in the chat history only, as before.
 
 ## Task state, chat history, memory
 
-| | Chat history (M2) | Task state (M4) | Memory (M6, later) |
+| | Chat history (M2) | Task state (M4) | Memory (M6) |
 |---|---|---|---|
 | Holds | what was said: your message, the reply | what was **done**: steps, actions, statuses, limits, the report | what should be remembered across chats |
-| Content | full text | no message, answer or file text | (to be decided in M6) |
+| Content | full text | no message, answer or file text | short notes you write (no secrets) |
 | Goes back to the model | yes, as recent turns | **no**: a task never feeds a later chat | yes, by design |
-| Lifetime | until you archive (never deleted by the app) | until you purge (`purge tasks`) | (M6) |
-| Linked by | `task_id` on the reply row | `chat_id` on the task row | |
+| Lifetime | until you archive (never deleted by the app) | until you purge (`purge tasks`) | until you delete the item |
+| Linked by | `task_id` on the reply row | `chat_id` on the task row | `memory_ids` on the reply row (a reference only) |
 
 Keeping them apart means a task's trace can never leak into a prompt, and
 purging tasks never touches a conversation.

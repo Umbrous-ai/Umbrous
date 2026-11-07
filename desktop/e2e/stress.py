@@ -6,6 +6,7 @@
     python3 desktop/e2e/stress.py fake-workspace PORT     a fake Ollama whose model reads files with tools (M3)
     python3 desktop/e2e/stress.py seed-workspace DIR      a test workspace (DIR/ws) and an outside secret (M3)
     python3 desktop/e2e/stress.py fake-tasks PORT         a fake Ollama with multi-step, slow and endless task models (M4)
+    python3 desktop/e2e/stress.py fake-memory PORT        a fake Ollama whose memory-aware:3b repeats the memory it was given (M6)
 
 HOME is a throwaway data folder; point the app at it with UMBROUS_HOME, and at
 the fake Ollama with {"ollama_url": "http://127.0.0.1:PORT"} in HOME/config.json.
@@ -99,9 +100,11 @@ def task_models():
     return [multi, slow, endless]
 
 
-def fake_ollama(port: int, empty: bool = False, workspace: bool = False, tasks: bool = False) -> None:
-    from tests.fake_ollama import FakeModel, FakeOllama, workspace_agent
-    models = task_models() if tasks else [FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02)] if workspace else [] if empty else [
+def fake_ollama(port: int, empty: bool = False, workspace: bool = False, tasks: bool = False,
+                memory: bool = False) -> None:
+    from tests.fake_ollama import FakeModel, FakeOllama, memory_answer, workspace_agent
+    models = [FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer)] if memory else \
+        task_models() if tasks else [FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02)] if workspace else [] if empty else [
         FakeModel("stress:1b", reply=big_markdown(100), chunk_delay=0.0005),
         # streams for ~30 s: time to switch chats, projects or archive mid-reply
         FakeModel("slow:1b", reply=big_markdown(20), chunk_delay=0.01),
@@ -120,4 +123,4 @@ if __name__ == "__main__":
         seed(Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 1000)
     else:
         fake_ollama(int(sys.argv[2]), empty=sys.argv[1] == "fake-empty", workspace=sys.argv[1] == "fake-workspace",
-                    tasks=sys.argv[1] == "fake-tasks")
+                    tasks=sys.argv[1] == "fake-tasks", memory=sys.argv[1] == "fake-memory")

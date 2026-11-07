@@ -1,0 +1,59 @@
+# M6 in the app: add a personal fact and a project decision, see a reply use
+# them (and name their ids), compare with memory off, edit one, delete one,
+# reopen the chat (the old reply is unchanged), and check another project.
+# Data: an empty data folder (validate-m6.sh); Ollama: stress.py fake-memory (memory-aware:3b).
+wait_ready 30
+wait_models
+card open
+select_model memory-aware:3b
+wait_memory
+expect memory_count 0
+# 1. a harmless preference and a project decision
+memory_add personal I like answers in British English
+memory_add project The release branch is called ZEBRA-SHIP-731
+expect memory_count 2
+screenshot @OUT@/m6-memory.png
+# 2. a reply with memory: the fake model repeats what it was given; the meta line names the ids
+send What is the release branch?
+wait_reply 30
+expect last_text ZEBRA-SHIP-731
+expect last_text British English
+expect last_meta memory mem_
+screenshot @OUT@/m6-with-memory.png
+record with_memory
+# 3. the same question with memory off: no memory, no ids
+use_memory off
+send What is the release branch?
+wait_reply 30
+expect last_text no memory
+expect last_text_lacks ZEBRA-SHIP-731
+use_memory on
+# 4. edit the preference, delete the decision: the next reply has only the edited preference
+memory_edit British English|I like answers in British English, kept short
+memory_delete ZEBRA-SHIP-731
+expect memory_count 1
+expect memory kept short
+send What is the release branch?
+wait_reply 30
+expect last_text kept short
+expect last_text_lacks ZEBRA-SHIP-731
+expect last_meta memory mem_
+screenshot @OUT@/m6-after-delete.png
+record after_delete
+# 5. the chat opened again: the first reply still says it, and still names the deleted id
+new_chat
+open_chat What is the release branch
+expect messages 6
+expect reply_metas memory mem_
+record reopened
+# 6. another project: none of General's project memory, the personal preference applies
+add_project Other
+wait_memory
+expect memory_project 0
+expect memory kept short
+send What is the release branch?
+wait_reply 30
+expect last_text_lacks ZEBRA-SHIP-731
+expect last_text kept short
+record end
+quit

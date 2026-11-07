@@ -307,6 +307,95 @@ def tasks_command(config: Config, chat: Optional[str], task: Optional[str], last
     return 0
 
 
+def memory_command(config: Config, action: str, rest: List[str], project: Optional[str], kind: Optional[str],
+                   scope: Optional[List[str]], yes: bool) -> int:
+    """Inspect, add, edit and delete memory items (M6). Chats are never touched."""
+    from umbrous.memory.store import Memory, MemoryError_
+    history, _, _ = _stores(config)
+    mem = Memory(config.db_path)
+    p = None
+    if project:
+        p = _find_project(history, project)
+        if p is None:
+            print(f"No project called {project!r}.", file=sys.stderr)
+            return 2
+
+    def show(m) -> str:
+        where = ("all projects" if m.scope == "all" else ", ".join(m.scope)) if m.store == "personal" else m.scope
+        return f"{m.id}  {m.store:<8} {m.kind:<10} [{where}] {m.text}"
+
+    def scope_ids() -> object:
+        if not scope:
+            return "all"
+        ids = []
+        for name in scope:
+            sp = _find_project(history, name)
+            if sp is None:
+                raise MemoryError_(f"No project called {name!r}.", "no_such_project")
+            ids.append(sp.id)
+        return ids
+
+    try:
+        if action == "list":
+            print("Personal memory:")
+            items = mem.personal.list()
+            for m in items:
+                print("  " + show(m))
+            if not items:
+                print("  (none)")
+            projects = [p] if p else history.list_projects()
+            for pr in projects:
+                items = mem.project.list(pr.id)
+                if items or p:
+                    print(f"Project memory of {pr.name} ({pr.id}):")
+                    for m in items:
+                        print("  " + show(m))
+                    if not items:
+                        print("  (none)")
+            return 0
+        if action == "add":
+            if len(rest) < 2 or rest[0] not in ("personal", "project"):
+                print("usage: umbrous memory add personal|project TEXT [--kind K] [--project P] [--scope P ...]",
+                      file=sys.stderr)
+                return 2
+            text = " ".join(rest[1:])
+            if rest[0] == "personal":
+                m = mem.personal.add(text, kind or "fact", scope_ids())
+            else:
+                if p is None:
+                    print("A project item needs --project NAME.", file=sys.stderr)
+                    return 2
+                m = mem.project.add(p.id, text, kind or "decision")
+            print("Added " + show(m))
+            return 0
+        if not rest:
+            print(f"usage: umbrous memory {action} MEM_ID" + (" TEXT" if action == "edit" else " --yes"),
+                  file=sys.stderr)
+            return 2
+        item = mem.get(rest[0])
+        if item is None:
+            print(f"No memory item {rest[0]!r}.", file=sys.stderr)
+            return 1
+        if action == "edit":
+            text = " ".join(rest[1:]) or None
+            if item.store == "personal":
+                m = mem.personal.update(item.id, text, kind, scope_ids() if scope else None)
+            else:
+                m = mem.project.update(item.id, text, kind)
+            print("Edited " + show(m))
+            return 0
+        if not yes:
+            print("Would delete " + show(item))
+            print("Run again with --yes to delete it. Chats that already used it keep their text.")
+            return 1
+        mem.delete(item.id)
+        print(f"Deleted {item.id}. Future replies cannot use it. Old chats are unchanged and may still mention it.")
+        return 0
+    except MemoryError_ as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+
+
 def purge_tasks(config: Config, before: Optional[str], purge_all: bool, yes: bool) -> int:
     from umbrous.tasks.store import TaskStore
     _stores(config)
@@ -416,6 +505,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_tk.add_argument("--chat", help="the tasks of one chat (chat_…)")
     p_tk.add_argument("--task", help="one task's trace and report (tsk_…)")
     p_tk.add_argument("--last", type=int, default=10, help="how many recent tasks (default 10)")
+    p_mem = sub.add_parser("memory", help="personal and project memory: list, add, edit, delete (M6)")
+    p_mem.add_argument("action", nargs="?", default="list", choices=["list", "add", "edit", "delete"])
+    p_mem.add_argument("rest", nargs="*", help="add: personal|project TEXT; edit: MEM_ID TEXT; delete: MEM_ID")
+    p_mem.add_argument("--project", help="project name or id (project items; list one project)")
+    p_mem.add_argument("--kind", help="personal: fact|preference; project: decision|state|lesson")
+    p_mem.add_argument("--scope", nargs="+", help="personal: the projects it applies to (default: all)")
+    p_mem.add_argument("--yes", action="store_true", help="delete: really delete")
     sub.add_parser("version")
     sub.add_parser("models", help="list Ollama models, probe results and the exposure check")
     p_probe = sub.add_parser("probe", help="run the tool-call probe")
@@ -454,6 +550,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return receipts_command(config, args.chat, args.task, args.last)
     if command == "tasks":
         return tasks_command(config, args.chat, args.task, args.last)
+    if command == "memory":
+        return memory_command(config, args.action, args.rest, args.project, args.kind, args.scope, args.yes)
     if command in ("models", "probe"):
         return models_command(config, command, getattr(args, "model", []), getattr(args, "all", False))
     desktop = args.command == "serve" and args.desktop

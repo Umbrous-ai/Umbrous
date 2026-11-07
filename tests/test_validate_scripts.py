@@ -33,6 +33,9 @@ pass)     printf '{"expect":"x","ok":true}\n{"record":"end"}\n' > "$OUT"
           fi
           if [ "$name" = m5-resume ]; then  # play the M5 run: interrupted, then resumed
             PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-resume "$H/umbrous.db" "${RESUME:-good}"
+          fi
+          if [ "$name" = m6-memory ]; then  # play the M6 run: two items, four replies, one item deleted
+            PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-memory "$H/umbrous.db" "${MEMORY:-good}"
           fi;;
 assert)   printf '{"expect":"x","ok":true}\n{"step":"expect y","error":"got z"}\n' > "$OUT";;
 noend)    printf '{"expect":"x","ok":true}\n' > "$OUT";;
@@ -146,8 +149,32 @@ class NativeValidationExitStatus(unittest.TestCase):
             self.assertIn("FAIL task records", r.stdout, kind)
             self.assertIn("m5-resume: FAIL", r.stdout, kind)
 
+    # ---- validate-m6.sh
+    def test_m6_only_a_clean_complete_run_passes(self):
+        r = self.run_script("validate-m6.sh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("m6-memory: PASS", r.stdout)
+        for mode, why in (("assert", "a step failed"), ("noend", "did not reach its end"),
+                          ("none", "no results"), ("panic", "m6-memory: the app panicked"),
+                          ("openfail", "could not be launched")):
+            r = self.run_script("validate-m6.sh", mode)
+            self.assertEqual(r.returncode, 1, (mode, r.stdout))
+            self.assertIn(why, r.stdout, mode)
+            self.assertIn("m6-memory: FAIL", r.stdout, mode)
+
+    def test_m6_checks_the_records(self):
+        for kind in ("not-deleted", "used-after-delete", "used-when-off", "no-ids", "old-reply-rewritten",
+                     "same-project"):
+            r = self.run_script("validate-m6.sh", MEMORY=kind)
+            self.assertEqual(r.returncode, 1, (kind, r.stdout + r.stderr))
+            self.assertIn("FAIL memory records", r.stdout, kind)
+            self.assertIn("m6-memory: FAIL", r.stdout, kind)
+        r = self.run_script("validate-m6.sh", MEMORY="logged")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FAIL memory text reached a log file", r.stdout)
+
     def test_usage_errors(self):
-        for script in ("validate-m3.sh", "validate-m4.sh", "validate-m5.sh", "validate-native.sh"):
+        for script in ("validate-m3.sh", "validate-m4.sh", "validate-m5.sh", "validate-m6.sh", "validate-native.sh"):
             self.assertEqual(self.run_script(script, args=[]).returncode, 2, script)
 
     # ---- validate-native.sh, the whole run
@@ -199,6 +226,11 @@ class NativeValidationExitStatus(unittest.TestCase):
         r = self.run_script("validate-native.sh", "assert", bad="m5-resume")
         self.assertEqual(r.returncode, 1, r.stdout[-2000:])
         self.assertIn("FAIL validate-m5.sh", r.stdout)
+
+    def test_native_fails_on_an_m6_failure(self):
+        r = self.run_script("validate-native.sh", "assert", bad="m6-memory")
+        self.assertEqual(r.returncode, 1, r.stdout[-2000:])
+        self.assertIn("FAIL validate-m6.sh", r.stdout)
 
     def test_every_scenario_script_ends_with_its_end_record(self):
         for f in (ROOT / "desktop" / "e2e" / "scripts").glob("*.txt"):
@@ -279,10 +311,44 @@ def seed_resume(db_path: str, kind: str) -> None:
     sys.exit(0)
 
 
+def seed_memory(db_path: str, kind: str) -> None:
+    """What the M6 scenario leaves: one personal item (edited), a deleted project
+    decision, and four replies: with both items, with memory off, after the
+    delete, and in another project. Any other `kind` breaks one thing."""
+    import sys
+    from umbrous.history.store import HistoryStore
+    from umbrous.memory.store import Memory
+    from umbrous.persistence import db
+    db.connect(Path(db_path)).close()
+    history, mem = HistoryStore(Path(db_path)), Memory(Path(db_path))
+    other = history.create_project("Other").id
+    pref = mem.personal.add("I like answers in British English, kept short", "fact")
+    dec = mem.project.add("prj_general", "The release branch is called ZEBRA-SHIP-731")
+    chat = history.create_chat("prj_general").id
+    first = "Using what you saved: ZEBRA-SHIP-731" if kind != "old-reply-rewritten" else "rewritten"
+    history.append_exchange(chat, "What is the release branch?", first, "m", "complete",
+                            memory_ids=None if kind == "no-ids" else [dec.id, pref.id])
+    history.append_exchange(chat, "What is the release branch?", "no memory", "m", "complete",
+                            memory_ids=[pref.id] if kind == "used-when-off" else None)
+    if kind != "not-deleted":
+        mem.delete(dec.id)
+    history.append_exchange(chat, "What is the release branch?", "kept short", "m", "complete",
+                            memory_ids=[pref.id, dec.id] if kind == "used-after-delete" else [pref.id])
+    chat2 = history.create_chat("prj_general" if kind == "same-project" else other).id
+    history.append_exchange(chat2, "What is the release branch?", "kept short", "m", "complete", memory_ids=[pref.id])
+    if kind == "logged":
+        logs = Path(db_path).parent / "logs"
+        logs.mkdir(exist_ok=True)
+        (logs / "umbrous.log").write_text("ZEBRA-SHIP-731\n")
+    sys.exit(0)
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "seed-tasks":
         seed_tasks(sys.argv[2], sys.argv[3])
     if len(sys.argv) > 1 and sys.argv[1] == "seed-resume":
         seed_resume(sys.argv[2], sys.argv[3])
+    if len(sys.argv) > 1 and sys.argv[1] == "seed-memory":
+        seed_memory(sys.argv[2], sys.argv[3])
     unittest.main()

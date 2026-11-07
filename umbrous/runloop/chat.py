@@ -53,10 +53,12 @@ import re
 import secrets
 import threading
 import time
-from typing import Dict, Iterator, Optional
+from typing import Dict, Iterator, List, Optional
 
 from umbrous.config import Config
 from umbrous.context.assemble import MessageTooLong, assemble, estimate_tokens
+from umbrous.memory.retrieve import Selection, select
+from umbrous.memory.store import Memory
 from umbrous.gate.gate import APPROVAL_UNAVAILABLE, Call, Gate, Outcome, ollama_tools
 from umbrous.history.store import HistoryError, HistoryStore
 from umbrous.logging_setup import log_event
@@ -149,14 +151,20 @@ def deadlines_from(config: Config) -> Deadlines:
 def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: ChatLocks, runs: RunRegistry,
              chat_id: str, model_name: str, message: str, gate: Optional[Gate] = None,
              approvals: bool = False, tasks: Optional[TaskStore] = None,
-             resume_task: Optional[str] = None) -> Iterator[dict]:
+             resume_task: Optional[str] = None, memory: Optional[Memory] = None,
+             use_memory: bool = True) -> Iterator[dict]:
     """`approvals`: the client can show approval cards and answer them (the
     browser page says so). Without it, a read that needs approval is refused at
     once with `approval_unavailable` instead of waiting for an answer that
     cannot come.
 
     `resume_task` (M5): resume that interrupted task instead of sending a new
-    message; its waiting message is used and `message` is ignored."""
+    message; its waiting message is used and `message` is ignored.
+
+    `memory` (M6): the memory stores. Approved items in this chat's scope are
+    retrieved for the message (bounded, see umbrous/memory/retrieve.py) and
+    added to the system message; their ids go out in `start` and `done` and
+    are stored with the reply. `use_memory=False` sends none, to compare."""
     if resume_task is not None:
         if not isinstance(resume_task, str) or not TASK_ID_RE.match(resume_task) or tasks is None:
             yield {"type": "error", "code": "no_such_task", "message": "That task does not exist.", "partial": False}
@@ -227,6 +235,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
     watchdog: Optional[threading.Timer] = None
     report: Optional[dict] = None
     pending_done = False      # M5: the waiting message was stored with its reply
+    memory_used: List[str] = []   # M6: ids of the memory items sent with this message
 
     def end_task(status: str, code: Optional[str]) -> Optional[dict]:
         nonlocal report
@@ -239,7 +248,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
         nonlocal pending_done
         try:
             history.append_exchange(chat_id, message, "".join(text_parts), model, status, prompt_tokens, reply_tokens,
-                                    task_id=task_id)
+                                    task_id=task_id, memory_ids=memory_used)
             pending_done = True
         except HistoryError as exc:  # e.g. archived from another tab mid-reply
             return {"type": "error", "code": exc.code, "message": "The reply was not saved: " + exc.message,
@@ -255,9 +264,15 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             tools_on = bool(ws) and router.tool_capable(model.name)
             system = config.system_prompt + (TOOL_PROMPT.format(name=ws.name) if tools_on else "")
             turns = history.turns(chat_id)
+            # M6: read memory now, from the tables (no cache), for this project only.
+            mem = select(memory, chat_info.project_id, message, max_items=config.memory_max_items,
+                         max_tokens=config.memory_tokens, enabled=bool(use_memory)) if memory else Selection(enabled=False)
             plan = assemble(system, turns, message, recent_turns=config.recent_turns,
                             context_tokens=config.context_tokens, reply_tokens=config.reply_tokens,
-                            model_context=model.context_length)
+                            model_context=model.context_length, memory_block=mem.block)
+            if not plan.memory_included and mem.items:
+                mem.left_out, mem.items = mem.candidates, []
+            memory_used = mem.ids
         except (ModelError, MessageTooLong) as exc:
             outcome = exc.code
             yield {"type": "error", "code": exc.code, "message": exc.message, "partial": False}
@@ -329,7 +344,8 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                               error=exc.__class__.__name__)
             cancel.on_cancel(stop_requested)
         log_event(log, "run.start", run_id=run_id, chat_id=chat_id, model=model.name, task_id=task_id,
-                  turns_sent=plan.turns_included, est_tokens=plan.estimated_tokens, window=plan.window)
+                  turns_sent=plan.turns_included, est_tokens=plan.estimated_tokens, window=plan.window,
+                  memory_items=len(memory_used))
         tools_info = {"on": tools_on, "workspace": ws.name if ws else None,
                       "profile": ws.profile if ws else None, "approvals": approvals}
         if tools_on and ws.profile == "ask_before_read" and not approvals:
@@ -338,7 +354,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             tools_info["off_reason"] = (f"{model.name} has not passed the tool check, so it cannot use the "
                                         "workspace. Run Check tools in the model menu, or pick a verified model.")
         yield {"type": "start", "run_id": run_id, "model_requested": model.name, "context": plan.summary(),
-               "task_id": task_id, "tools": tools_info, "resume_of": resume_task}
+               "task_id": task_id, "tools": tools_info, "resume_of": resume_task, "memory": mem.summary()}
 
         options = {"num_ctx": plan.window, "num_predict": plan.reply_tokens}
         messages = list(plan.messages)
@@ -476,7 +492,8 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             yield {"type": "done", "model": piece.model, "prompt_tokens": piece.prompt_tokens,
                    "reply_tokens": piece.reply_tokens, "estimated_prompt_tokens": plan.estimated_tokens,
                    "ms": int((time.monotonic() - started) * 1000), "done_reason": piece.done_reason,
-                   "task_id": task_id, "tool_rounds": rounds, "evidence": _dedupe(evidence), "report": final}
+                   "task_id": task_id, "tool_rounds": rounds, "evidence": _dedupe(evidence), "report": final,
+                   "memory_ids": memory_used}
         except ModelError as exc:
             if exc.code == Cancelled.code and time_up.is_set():
                 # the task's own time limit cancelled it, not you

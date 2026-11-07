@@ -97,6 +97,11 @@ fn snapshot(ws: &Workspace, label: &str) -> Value {
         "access": ws.access.as_ref().map(|a| json!({"project": a.project_id, "profile": a.workspace.as_ref().map(|w| w.profile.clone())})),
         "ask_notice": ws.asks_before_read(),
         "interrupted": ws.interrupted.as_ref().map(|i| json!({"task": i.task_id, "text": i.text, "report": i.report})),
+        "memory": ws.memory.as_ref().map(|v| json!({
+            "project_id": v.project_id,
+            "personal": v.personal.iter().map(|m| json!([m.id, m.kind, m.text, m.applies])).collect::<Vec<_>>(),
+            "project": v.project.iter().map(|m| json!([m.id, m.kind, m.text])).collect::<Vec<_>>()})),
+        "use_memory": ws.use_memory,
         "ollama": ws.models.as_ref().map(|m| json!({"reachable": m.reachable, "models": m.models.len()})),
         "perf": format!("{:?}", ws.perf),
     })
@@ -197,6 +202,40 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             window.update(cx, |ws, _, cx| ws.switch_to_workspace_read(cx)).ok();
             wait_until(cx, window, 10, "profile switched", |ws| !ws.asks_before_read()).await?;
         }
+        "wait_memory" => {
+            // until the selected project's memory view has loaded (M6)
+            wait_until(cx, window, 10, "memory", |ws| ws.memory.as_ref()
+                .map(|v| v.project_id.as_deref() == ws.project_id.as_deref()).unwrap_or(false)).await?;
+        }
+        "memory_add" => {
+            // what the Memory section's + and Enter do: `memory_add personal TEXT` or `memory_add project TEXT`
+            let (store, text) = arg.split_once(' ').ok_or("memory_add personal|project TEXT")?;
+            let store: &'static str = if store == "personal" { "personal" } else { "project" };
+            let t = text.trim().to_string();
+            window.update(cx, |ws, _, cx| ws.add_memory(store, t.clone(), cx)).ok();
+            let t = text.trim().to_string();
+            wait_until(cx, window, 10, "memory added", move |ws| memory_texts(ws).iter().any(|x| *x == t)).await?;
+        }
+        "memory_edit" => {
+            // what clicking an item, editing it and Enter do: `memory_edit OLD|NEW`
+            let (old, new) = arg.split_once('|').ok_or("memory_edit OLD|NEW")?;
+            let id = memory_id(window, cx, old)?;
+            let n = new.to_string();
+            window.update(cx, |ws, _, cx| ws.edit_memory(id, n.clone(), cx)).ok();
+            let n = new.to_string();
+            wait_until(cx, window, 10, "memory edited", move |ws| memory_texts(ws).iter().any(|x| *x == n)).await?;
+        }
+        "memory_delete" => {
+            // what pressing × twice does: `memory_delete TEXT` (an item containing TEXT)
+            let id = memory_id(window, cx, arg)?;
+            let gone = id.clone();
+            window.update(cx, |ws, _, cx| ws.delete_memory(id, cx)).ok();
+            wait_until(cx, window, 10, "memory deleted", move |ws| ws.memory_item(&gone).is_none()).await?;
+        }
+        "use_memory" => {
+            let on = arg != "off";
+            window.update(cx, |ws, _, cx| { ws.use_memory = on; cx.notify(); }).ok();
+        }
         "resume" => {
             // what the interrupted notice's Resume button does (M5)
             window.update(cx, |ws, _, cx| ws.resume_task(cx)).ok();
@@ -233,11 +272,17 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "sessions" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),
                 "opening" => ws.opening_title().unwrap_or_else(|| "none".into()),
                 "interrupted" => ws.interrupted.as_ref().map(|i| i.text.clone()).unwrap_or_else(|| "none".into()),
+                "last_text_lacks" => (!ws.msgs.last().map(|m| m.text.contains(val)).unwrap_or(false)).to_string(),
+                "reply_metas" => ws.msgs.iter().filter(|m| m.role == Role::Assistant).map(|m| m.meta.clone()).collect::<Vec<_>>().join(" | "),
+                "memory" => memory_texts(ws).join(" | "),
+                "memory_count" => memory_texts(ws).len().to_string(),
+                "memory_project" => ws.memory.as_ref().map(|v| v.project.len()).unwrap_or(0).to_string(),
                 _ => "?".into(),
             }).map_err(|_| "window gone".to_string())?;
             let ok = match what {
                 "chat" if val != "none" => got.contains(val),
-                "last_meta" | "sessions" | "last_text" => got.contains(val),
+                "last_meta" | "sessions" | "last_text" | "reply_metas" | "memory" => got.contains(val),
+                "last_text_lacks" => got == "true",
                 "interrupted" if val != "none" => got.contains(val),
                 "no_text" | "user_meta_empty" => got == "true",
                 "last_text_len_over" => got == "true",
@@ -332,6 +377,19 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
         other => return Err(format!("unknown command {other}")),
     }
     Ok(None)
+}
+
+fn memory_texts(ws: &Workspace) -> Vec<String> {
+    ws.memory.as_ref().map(|v| v.personal.iter().chain(v.project.iter()).map(|m| m.text.clone()).collect()).unwrap_or_default()
+}
+
+fn memory_id(window: WindowHandle<Workspace>, cx: &mut AsyncApp, text: &str) -> Result<String, String> {
+    window
+        .update(cx, |ws, _, _| ws.memory.as_ref().and_then(|v| v.personal.iter().chain(v.project.iter())
+            .find(|m| m.text.contains(text)).map(|m| m.id.clone())))
+        .ok()
+        .flatten()
+        .ok_or_else(|| format!("no memory item containing {text:?}"))
 }
 
 /// Capture this app's own window to a PNG (no Screen Recording permission is
