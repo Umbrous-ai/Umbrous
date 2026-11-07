@@ -31,6 +31,12 @@ pub fn danger() -> Rgba { rgb(0xF26D6D) }
 pub fn success() -> Rgba { rgb(0x5CCB8A) }
 pub fn warning() -> Rgba { rgb(0xF2C14E) }
 
+// The context card (right of the header), measured from Freddy's reference
+// screenshot (2026-11-07): raised a step above the panels, hairline border.
+pub fn card_bg() -> Rgba { rgb(0x2D2D2D) }
+pub fn card_border() -> Rgba { rgb(0x3B3B3B) }
+pub fn card_divider() -> Rgba { rgb(0x3E3E3E) }
+
 // Text selection: the accent at low opacity (the browser used its own highlight)
 pub fn selection() -> Hsla { rgba(0x8B7CF655).into() }
 

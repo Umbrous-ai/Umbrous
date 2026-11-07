@@ -81,6 +81,10 @@ pub struct Workspace {
     notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
     sidebar: bool,
     details: bool,
+    /// the context card under the header's list button (the right-hand panel)
+    card_open: bool,
+    card_menu: bool,
+    card_closed_at: Option<Instant>,
     projects_open: bool,
     sessions_open: bool,
     /// estimated tokens and window of the last reply's context (Details ▸ Context)
@@ -218,7 +222,10 @@ impl Workspace {
             run: None,
             notice: None,
             sidebar: true,
-            details: true,
+            details: false,
+            card_open: false,
+            card_menu: false,
+            card_closed_at: None,
             projects_open: true,
             sessions_open: true,
             context: None,
@@ -869,6 +876,12 @@ impl Workspace {
     }
 
     #[cfg(feature = "e2e")]
+    pub fn set_card_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.card_open = open;
+        cx.notify();
+    }
+
+    #[cfg(feature = "e2e")]
     pub fn is_running(&self) -> bool {
         self.run.is_some()
     }
@@ -950,7 +963,9 @@ impl Workspace {
         cx.notify();
     }
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model_menu || self.options_menu || self.project_input.is_some() {
+        if self.model_menu || self.options_menu || self.project_input.is_some() || self.card_open {
+            self.card_open = false;
+            self.card_menu = false;
             self.model_menu = false;
             self.options_menu = false;
             self.project_input = None;
@@ -1309,6 +1324,14 @@ impl Workspace {
                     cx.notify();
                 })))
             })
+            .child(ui::icon_btn("card-toggle", "list-check", self.card_open).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                // a click outside just closed it: this click should not reopen it
+                let just_closed = this.card_closed_at.map(|t| t.elapsed() < Duration::from_millis(250)).unwrap_or(false);
+                this.card_open = !this.card_open && !just_closed;
+                this.card_menu = false;
+                cx.notify();
+            })))
+            .child(div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(border_strong()))
             .child(ui::icon_btn("rtoggle", "sidebar-right", self.details).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.details = !this.details;
                 cx.notify();
@@ -1358,6 +1381,118 @@ impl Workspace {
                         .child("Delete chat")
                         .child(div().text_size(fs_12()).child("Not available yet")),
                 )
+                .into_any_element(),
+        )
+    }
+
+    /// The context card: floats under the header's list button, like Freddy's
+    /// reference. Sizes in points from that screenshot: 300 wide, 20 side
+    /// padding, 30 pt rows, 13 pt section titles, 14 pt items.
+    fn render_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use theme::*;
+        if !self.card_open {
+            return None;
+        }
+        let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_else(|| "Umbrous".into());
+        let row = |id: &'static str| {
+            div().id(id).group(id).flex().items_center().gap(px(14.)).h(px(30.)).px(px(20.))
+        };
+        let title_row = |title: SharedString, button: gpui::Stateful<gpui::Div>| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(30.))
+                .px(px(20.))
+                .text_size(fs_13())
+                .text_color(text_default())
+                .child(title)
+                .child(button.mr(px(-6.)))
+        };
+        // Changes: what this session changed in your files. Nothing can change
+        // files yet (tools arrive in M3), so it reads +0 −0 rather than invent numbers.
+        let changes = row("card-changes")
+            .child(ui::icon("diff").text_color(text_strong()))
+            .child(div().flex_1().text_size(fs_13()).text_color(text_strong()).child("Changes"))
+            .child(div().flex().gap(px(6.)).text_size(fs_13()).child(div().text_color(success()).child("+0")).child(div().text_color(danger()).child("-0")));
+        let web = row("card-web")
+            .child(ui::icon("globe").text_color(text_default()))
+            .child(div().text_size(fs_13()).text_color(text_default()).child("Web search"));
+        let all = row("card-all")
+            .cursor_pointer()
+            .child(ui::hover_icon("connectors", &"card-all".into(), text_subtle(), text_default()))
+            .child(div().text_size(fs_13()).text_color(text_subtle()).group_hover("card-all", |s| s.text_color(text_default())).child("View all"))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.details = true; // the full Details panel: runtime, session, tools
+                this.card_open = false;
+                cx.notify();
+            }));
+        let mut menu = None;
+        if self.card_menu {
+            let item = |id: &'static str, label: &'static str| {
+                div().id(id).px(px(10.)).py(px(7.)).rounded(px(R_8)).cursor_pointer().text_size(fs_13()).text_color(text_strong()).hover(|s| s.bg(bg_selected())).child(label)
+            };
+            menu = Some(
+                div()
+                    .absolute()
+                    .top(px(34.))
+                    .right(px(14.))
+                    .min_w(px(200.))
+                    .p(px(6.))
+                    .rounded(px(R_12))
+                    .bg(bg_raised())
+                    .border_1()
+                    .border_color(border_strong())
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .child(item("card-details", if self.details { "Hide details" } else { "Show details" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.details = !this.details;
+                        this.card_menu = false;
+                        cx.notify();
+                    })))
+                    .child(item("card-folder", "Show data folder").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if let Some(h) = logfile::umbrous_home() {
+                            cx.reveal_path(&h);
+                        }
+                        this.card_menu = false;
+                        cx.notify();
+                    }))),
+            );
+        }
+        Some(
+            div()
+                .id("context-card")
+                .absolute()
+                .top(px(64.))
+                .right(px(10.))
+                .w(px(300.))
+                .pt(px(8.))
+                .pb(px(10.))
+                .rounded(px(16.))
+                .bg(card_bg())
+                .border_1()
+                .border_color(card_border())
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.card_open = false;
+                    this.card_menu = false;
+                    this.card_closed_at = Some(Instant::now());
+                    cx.notify();
+                }))
+                .child(title_row(project.into(), ui::icon_btn("card-more", "more", self.card_menu).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.card_menu = !this.card_menu;
+                    cx.notify();
+                }))))
+                .child(changes)
+                .child(div().mx(px(20.)).mt(px(7.)).mb(px(6.)).h(px(1.)).bg(card_divider()))
+                // Adding sources needs the tools that arrive in M3; the + is shown, as in the reference
+                .child(title_row("Sources".into(), ui::icon_btn("card-add-source", "plus", false)))
+                .child(web)
+                .child(all)
+                .children(menu)
                 .into_any_element(),
         )
     }
@@ -1820,7 +1955,8 @@ impl Render for Workspace {
                 .child(self.render_header(cx))
                 .child(self.render_transcript(cx))
                 .child(self.render_composer(cx))
-                .children(self.render_options_menu(cx));
+                .children(self.render_options_menu(cx))
+                .children(self.render_card(cx));
             app.when(self.sidebar, |d| d.child(self.render_sidebar(cx)))
                 .child(main)
                 .when(self.details && wide, |d| d.child(self.render_details(cx)))

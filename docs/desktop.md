@@ -144,6 +144,17 @@ serves), is the visual source of truth. The native views reproduce it:
   attach, model pill, Tools · 4 and the round send button, and the Details panel
   with Runtime, Session, Tools, Files and Steps. The Details panel hides below
   1180 px wide, as the page's media query did.
+- The right-hand panel is now a floating card under the header's list button,
+  after Freddy's reference screenshot (2026-11-07): the project's name with a ⋯
+  menu (Show details, Show data folder), Changes with added and removed line
+  counts, then Sources (+, Web search, View all). Its sizes and colours were
+  measured from that screenshot: 300 pt wide, 20 pt padding, 30 pt rows, 13 pt
+  text, background `#2D2D2D`, hairline `#3B3B3B`, radius 16. It closes on a
+  click outside or Escape. Changes reads +0 -0 because nothing in Umbrous can
+  change files until tools arrive (M3); adding sources waits for the same.
+  The docked Details panel (Runtime, Session, and the page's placeholder
+  sections) is still there behind the header's panel button and View all,
+  closed by default.
 
 `desktop/e2e/scripts/` and `stress.py seed-reference` reproduce the page's sample
 content (projects, sessions, the "pass rate" reply) as real data so both can be

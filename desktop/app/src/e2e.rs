@@ -210,6 +210,11 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             sleep(cx, 50).await;
             next_frame(window, cx).await;
         }
+        "card" => {
+            let open = arg != "close";
+            window.update(cx, |ws, _, cx| ws.set_card_open(open, cx)).ok();
+            next_frame(window, cx).await;
+        }
         "kill_backend" => {
             let pid = window.update(cx, |ws, _, _| ws.backend.pid()).ok().flatten().ok_or("no backend")?;
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };

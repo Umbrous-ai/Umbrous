@@ -1,5 +1,6 @@
 //! Icons, compiled into the binary. Extracted unchanged from the SVG sprite at
-//! the top of prototypes/umbrous-harness.html (1px outline icons on a 16px grid).
+//! the top of prototypes/umbrous-harness.html (1px outline icons on a 16px grid),
+//! plus list-check, diff and connectors for the context card, drawn in the same style.
 
 use std::borrow::Cow;
 
@@ -20,8 +21,10 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/clock.svg", include_bytes!("../assets/icons/clock.svg")),
     ("icons/code.svg", include_bytes!("../assets/icons/code.svg")),
     ("icons/commit.svg", include_bytes!("../assets/icons/commit.svg")),
+    ("icons/connectors.svg", include_bytes!("../assets/icons/connectors.svg")),
     ("icons/copy.svg", include_bytes!("../assets/icons/copy.svg")),
     ("icons/cpu.svg", include_bytes!("../assets/icons/cpu.svg")),
+    ("icons/diff.svg", include_bytes!("../assets/icons/diff.svg")),
     ("icons/doc.svg", include_bytes!("../assets/icons/doc.svg")),
     ("icons/folder.svg", include_bytes!("../assets/icons/folder.svg")),
     ("icons/globe.svg", include_bytes!("../assets/icons/globe.svg")),
@@ -29,6 +32,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/home.svg", include_bytes!("../assets/icons/home.svg")),
     ("icons/inbox.svg", include_bytes!("../assets/icons/inbox.svg")),
     ("icons/layers.svg", include_bytes!("../assets/icons/layers.svg")),
+    ("icons/list-check.svg", include_bytes!("../assets/icons/list-check.svg")),
     ("icons/logo.svg", include_bytes!("../assets/icons/logo.svg")),
     ("icons/moon.svg", include_bytes!("../assets/icons/moon.svg")),
     ("icons/more.svg", include_bytes!("../assets/icons/more.svg")),
