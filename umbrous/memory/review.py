@@ -86,14 +86,14 @@ def norm(text: str) -> str:
     return " ".join(str(text).lower().split()).strip(" \"'“”‘’`").rstrip(".!;:,")
 
 
-# Words that frame a note rather than carry its content ("Prefers X",
-# "Decided: X", "The user likes X"). The rest of the note's words must be in
-# its quote.
-FRAMING = frozenset("the and for are but not you your with this that have has was were from into about there their "
-                    "them they then than its our user users user's prefers prefer preferred preference likes like "
-                    "liked wants want wanted decided decide decides decision lesson note remember project always "
-                    "should".split())
-WORD = re.compile(r"[a-z0-9]+")
+# Words that only frame a note ("Prefers X", "Decided: X", "The user likes X",
+# "We decided to X"): articles, the speaker, "to be", and the framing verbs.
+# Every other word of the note, however short ("Go", "on", "not", "10"), must
+# be in its quote (Codex review, M7).
+FRAMING = frozenset("a an the i i'm me my we our us user users is are am be to "
+                    "prefer prefers preferred preference preferences like likes liked want wants wanted "
+                    "decide decided decides decision lesson note remember".split())
+WORD = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
 
 
 def _stem(w: str) -> str:
@@ -105,7 +105,8 @@ def _stem(w: str) -> str:
 
 def content_words(text: str) -> set:
     """The words that carry a note's content: lower case, stemmed, without framing words."""
-    return {_stem(w) for w in WORD.findall(str(text).lower().replace("'s", "")) if len(w) >= 3 and w not in FRAMING}
+    words = (w[:-2] if w.endswith("'s") else w for w in WORD.findall(str(text).lower().replace("’", "'")))
+    return {_stem(w) for w in words if w not in FRAMING}
 
 
 def grounded(text: str, quote: str) -> bool:

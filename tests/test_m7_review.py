@@ -92,6 +92,15 @@ class CheckTests(Base):
         self.assertEqual(Review.check(partly, MSG, REPLY), (None, "not_grounded"))
         only_framing = raw("personal", "preference", "Prefers", "I prefer short answers in tables")
         self.assertEqual(Review.check(only_framing, MSG, REPLY), (None, "not_grounded"))
+        # short words and numbers are content too (Codex review of 07725e2)
+        for text, quote in (("Use Go", "We decided to use Rust"),
+                            ("Ship on Friday at 10", "We decided to ship on Friday at 12"),
+                            ("Does not use tabs", "I use tabs")):
+            self.assertEqual(Review.check(raw("project", "decision", text, quote), quote, ""),
+                             (None, "not_grounded"), text)
+        for text, quote in (("Use Go", "We decided to use Go"),
+                            ("Ship on Friday at 12", "We decided to ship on Friday at 12")):
+            self.assertIsNotNone(Review.check(raw("project", "decision", text, quote), quote, "")[0], text)
         # framing words and simple word endings may differ; the content may not
         for text in ("Prefers short answers in tables", "The user likes short answers in tables",
                      "Short answer, tables"):

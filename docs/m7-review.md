@@ -78,7 +78,7 @@ Every suggestion (`Review.check`):
 | store is `personal` or `project`, kind is one of that store's kinds | `bad_store`, `bad_kind` |
 | text passes M6's rules: 1 to 500 characters, nothing that looks like a key, token or password | `bad_text`, `looks_secret` |
 | it quotes at least 8 characters, copied from your message or from the reply (case and spacing do not matter) | `not_grounded` |
-| **the quote says what the note says**: every content word of the text is in the quote (framing words like "prefers", "decided", "the user" and simple endings like -s, -ed, -ing aside) | `not_grounded` |
+| **the quote says what the note says**: every word of the text is in the quote, short words and numbers included; only framing words ("a", "the", "I", "we", "the user", "is", "to", "prefers", "likes", "wants", "decided", …) and simple endings like -s, -ed, -ing are set aside | `not_grounded` |
 | **words found only in the reply can become project state or a lesson, nothing else** | `not_your_words` |
 | not already used in this project (its project memory, or personal memory whose scope includes it), not already waiting, not rejected before in this project | `duplicate`, `rejected_before` |
 | at most 3 kept per task, and at most 50 waiting per project | `too_many`, `queue_full` |
@@ -89,7 +89,8 @@ message `read notes/claim.md`: the quote was in your message, so the note was
 offered as yours. Now the note's words must all appear in the quote, so the
 quote supports this claim and not just any claim. It is a word check, not
 understanding: "Ship on Friday" from "we decided to ship on Friday" passes,
-"Prefers dark mode" from "I prefer light mode" does not. Your own edits are
+"Prefers dark mode" from "I prefer light mode" does not, and neither does
+"Use Go" from "we decided to use Rust" or "Ship on Friday at 10" from "… at 12". Your own edits are
 not re-checked against the quote; what you type is your words.
 
 The fifth row is the provenance rule. A personal fact or preference, and a
