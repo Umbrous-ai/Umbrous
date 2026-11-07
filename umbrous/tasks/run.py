@@ -33,10 +33,11 @@ from umbrous.tasks.store import TaskStore
 log = logging.getLogger("umbrous.tasks")
 
 # A citation in the answer: name:12 or name:12-30, where the name may have
-# folders and need not have an extension (README:1, src/Makefile:3). The
+# folders, need not have an extension, and may start with a digit
+# (README:1, src/Makefile:3, migrations/001_init.sql:3). The
 # "name line 12" form counts only for path-like names (a "." or "/") or
 # well-known extensionless files, so "in line 3" is not taken for a file.
-CITE_RE = re.compile(r"(?<![\w/.:@-])((?:\.?/)?(?:[\w.-]+/)*[A-Za-z_][\w.-]*)"
+CITE_RE = re.compile(r"(?<![\w/.:@-])((?:\.?/)?(?:[\w.-]+/)*\w[\w.-]*)"
                      r"(:| lines? )(\d{1,7})(?:\s*[-–]\s*(\d{1,7}))?(?::\d+)?(?!\d)")   # a :column is ignored
 BARE_NAMES = {"readme", "makefile", "dockerfile", "license", "licence", "changelog", "notice", "authors",
               "contributing", "codeowners", "procfile", "gemfile", "rakefile", "vagrantfile", "jenkinsfile",
@@ -53,6 +54,8 @@ def citations(answer: str) -> List[Tuple[str, int, int]]:
         base = path.rsplit("/", 1)[-1]
         if base.lower() in NOT_FILES:
             continue
+        if "/" not in path and re.fullmatch(r"[\d.]+", base):
+            continue        # a time (10:30), a ratio (3:1) or a version, not a file; 001_init.sql is kept
         if sep != ":" and "." not in base and "/" not in path and base.lower() not in BARE_NAMES:
             continue
         out.append((path, a, b))

@@ -233,6 +233,21 @@ class TaskRunTests(unittest.TestCase):
                                      "See README:1 and Makefile:1-2 (Makefile:2:3 too).")
             self.assertEqual((rep["citations_checked"], rep["uncertainty"]), (3, []))
 
+    def test_digit_leading_names_are_checked_and_times_are_not(self):
+        from umbrous.tasks.run import citations
+        self.assertEqual(citations("migrations/001_init.sql:3, 2fa.md:1, 001_init.sql line 4, at 10:30, "
+                                   "12:00:05, a 3:1 ratio, version 1.2:4, ./8ball.py:2"),
+                         [("migrations/001_init.sql", 3, 3), ("2fa.md", 1, 1), ("001_init.sql", 4, 4),
+                          ("8ball.py", 2, 2)])
+        # Codex's reproduction: a read notes/plan.md:2 next to an unread migrations/001_init.sql:3
+        with self.rt() as rt:
+            self.setup_rt(rt)
+            rep = self.verify_report(rt, "digits:3b", [("read_file", {"path": "notes/plan.md"})],
+                                     "Plan: notes/plan.md:2. Schema: migrations/001_init.sql:3.")
+            self.assertEqual(rep["citations_checked"], 2)
+            self.assertEqual(rep["uncertainty"],
+                             ["The answer cites migrations/001_init.sql, which was not read in this task."])
+
     def test_tasks_api_rejects_bad_ids_and_methods(self):
         with self.rt() as rt:
             self.assertEqual(rt.get_json("/api/tasks/tsk_nope")[0], 404)

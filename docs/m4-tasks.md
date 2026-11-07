@@ -16,7 +16,7 @@ bin/umbrous                          # ask something that needs a few files
 bin/umbrous tasks                    # recent tasks: status, steps, actions
 bin/umbrous tasks --task tsk_…       # one task's trace (every event) and report
 bin/umbrous purge tasks --all --yes  # delete task state (receipts are separate)
-bin/umbrous test                     # 221 tests; no Ollama needed
+bin/umbrous test                     # 222 tests; no Ollama needed
 ```
 
 In the browser page, each reply that used tools ends with a **report**. Its
@@ -98,7 +98,8 @@ model as part of the tool result (a bounded amount of text), and is noted as
 
 When the answer is done, Verify (`tasks/run.py`, `citations()`) finds the
 file citations in it: `name:12`, `name:12-30` or `name:12:5`, with or without
-folders or an extension (`README:1`, `src/Makefile:3`), and `name line 12` for
+folders or an extension, and digit-first names (`README:1`, `src/Makefile:3`,
+`migrations/001_init.sql:3`), and `name line 12` for
 path-like or well-known names. Each is checked against the lines that a
 completed **read_file** returned. A line that only appeared in **search
 results** does not count as read, because a search shows each line cut to 200
@@ -269,7 +270,7 @@ The tests below exist; try writing them yourself first, then compare.
 | Test | Checks |
 |---|---|
 | `test_m4_tasks.TaskStoreTests` | schema 5; only valid transitions; ordered events; purge removes every table's rows |
-| `test_a_search_hit_is_not_a_read`, `test_extensionless_citations_are_checked` | only completed reads verify a citation; `README:1`, `Makefile:3` are checked; host:port and times are not citations |
+| `test_a_search_hit_is_not_a_read`, `test_extensionless_citations_are_checked`, `test_digit_leading_names_are_checked_and_times_are_not` | only completed reads verify a citation; `README:1`, `Makefile:3` are checked; host:port and times are not citations; digit-first names like `001_init.sql:3` are |
 | `test_multi_step_read_task_has_a_trace_and_a_report` | 4 steps, 3 actions, each requested → started → completed; checkpoints; evidence; Verify flags an unread file and an unread line; same ids as the receipts; the chat transcript unchanged |
 | `test_step_limit…`, `test_total_tool_call_limit`, `test_task_time_limit` | each limit ends with a clear report |
 | `test_hung_tool_is_abandoned_and_reported_unknown` | a stuck tool becomes unknown, the task goes on, its late result is logged but never used |
