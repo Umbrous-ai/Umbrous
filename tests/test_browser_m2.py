@@ -67,7 +67,9 @@ class BrowserHistoryTests(unittest.TestCase):
         self.assertEqual(again["archivedSessions"], ["Best soil for roses"])
         self.assertEqual(again["transcript"], ["When should I plant tulips?", "And daffodils?", "And tulips in pots?"])
         self.assertEqual(again["sessProject"], "Garden")
+        self.assertEqual(again["allArchivedText"], "No active chats in Garden. 2 archived.")
         for r in (first, again):
+            self.assertTrue(r["initialNotice"].startswith("New chat in General."), r["initialNotice"])
             self.assertEqual(r["dialogs"], [])
             self.assertEqual(r["cspErrors"], [])
             self.assertEqual(r["pageErrors"], [])

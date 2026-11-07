@@ -46,7 +46,11 @@
     if (s < 86400) return Math.floor(s / 3600) + 'h';
     return Math.floor(s / 86400) + 'd';
   }
-  function projectName(id) { const p = projects.find((x) => x.id === id); return p ? p.name : id; }
+  function projectName(id) {
+    const p = projects.find((x) => x.id === id);
+    if (p) return p.name;
+    return id === 'prj_general' ? 'General' : 'this project';  // before the project list has loaded
+  }
   async function getJson(path, opts) {
     const r = await api.fetch(path, opts);
     let j = null;
@@ -271,7 +275,13 @@
     } catch (e) { box.textContent = ''; box.appendChild(el('div', 'proj-error', e.message)); return; }
     if (want !== projectId) return;
     box.textContent = '';
-    if (!active.length) box.appendChild(el('div', 'side-empty', 'No chats in ' + projectName(want) + ' yet.'));
+    if (!active.length) {
+      const p = projects.find((x) => x.id === want);
+      const hidden = p ? p.archived_chats : archived.length;
+      box.appendChild(el('div', 'side-empty', hidden
+        ? `No active chats in ${projectName(want)}. ${hidden} archived.`
+        : `No chats in ${projectName(want)} yet.`));
+    }
     for (const c of active.concat(archived)) {
       const b = navButton(c.title, c.archived ? 'archived' : ago(c.updated_at), c.archived ? 'archived' : '');
       b.dataset.chatId = c.id;
@@ -355,10 +365,18 @@
     setComposer();
     showSessionProject();
     clearContext();
-    t.appendChild(el('div', 'notice', `New chat in ${projectName(projectId)}. It talks to a model running in Ollama on this Mac; ` +
-      'nothing leaves this machine. It is saved on this Mac once you send the first message.'));
+    const n = el('div', 'notice');
+    n.id = 'new-chat-notice';
+    t.appendChild(n);
+    newChatNotice();
     if (api && !ollamaUp) loadModels();
     markCurrent();
+  }
+
+  function newChatNotice() {
+    const n = $('#new-chat-notice');
+    if (n) n.textContent = `New chat in ${projectName(projectId)}. It talks to a model running in Ollama on this Mac; ` +
+      'nothing leaves this machine. It is saved on this Mac once you send the first message.';
   }
 
   function renderStoredReply(m) {
@@ -582,7 +600,7 @@
     $('#sec-projects').textContent = '';   // the prototype's placeholder projects and sessions
     $('#sec-sessions').textContent = '';
     $('[data-new]').click();  // the prototype's own New chat (sidebar state) plus ours
-    refreshSidebar().then(showSessionProject);
+    refreshSidebar().then(() => { showSessionProject(); newChatNotice(); });
     loadModels();
   }
 

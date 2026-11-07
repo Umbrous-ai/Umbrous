@@ -16,6 +16,8 @@ const out = {};
   await page.waitForFunction(() => document.getElementById('rt-status').textContent === 'Connected');
   await page.waitForFunction(() => document.querySelector('#sec-projects [data-project-id="prj_general"]'));
   await page.waitForFunction(() => !/umbra-large|Pick/.test(document.getElementById('model-pill-name').textContent));
+  await page.waitForTimeout(200);
+  out.initialNotice = await page.textContent('#new-chat-notice');
   await page.click('#model-pill');
   await page.click('.mm-pick:has-text("qwen2.5:3b")');
   const projects = () => page.$$eval('#sec-projects [data-project-id] .t', (n) => n.map((x) => x.textContent));
@@ -121,6 +123,12 @@ const out = {};
     out.transcript = await page.$$eval('#thread .msg-u', (n) => n.map((x) => x.textContent));
     out.sessProject = await page.textContent('#sess-project');
     if (shots) await page.screenshot({ path: shots + '/m2-history.png' });
+    // archive the last active chat: the list must say the rest are archived, not "no chats yet"
+    await page.click('#chat-options');
+    await page.click('#opt-menu [data-act="archive"]');
+    await page.waitForSelector('#archived-notice');
+    await page.waitForFunction(() => document.querySelector('#sec-sessions .side-empty'));
+    out.allArchivedText = await page.textContent('#sec-sessions .side-empty');
   }
   out.dialogs = dialogs;
   out.cspErrors = cspErrors;
