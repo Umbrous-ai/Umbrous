@@ -155,6 +155,14 @@ def run_chat(config: Config, router: ModelRouter, store: ChatStore, runs: RunReg
                     text_parts.append(piece.text)
                     yield {"type": "delta", "text": piece.text}
                 elif isinstance(piece, ChatDone):
+                    if not "".join(text_parts).strip():
+                        outcome = "empty_response"
+                        detail = ("The model reached its output limit before producing an answer. "
+                                  "Try a shorter request or increase reply_tokens."
+                                  if piece.done_reason == "length" else
+                                  "The model returned no answer text. Try again or choose another model.")
+                        yield {"type": "error", "code": outcome, "message": detail, "partial": False}
+                        return
                     outcome = "ok"
                     chat.turns.append(Turn("user", message))
                     chat.turns.append(Turn("assistant", "".join(text_parts)))

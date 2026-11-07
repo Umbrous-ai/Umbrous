@@ -293,6 +293,21 @@ class ChatApiTests(unittest.TestCase):
             self.assertEqual(sent["options"]["num_ctx"], 4096)  # min(8192, model's 4096): no silent truncation by Ollama
             self.assertEqual(sent["messages"][0]["role"], "system")
 
+    def test_chat_requests_answer_without_thinking(self):
+        with self.rt() as rt:
+            rt.chat("chat_nothink01", "qwen2.5:3b", "hello")
+            self.assertIs(self.chat_requests()[-1].get("think"), False)
+
+    def test_empty_answer_is_an_error_and_is_not_saved(self):
+        self.fake.models.append(FakeModel("empty:1b", reply=""))
+        with self.rt() as rt:
+            ev = rt.chat("chat_empty001", "empty:1b", "hello")
+            self.assertEqual(ev[-1]["type"], "error")
+            self.assertEqual(ev[-1]["code"], "empty_response")
+            self.assertFalse(ev[-1]["partial"])
+            rt.chat("chat_empty001", "qwen2.5:3b", "retry")
+            self.assertEqual([m["content"] for m in self.chat_requests()[-1]["messages"]][1:], ["retry"])
+
     def test_history_is_sent_on_the_next_turn(self):
         with self.rt() as rt:
             rt.chat("chat_testtest02", "qwen2.5:3b", "first")

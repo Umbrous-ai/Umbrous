@@ -223,7 +223,9 @@ class OllamaAdapter:
             if cancel.cancelled or total_hit.is_set():
                 raise stopped("")
             conn.sock.settimeout(bounded(d.first_token))
-            body = {"model": model, "messages": messages, "stream": True, "options": options or {}}
+            # M1 displays answers only; do not spend its reply budget on hidden thinking.
+            body = {"model": model, "messages": messages, "stream": True,
+                    "think": False, "options": options or {}}
             try:
                 conn.request("POST", "/api/chat", body=json.dumps(body).encode(),
                              headers={"Content-Type": "application/json"})
