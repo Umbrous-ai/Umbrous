@@ -1,12 +1,22 @@
-//! Icons, compiled into the binary. Extracted unchanged from the SVG sprite at
-//! the top of prototypes/umbrous-harness.html (1px outline icons on a 16px grid),
-//! plus list-check, diff and connectors for the context card, drawn in the same style.
+//! Embedded interface and activity icons. Original interface drawings live in
+//! assets/icons; Moicons activity SVGs and upstream notices live in assets/moicons.
 
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 
 const ICONS: &[(&str, &[u8])] = &[
+    ("moicons/cpu.svg", include_bytes!("../assets/moicons/cpu.svg")),
+    ("moicons/doc.svg", include_bytes!("../assets/moicons/doc.svg")),
+    ("moicons/search.svg", include_bytes!("../assets/moicons/search.svg")),
+    ("moicons/pen.svg", include_bytes!("../assets/moicons/pen.svg")),
+    ("moicons/terminal.svg", include_bytes!("../assets/moicons/terminal.svg")),
+    ("moicons/folder.svg", include_bytes!("../assets/moicons/folder.svg")),
+    ("moicons/clock.svg", include_bytes!("../assets/moicons/clock.svg")),
+    ("moicons/shield.svg", include_bytes!("../assets/moicons/shield.svg")),
+    ("moicons/shield-check.svg", include_bytes!("../assets/moicons/shield-check.svg")),
+    ("moicons/list-check.svg", include_bytes!("../assets/moicons/list-check.svg")),
+    ("moicons/bolt.svg", include_bytes!("../assets/moicons/bolt.svg")),
     ("icons/arrow-up.svg", include_bytes!("../assets/icons/arrow-up.svg")),
     ("icons/asterisk.svg", include_bytes!("../assets/icons/asterisk.svg")),
     ("icons/bolt.svg", include_bytes!("../assets/icons/bolt.svg")),

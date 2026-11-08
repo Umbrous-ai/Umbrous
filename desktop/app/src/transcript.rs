@@ -408,7 +408,7 @@ pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &S
                 .pb(px(SP_16))
                 .child(inner.text_size(fs_12()).line_height(px(18.)).text_color(color).child(
                     div().flex().items_center().gap(px(8.))
-                        .when_some(m.activity_icon, |row, name| row.child(crate::ui::icon(name).text_color(color)))
+                        .when_some(m.activity_icon, |row, name| row.child(crate::ui::activity_icon(name, color, ix)))
                         .child(m.meta.clone()),
                 ))
                 .into_any_element()

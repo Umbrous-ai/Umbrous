@@ -1,13 +1,29 @@
 //! Small building blocks matching the original interface's CSS classes
 //! (prototypes/umbrous-harness.html). Each helper names the class it mirrors.
 
-use gpui::{div, prelude::*, px, radians, svg, Div, Hsla, SharedString, Stateful, Svg, Transformation};
+use std::time::Duration;
+
+use gpui::{Animation, AnimationExt, AnyElement, percentage, div, prelude::*, px, radians, svg, Div, Hsla, SharedString, Stateful, Svg, Transformation};
 
 use crate::theme::*;
 
 /// `.i`: a 16px outline icon in the current colour.
 pub fn icon(name: &str) -> Svg {
     svg().path(format!("icons/{name}.svg")).size(px(16.)).flex_none()
+}
+
+/// Moicons adapted for the native transcript, with a live thinking indicator.
+pub fn activity_icon(name: &str, color: impl Into<Hsla>, message: usize) -> AnyElement {
+    let icon = svg().path(format!("moicons/{name}.svg")).size(px(16.)).flex_none().text_color(color);
+    if name == "cpu" {
+        icon.with_animation(
+            ("activity-loader", message),
+            Animation::new(Duration::from_millis(1200)).repeat(),
+            |icon, progress| icon.with_transformation(Transformation::rotate(percentage(progress))),
+        ).into_any_element()
+    } else {
+        icon.into_any_element()
+    }
 }
 
 pub fn icon_sized(name: &str, size: f32) -> Svg {
