@@ -113,6 +113,8 @@ impl Api {
         if !use_memory {
             body["use_memory"] = json!(false);
         }
+        // this app shows approval cards (access_controls.rs), so the gate may ask
+        body["approvals"] = json!(true);
         if model.starts_with("codex/") {
             if let Some(effort) = &controls.reasoning_effort { body["reasoning_effort"] = json!(effort); }
             body["speed"] = json!(controls.speed);
@@ -162,6 +164,9 @@ pub struct ChatInfo {
     pub updated_at: String,
     pub archived: bool,
     pub messages: u32,
+    /// the chat's own access (a workspace profile); None: the project's profile
+    #[serde(default)]
+    pub access: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

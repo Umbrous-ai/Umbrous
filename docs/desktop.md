@@ -72,6 +72,54 @@ hardened runtime and a timestamp, which notarization requires. Still open:
 an Intel or universal build (needs an x86_64 Python and a second target), and
 updates (none: a new version is a new `.dmg`).
 
+## Access and approvals in the composer
+
+Each chat has its own access, chosen with the shield pill on the left of the
+composer (Freddy's design, 2026-11-08, after Codex's per-session permission):
+
+| In the menu | Profile | Without asking | Asks you first |
+|---|---|---|---|
+| Read only | `workspace_read` | list, read, search | (no edits, no commands) |
+| Workspace write | `code_ask_commands` | read, edit | each command |
+| Full access | `workspace_code` | read, edit, run commands (as you, not sandboxed) | nothing |
+
+Full access shows in red and first opens **Enable Full access?**: it says
+what the agent may then do, and **Enable Full access** works only after
+"I understand the risks and want to continue" is ticked. A project on Ask
+before read (set in the browser page or the CLI) shows as *Ask before reads*;
+the menu does not offer it.
+
+The choice is stored with the chat (`chats.access`, schema 10; `POST
+/api/chats/<id>/access`), and a new chat starts on the project default. A level
+picked before a new chat's first message is sent when the chat is created.
+The gate uses the chat's access instead of the project's profile and reads it
+again at every call, so a change applies from the next action, and a change
+while a card is open makes a one-time approval stale. The folder, its grants
+and every hard block stay the project's: paths outside the folder, links and
+excluded files stay blocked at every level.
+
+With no folder attached, choosing a level opens the system folder picker and
+attaches the folder you pick with that level as the project's profile. The menu
+shows only the three levels (Freddy: fewer things on screen); it adds a line
+only when something needs you (no folder yet, a model without the tool check).
+
+When the gate asks, a card appears above the composer: what the model wants
+to do, the action and its target, for a command that it runs unsandboxed,
+and **Approve once**, **Allow … in this project** (a grant, revocable in the
+browser page's Access section) and **Deny**. Stop, leaving the chat, or the
+approval time limit closes the request. Every answer ends in a receipt.
+
+A model only gets tools after it passes the tool check. When a folder is
+attached and the selected model has not, the pill turns amber
+(*… · no tools*) and the menu offers **Check tools**, which runs the harmless
+round trip (for a ChatGPT model, one short request on your subscription).
+A reply that starts without tools for that reason also says so in a notice.
+
+The message box grows with its text up to about ten lines and then scrolls,
+keeping the caret in view; the toolbar always stays below it. A sent message's
+bubble is sized from its longest line (at most 80% of the column) in block
+layout, so a long message wraps inside it instead of running over the reply.
+
 ## How it works
 
 ```
@@ -142,7 +190,8 @@ serves), is the visual source of truth. The native views reproduce it:
   radius 12), the sidebar with workspace switcher, New chat ⌘N, collapsible
   Projects (+ on hover) and Sessions, the 56 px header, the 696 px thread column,
   `.msg-u` bubbles, `.answer` text at 16/1.6, `.reply-meta`, the composer with
-  attach, model pill, Tools · 4 and the round send button.
+  attach, model pill, the access pill (it replaced the page's placeholder
+  Tools · 4) and the round send button.
 - The right sidebar shows only Changes and Sources (Freddy, 2026-11-07; it
   replaces the page's Details list of Runtime, Session, Tools, Files and Steps).
   The header's panel button shows and hides it; it starts shown and hides below
@@ -370,9 +419,9 @@ Limitations found, none worked around by changing the architecture:
 5. **API stability.** The crates.io release (0.2.2, pinned exactly) trails
    Zed's own copy, and its API changes between releases.
 
-Not ported from the browser page yet: M3's tool steps, approval cards, Sources
-and Access view (the app ignores those stream events; see
+Not ported from the browser page yet: M3's tool steps, Sources and the full
+Access view with grants (approval cards and the profile are in the composer, see
+[Access and approvals](#access-and-approvals-in-the-composer); also see
 [m3-gate.md](m3-gate.md#the-desktop-app)), M4's task trace (the app shows the
-running step and a one-line report; see [m4-tasks.md](m4-tasks.md#the-desktop-app); M5's interrupted-task notice and Resume are ported, see [m5-resume.md](m5-resume.md#the-desktop-app); M6's Memory section is in the right panel, with kinds and scopes set in the browser page, see [m6-memory.md](m6-memory.md#the-desktop-app); M7's suggestions wait for review at the top of that section, see [m7-review.md](m7-review.md#the-desktop-app); M8's Start fresh is at the end of that section and in Options › Delete chat…, see [m8-reset.md](m8-reset.md#the-desktop-app)), the tool-call probe button in the model
-menu, and the prototype's placeholder panels (tool toggles, files, steps) that
+running step and a one-line report; see [m4-tasks.md](m4-tasks.md#the-desktop-app); M5's interrupted-task notice and Resume are ported, see [m5-resume.md](m5-resume.md#the-desktop-app); M6's Memory section is in the right panel, with kinds and scopes set in the browser page, see [m6-memory.md](m6-memory.md#the-desktop-app); M7's suggestions wait for review at the top of that section, see [m7-review.md](m7-review.md#the-desktop-app); M8's Start fresh is at the end of that section and in Options › Delete chat…, see [m8-reset.md](m8-reset.md#the-desktop-app)), and the prototype's placeholder panels (tool toggles, files, steps) that
 had no runtime behind them.

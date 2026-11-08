@@ -156,7 +156,7 @@ when you press Resume). Under the chat's lock, the runtime checks:
 | the chat is not archived | `chat_archived` |
 | the task is `unknown` / `interrupted`, not already resumed, its message still waiting, and every unknown action has retry class `repeat` | `not_resumable` (with the reason) |
 | the project still has a workspace and the model passed the tool check | `resume_scope_changed` |
-| every read the interrupted task made (completed or unknown) is still allowed **now**: checked by `gate.evaluate` against the current workspace, profile and grants | `resume_scope_changed` (blocked now: a detached workspace, an excluded path), or `resume_needs_approval` (needs approval and this app cannot ask) |
+| every read the interrupted task made (completed or unknown) is still allowed **now**: checked by `gate.evaluate` against the current workspace, profile and grants | `resume_scope_changed` (blocked now: a detached workspace, an excluded path), or `resume_needs_approval` (needs approval and this client cannot ask) |
 
 A refused resume leaves the task interrupted, with a `resume.refused` event,
 and replays nothing. Fix the cause (grant again, switch the profile, resume

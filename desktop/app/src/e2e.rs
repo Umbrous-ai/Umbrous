@@ -95,7 +95,7 @@ fn snapshot(ws: &Workspace, label: &str) -> Value {
         "blocks_last": ws.msgs.last().map(|m| m.blocks.len()),
         "model": ws.model,
         "access": ws.access.as_ref().map(|a| json!({"project": a.project_id, "profile": a.workspace.as_ref().map(|w| w.profile.clone())})),
-        "ask_notice": ws.asks_before_read(),
+        "approval": ws.approval.as_ref().map(|a| a.action.clone()),
         "interrupted": ws.interrupted.as_ref().map(|i| json!({"task": i.task_id, "text": i.text, "report": i.report})),
         "memory": ws.memory.as_ref().map(|v| json!({
             "project_id": v.project_id,
@@ -122,6 +122,15 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             let t = arg.replace("\\n", "\n");
             window.update(cx, |ws, w, cx| ws.send(t, w, cx)).ok();
             wait_until(cx, window, 5, "send started", |ws| !ws.msgs.is_empty()).await?;
+        }
+        "compose" => {
+            // put text in the message box without sending it ("\n" is a new line; "xN:" repeats it N times)
+            let t = match arg.split_once(':').and_then(|(n, rest)| n.strip_prefix('x').and_then(|n| n.parse::<usize>().ok()).map(|n| (n, rest))) {
+                Some((n, rest)) => rest.replace("\\n", "\n").repeat(n),
+                None => arg.replace("\\n", "\n"),
+            };
+            window.update(cx, |ws, _, cx| ws.composer.update(cx, |c, cx| c.set_text(&t, cx))).ok();
+            next_frame(window, cx).await;
         }
         "wait_reply" => {
             let t0 = Instant::now();
@@ -198,10 +207,56 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             // until the selected project's access has loaded (M3)
             wait_until(cx, window, 10, "access", |ws| ws.access.as_ref().map(|a| ws.project_id.as_deref() == Some(a.project_id.as_str())).unwrap_or(false)).await?;
         }
-        "switch_workspace_read" => {
-            // what the notice's "Switch to Workspace read" button does
-            window.update(cx, |ws, _, cx| ws.switch_to_workspace_read(cx)).ok();
-            wait_until(cx, window, 10, "profile switched", |ws| !ws.asks_before_read()).await?;
+        "set_profile" => {
+            // what a row of the composer's access menu does
+            let p: &'static str = crate::workspace::access_levels().iter().copied().find(|p| *p == arg)
+                .ok_or_else(|| format!("unknown profile {arg}"))?;
+            window.update(cx, |ws, _, cx| ws.set_profile(p, cx)).ok();
+            wait_until(cx, window, 10, "profile switched", move |ws| ws.access.as_ref().and_then(|a| a.workspace.as_ref())
+                .map(|w| w.profile == p).unwrap_or(false)).await?;
+        }
+        "set_access" => {
+            // what a row of the composer's access menu does: this chat's access, or `default`
+            let p: Option<&'static str> = if arg == "default" { None } else {
+                Some(crate::workspace::access_levels().iter().copied().find(|p| *p == arg).ok_or_else(|| format!("unknown access {arg}"))?)
+            };
+            window.update(cx, |ws, _, cx| ws.set_chat_access(p, cx)).ok();
+            let want = p.map(str::to_string);
+            wait_until(cx, window, 10, "chat access", move |ws| ws.chat_access() == want).await?;
+        }
+        "choose_level" => {
+            // what clicking a row of the access menu does (Full access opens its dialog)
+            let p: &'static str = crate::workspace::access_levels().iter().copied().find(|p| *p == arg)
+                .ok_or_else(|| format!("unknown access {arg}"))?;
+            window.update(cx, |ws, _, cx| ws.choose_level(p, cx)).ok();
+            next_frame(window, cx).await;
+        }
+        "full_access" => {
+            // the dialog: check (its checkbox), confirm (Enable Full access), cancel
+            window.update(cx, |ws, _, cx| match arg {
+                "check" => ws.toggle_full_access_check(cx),
+                "confirm" => ws.confirm_full_access(true, cx),
+                _ => ws.confirm_full_access(false, cx),
+            }).ok();
+            next_frame(window, cx).await;
+        }
+        "access_menu" => {
+            window.update(cx, |ws, _, cx| ws.toggle_access_menu(cx)).ok();
+            next_frame(window, cx).await;
+        }
+        "wait_approval" => {
+            // until the gate asks (an approval card is shown)
+            wait_until(cx, window, arg.parse().unwrap_or(30), "approval card", |ws| ws.approval.is_some()).await?;
+        }
+        "approve" => {
+            // what the card's buttons do: once | grant | deny
+            let choice: &'static str = match arg { "once" => "once", "grant" => "grant", "deny" => "deny", o => return Err(format!("bad choice {o}")) };
+            window.update(cx, |ws, _, cx| ws.answer_approval(choice, cx)).ok();
+            wait_until(cx, window, 10, "approval answered", |ws| ws.approval.is_none()).await?;
+        }
+        "check_tools" => {
+            window.update(cx, |ws, _, cx| ws.check_tools(cx)).ok();
+            wait_until(cx, window, 60, "tool check", |ws| !ws.probe_running()).await?;
         }
         "wait_memory" => {
             // until the selected project's memory view has loaded (M6)
@@ -378,7 +433,11 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "no_text" => (!ws.msgs.iter().any(|m| m.text.contains(val))).to_string(),
                 "user_meta_empty" => ws.msgs.iter().filter(|m| m.role == Role::User).all(|m| m.meta.is_empty()).to_string(),
                 "access" => ws.access.as_ref().and_then(|a| a.workspace.as_ref()).map(|w| w.profile.clone()).unwrap_or_else(|| "none".into()),
-                "ask_notice" => ws.asks_before_read().to_string(),
+                "approval" => ws.approval.as_ref().map(|a| a.action.clone()).unwrap_or_else(|| "none".into()),
+                "access_pill" => ws.access_pill_label(),
+                "chat_access" => ws.chat_access().unwrap_or_else(|| "default".into()),
+                "full_access_dialog" => ws.full_access_confirm.map(|c| if c.checked { "checked" } else { "open" }).unwrap_or("closed").to_string(),
+                "tools_blocked" => ws.tools_blocked_by_check().to_string(),
                 "last_text_len_over" => (ws.msgs.last().map(|m| m.text.len()).unwrap_or(0) > val.parse::<usize>().unwrap_or(0)).to_string(),
                 "phase" => match &ws.phase { Phase::Ready => "ready".into(), Phase::Starting => "starting".into(), Phase::Failed(f) => f.code.clone() },
                 "sessions" | "sessions_lack" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),

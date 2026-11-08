@@ -1,0 +1,61 @@
+# The composer's access in a coding project: the tool check, then Workspace write with
+# approval cards for each command, then Full access.
+# Data: General with workspace @OUT@/m9-fixture/c/proj on code_ask_commands (Workspace write) (validate-m9.sh);
+# Ollama: stress.py fake-coding, coder:3b NOT tool-checked in this home.
+wait_ready 30
+wait_models
+wait_access
+select_model coder:3b
+# 1. a folder is attached but the model has not passed the tool check: the pill says so
+expect tools_blocked true
+expect access_pill Workspace write · no tools
+access_menu
+screenshot @OUT@/m9-approve-check.png
+check_tools
+expect tools_blocked false
+expect access_pill Workspace write
+access_menu
+# 2. edits run without asking; each command waits on a card
+send add a multiply function to calc.py and make the tests pass
+wait_approval 60
+expect approval cmd.run
+screenshot @OUT@/m9-approve-card.png
+approve once
+# the fix's test run asks again; allow commands for this project
+wait_approval 60
+expect approval cmd.run
+approve grant
+wait_reply 60
+expect last_meta Task completed
+expect last_text now passes (exit 0)
+record approved
+# 3. Full access for a new chat, chosen before its first message: it asks first, in a dialog
+new_chat
+expect access_pill Workspace write
+access_menu
+screenshot @OUT@/m9-approve-menu.png
+choose_level workspace_code
+expect full_access_dialog open
+screenshot @OUT@/m9-approve-dialog.png
+# Enable without the checkbox does nothing; Cancel leaves the access as it was
+full_access confirm
+expect chat_access default
+choose_level workspace_code
+full_access cancel
+expect full_access_dialog closed
+expect chat_access default
+# checked and enabled: no cards at all
+choose_level workspace_code
+full_access check
+expect full_access_dialog checked
+full_access confirm
+expect chat_access workspace_code
+expect access_pill Full access
+send Run the tests again
+wait_reply 60
+expect approval none
+expect last_meta Task completed
+expect chat_access workspace_code
+expect access code_ask_commands
+record end
+quit

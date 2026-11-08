@@ -176,14 +176,15 @@ def ollama_tools(names: Optional[List[str]] = None) -> List[dict]:
 
 
 # Said (to the model, in the receipt, and on screen) when a project asks before
-# reads but the app in use cannot show an approval request. Refused at once:
+# reads but the client in use cannot show an approval request (it did not send
+# "approvals": true; Umbrous.app and the browser page both do). Refused at once:
 # never a silent wait, and never a quiet switch to a looser profile.
-APPROVAL_UNAVAILABLE = ("This project uses Ask before read, and this app cannot show approval requests yet, "
-                        "so the read was refused. Switch the project to Workspace read to let chats read "
-                        "ordinary files in its folder, or answer approvals in the browser page.")
-COMMAND_APPROVAL_UNAVAILABLE = ("This project asks before each command, and this app cannot show approval requests "
-                                "yet, so the command was refused. Answer approvals in the browser page, or switch "
-                                "the project to Code in workspace.")
+APPROVAL_UNAVAILABLE = ("This project uses Ask before read, and the client in use cannot show approval requests, "
+                        "so the read was refused. Answer approvals in Umbrous.app or the browser page, or switch "
+                        "the project to Workspace read.")
+COMMAND_APPROVAL_UNAVAILABLE = ("This project asks before each command, and the client in use cannot show approval "
+                                "requests, so the command was refused. Answer approvals in Umbrous.app or the browser "
+                                "page, or switch the project to Code in workspace.")
 
 
 def approval_unavailable(action: str) -> str:
@@ -400,7 +401,10 @@ class Gate:
             return Verdict(BLOCK, "malformed", "Text with NUL characters cannot be written.", action), action, {}
         return None, action, clean
 
-    def evaluate(self, project_id: str, call: Call, approval_id: Optional[str] = None) -> Verdict:
+    def evaluate(self, project_id: str, call: Call, approval_id: Optional[str] = None,
+                 profile: Optional[str] = None) -> Verdict:
+        """`profile`: the chat's own access, used instead of the project's profile
+        (the folder, grants, exclusions and every hard block stay the project's)."""
         bad, action, clean = self._validate(call)
         if bad:
             return bad
@@ -416,11 +420,13 @@ class Gate:
         if fs.is_excluded(parts):
             return Verdict(BLOCK, "excluded", "That file or folder is excluded (secrets, keys, credentials, .git). "
                            "It is never read, under any profile.", action, parts)
+        prof = profile if profile in PROFILES else ws.profile
         binding = hashlib.sha256(json.dumps({"action": action, "args": clean, "project": project_id,
-                                             "policy": ws.policy_version}, sort_keys=True).encode()).hexdigest()
-        rule = PROFILES[ws.profile]["rules"].get(action, BLOCK)
+                                             "policy": ws.policy_version, "profile": prof},
+                                            sort_keys=True).encode()).hexdigest()
+        rule = PROFILES[prof]["rules"].get(action, BLOCK)
         base = dict(action=action, parts=parts, clean_args=clean, binding=binding, policy_version=ws.policy_version)
-        label = PROFILES[ws.profile]["label"]
+        label = PROFILES[prof]["label"]
         if rule == ALLOW:
             return Verdict(ALLOW, "allowed", f"Allowed by the {label} profile.", via="profile", **base)
         if rule == BLOCK:
@@ -444,15 +450,20 @@ class Gate:
             ask: Optional[Callable[[Verdict, str], None]] = None,
             cancelled: Callable[[], bool] = lambda: False,
             approval_timeout: Optional[float] = None, action_id: Optional[str] = None,
-            observer: Optional[Callable[[str], None]] = None, ctx: Optional[ToolContext] = None) -> Outcome:
+            observer: Optional[Callable[[str], None]] = None, ctx: Optional[ToolContext] = None,
+            profile_of: Callable[[], Optional[str]] = lambda: None) -> Outcome:
         """Decide, maybe ask, execute only on ALLOW, and write the receipt.
+
+        `profile_of()` gives the chat's own access (None: the project's profile). It
+        is read again after an approval, so a change while the card was open makes
+        a one-time approval stale instead of running under the old access.
 
         M4: `action_id` lets the task record and the receipt share one id.
         `observer("started")` is called just before the tool runs (after any
         approval), which is when the tool's own deadline starts."""
         started = _now()
         action_id = action_id or new_action_id()
-        verdict = self.evaluate(project_id, call)
+        verdict = self.evaluate(project_id, call, profile=profile_of())
         approval_id = None
         if verdict.outcome == ASK:
             if ask is None:
@@ -476,7 +487,7 @@ class Gate:
                 self._approved[approval_id] = verdict.binding
             # Re-check at execution: the profile, workspace or grants may have changed
             # while the card was open. A stale one-time approval is refused here.
-            verdict = self.evaluate(project_id, call, approval_id)
+            verdict = self.evaluate(project_id, call, approval_id, profile=profile_of())
             if verdict.outcome != ALLOW:
                 code = "stale_approval" if choice == "once" else verdict.code
                 reason = ("The approval no longer matches: the workspace or profile changed after it was asked."
@@ -498,9 +509,9 @@ class Gate:
                              ctx if ctx is not None else ToolContext())
 
     def refuse(self, task_id: str, project_id: str, chat_id: Optional[str], call: Call, code: str, message: str,
-               action_id: Optional[str] = None) -> Outcome:
+               action_id: Optional[str] = None, profile: Optional[str] = None) -> Outcome:
         """Record a proposal the run loop will not even evaluate (e.g. too many calls at once)."""
-        v = self.evaluate(project_id, call)
+        v = self.evaluate(project_id, call, profile=profile)
         return self._finish(task_id, action_id or new_action_id(), project_id, chat_id, v, _now(), "denied", code, message)
 
     def _execute(self, task_id, action_id, project_id, chat_id, v: Verdict, started,

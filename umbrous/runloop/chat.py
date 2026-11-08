@@ -299,8 +299,10 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             # AND this exact model (by digest) passed the tool-call probe.
             ws = gate.access.workspace(chat_info.project_id) if gate else None
             tools_on = bool(ws) and router.tool_capable(model.name)
-            coding = tools_on and can_change(ws.profile)       # M9
-            tool_names = offered(ws.profile) if tools_on else []
+            # the chat's own access (chosen in the composer) wins over the project's profile
+            profile = (chat_info.access or ws.profile) if ws else None
+            coding = tools_on and can_change(profile)       # M9
+            tool_names = offered(profile) if tools_on else []
             self_note = selfsource.note(ws.root) if coding else None
             system = config.system_prompt + (
                 CODE_PROMPT.format(root=ws.root, self_note=" " + self_note if self_note else "") if coding else
@@ -335,7 +337,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                            "message": f"This task worked in {old['task']['workspace']}, and the project's folder is "
                                       f"now {ws.root}, so it cannot be resumed here. The task stays interrupted."}
             else:
-                refused = scope_check(gate, chat_info.project_id, old, approvals)
+                refused = scope_check(gate, chat_info.project_id, old, approvals, profile=chat_info.access)
             if refused:
                 outcome = refused["code"]
                 try:
@@ -403,10 +405,18 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
         log_event(log, "run.start", run_id=run_id, chat_id=chat_id, model=model.name, task_id=task_id,
                   turns_sent=plan.turns_included, est_tokens=plan.estimated_tokens, window=plan.window,
                   memory_items=len(memory_used))
+
+        def chat_access() -> Optional[str]:
+            # read at every call: a change in the composer applies from the next action
+            try:
+                return history.get_chat(chat_id).access
+            except HistoryError:
+                return chat_info.access
         tools_info = {"on": tools_on, "workspace": ws.name if ws else None, "root": ws.root if ws else None,
-                      "profile": ws.profile if ws else None, "approvals": approvals, "coding": coding,
+                      "profile": profile, "project_profile": ws.profile if ws else None,
+                      "chat_access": chat_info.access, "approvals": approvals, "coding": coding,
                       "tools": tool_names, "selected": selected, "self_source": bool(self_note)}
-        if tools_on and ws.profile == "ask_before_read" and not approvals:
+        if tools_on and profile == "ask_before_read" and not approvals:
             tools_info["notice"] = APPROVAL_UNAVAILABLE
         if ws and not tools_on:
             tools_info["off_reason"] = (f"{model.name} has not passed the tool check, so it cannot use the "
@@ -483,12 +493,14 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                         continue
                     if i >= MAX_CALLS_PER_ROUND:
                         result = gate.refuse(task_id, chat_info.project_id, chat_id, call, "too_many_calls",
-                                             f"At most {MAX_CALLS_PER_ROUND} tool calls run per step.", action_id)
+                                             f"At most {MAX_CALLS_PER_ROUND} tool calls run per step.", action_id,
+                                             profile=chat_access())
                     elif trun.tool_calls > max_calls:
                         trun.limit("tool_calls", f"The tool call limit ({max_calls}) was reached; later calls "
                                    "were refused.")
                         result = gate.refuse(task_id, chat_info.project_id, chat_id, call, "tool_call_limit",
-                                             f"At most {max_calls} tool calls run in one task.", action_id)
+                                             f"At most {max_calls} tool calls run in one task.", action_id,
+                                             profile=chat_access())
                     else:
                         result = None
                         ctx = ToolContext(seen=seen, intent=(lambda aid: lambda d: trun.intent(aid, d))(action_id),
@@ -497,6 +509,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                                           command_timeout_s=config.command_timeout_s,
                                           command_timeout_max_s=config.command_timeout_max_s)
                         for ev in _run_gated(gate, task_id, chat_info.project_id, chat_id, call, cancel, approvals,
+                                             profile_of=chat_access,
                                              action_id=action_id, tool_timeout=_tool_timeout(config, name, args),
                                              trun=trun, ctx=ctx):
                             if ev["type"] == "_result":
@@ -723,7 +736,8 @@ def _action_status(result) -> Optional[str]:
 def _run_gated(gate: Gate, task_id: str, project_id: str, chat_id: str, call: Call,
                cancel: CancelToken, approvals: bool = True, action_id: Optional[str] = None,
                tool_timeout: float = 30.0, trun: Optional[TaskRun] = None,
-               ctx: Optional[ToolContext] = None) -> Iterator[dict]:
+               ctx: Optional[ToolContext] = None,
+               profile_of=lambda: None) -> Iterator[dict]:
     """Run one call through the gate on a worker thread, passing on an approval
     request as an event while the gate waits for your answer.
 
@@ -745,7 +759,7 @@ def _run_gated(gate: Gate, task_id: str, project_id: str, chat_id: str, call: Ca
         try:
             out = gate.run(task_id, project_id, chat_id, call, ask=ask if approvals else None,
                            cancelled=lambda: cancel.cancelled, action_id=action_id,
-                           observer=lambda _ev: q.put({"type": "_started"}), ctx=ctx)
+                           observer=lambda _ev: q.put({"type": "_started"}), ctx=ctx, profile_of=profile_of)
         except BaseException as exc:  # surfaced below
             out, box["error"] = None, exc
         with lock:

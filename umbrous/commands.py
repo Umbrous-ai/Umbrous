@@ -55,10 +55,6 @@ def workspace_command(config: Config, project: Optional[str], root: Optional[str
         else:
             ws = access.workspace(p.id)
             print(f"{p.name}: {ws.root + ' (' + PROFILES[ws.profile]['label'] + ')' if ws else 'no workspace'}")
-        if (root or profile) and ws.profile == "ask_before_read":
-            print("Note: Umbrous.app cannot show approval requests yet, so in the app every read in this "
-                  "project is refused (with that reason). Answer them in the browser page, or switch back "
-                  "with --profile workspace_read.")
     except AccessError as exc:
         print(exc.message, file=sys.stderr)
         return 1

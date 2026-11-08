@@ -7,7 +7,7 @@ Umbrous can use your ChatGPT subscription through the official local Codex app-s
 1. Install the official Codex CLI, or use the CLI bundled with the Codex/ChatGPT desktop app. Umbrous searches `PATH` and the supported macOS application locations.
 2. Open Umbrous's model menu and select **Connect ChatGPT**. Complete the official browser sign-in, then refresh models. An existing Codex ChatGPT login is recognized automatically. An API-key login does not qualify for this provider.
 3. Explicitly select a ChatGPT model. Choose one of its advertised reasoning levels, then **Standard** or **Fast**. Fast is available only when the catalog advertises the priority service tier; it can consume subscription allowance faster. Availability and account limits are enforced by Codex.
-4. Run the model's tool check before coding: use **Check tools** in the browser model menu, or `bin/umbrous probe codex/MODEL` for the shared native-app data folder. Only a model that completes the harmless tool round trip can drive Umbrous tools. Refresh the native model menu afterward.
+4. Run the model's tool check before coding: use **Check tools** in the app's access menu or the browser model menu, or `bin/umbrous probe codex/MODEL` for the shared native-app data folder. Only a model that completes the harmless tool round trip can drive Umbrous tools.
 
 Controls are remembered per model in each frontend. Each request captures its own settings; changing controls during a reply affects the next request. Unsupported or stale choices fail visibly rather than changing to another setting. Standard is the initial speed. To disable discovery and login entirely, set `"codex_enabled": false` in your Umbrous configuration.
 

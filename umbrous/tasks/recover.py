@@ -352,7 +352,8 @@ def resume_info(tasks: TaskStore, history: HistoryStore, task_id: str, full: Opt
     return out
 
 
-def scope_check(gate: Gate, project_id: str, full: dict, approvals: bool) -> Optional[dict]:
+def scope_check(gate: Gate, project_id: str, full: dict, approvals: bool,
+                profile: Optional[str] = None) -> Optional[dict]:
     """Would the reads the interrupted task made still be allowed now? None if
     yes; otherwise {code, message} saying why the resume is refused.
 
@@ -375,16 +376,16 @@ def scope_check(gate: Gate, project_id: str, full: dict, approvals: bool) -> Opt
             args = {"command": "true"}
         elif a["tool"] == "check_command":
             continue
-        v = gate.evaluate(project_id, Call(a["tool"], args))
+        v = gate.evaluate(project_id, Call(a["tool"], args), profile=profile)
         if v.outcome == ALLOW:
             continue
         if v.outcome == ASK and approvals:
             continue      # asked again during the resume; the old answer is not reused
         if v.outcome == ASK:
             return {"code": "resume_needs_approval",
-                    "message": f"{a['tool']} {a['resource']} now needs your approval, and this app cannot ask "
-                               "for it. The task stays interrupted. Resume it from the browser page, or change "
-                               "the project's access."}
+                    "message": f"{a['tool']} {a['resource']} now needs your approval, and this client cannot ask "
+                               "for it. The task stays interrupted. Resume it from Umbrous.app or the browser page, "
+                               "or change the chat's access."}
         return {"code": "resume_scope_changed",
                 "message": f"{a['tool']} {a['resource']} is no longer allowed ({v.reason}) The task stays "
                            "interrupted and is not replayed."}

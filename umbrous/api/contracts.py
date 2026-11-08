@@ -2,7 +2,7 @@
 
 import re
 
-CHAT_PATH = re.compile(r"^/api/chats/(chat_[A-Za-z0-9_-]{8,64})(/archive|/unarchive)?$")
+CHAT_PATH = re.compile(r"^/api/chats/(chat_[A-Za-z0-9_-]{8,64})(/archive|/unarchive|/access)?$")
 
 PROJECT_ID_RE = re.compile(r"^prj_[A-Za-z0-9_-]{4,64}$")
 

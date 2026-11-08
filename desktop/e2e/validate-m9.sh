@@ -21,7 +21,7 @@ trap cleanup EXIT
 abort() { fail "$*"; echo "m9-coding: setup failed, the app was not run"; exit 1; }
 
 W="$1"; mkdir -p "$W" || abort "cannot create $W"
-rm -rf "$W"/h-m9 "$W"/m9-fixture "$W"/m9-coding.* "$W"/m9-*.png
+rm -rf "$W"/h-m9 "$W"/h-m9-approve "$W"/m9-fixture "$W"/m9-coding.* "$W"/m9-*.png
 [ -d "$ROOT/dist/Umbrous-e2e.app" ] || abort "dist/Umbrous-e2e.app is missing (desktop/scripts/build-native.sh --e2e)"
 E2E="$W/apps/Umbrous-e2e.app"; mkdir -p "$W/apps"; rm -rf "$E2E"
 ditto "$ROOT/dist/Umbrous-e2e.app" "$E2E" || abort "could not copy the e2e app"
@@ -76,5 +76,18 @@ assert redo == 1, redo                                    # only the fix; the fi
 assert report["commands"][-1]["exit"] == 0, report["commands"]
 print("ok   interrupted: the edit kept, the command unknown and stopped; resumed: only the fix, tests pass")
 PY
+# The composer's access menu and approval cards, in a home of its own where coder:3b has
+# not been tool-checked (the app runs the check), with a third project on Ask before commands.
+H2="$W/h-m9-approve"
+C=$(python3 "$ROOT/desktop/e2e/stress.py" seed-coding-project "$W/m9-fixture/c") && [ -d "$C" ] || abort "could not create project C"
+mkdir -p "$H2" && echo "{\"codex_enabled\": false, \"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H2/config.json" || abort "could not write $H2/config.json"
+python3 "$ROOT/desktop/e2e/stress.py" fake-coding $PORT >/dev/null 2>&1 & FAKE=$!; sleep 1
+kill -0 "$FAKE" 2>/dev/null || abort "the fake Ollama did not start again (port $PORT in use?)"
+PYTHONPATH="$ROOT" python3 -m umbrous --home "$H2" workspace General "$C" --profile code_ask_commands >/dev/null || abort "could not attach project C"
+e2e m9-approve m9-approve.txt "$H2"
+cleanup; FAKE=""
+echo "receipts (approvals):"; PYTHONPATH="$ROOT" python3 -m umbrous --home "$H2" receipts --last 12 | grep -E "cmd\.run" || fail "no command receipts"
+PYTHONPATH="$ROOT" python3 -m umbrous --home "$H2" receipts --last 30 | grep -q "Approved once by you" || fail "no receipt for the once approval"
+PYTHONPATH="$ROOT" python3 -m umbrous --home "$H2" receipts --last 30 | grep -q "Allowed by a grant" || fail "no receipt for the grant"
 [ $STATUS -eq 0 ] && echo "m9-coding: PASS" || echo "m9-coding: FAIL"
 exit $STATUS

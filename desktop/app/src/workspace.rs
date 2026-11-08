@@ -29,6 +29,11 @@ use crate::transcript::{self, MetaKind, Msg, Pos, Role, Row, Selection, Selectio
 
 #[path = "model_controls.rs"]
 mod model_controls;
+#[path = "access_controls.rs"]
+mod access_controls;
+pub use access_controls::PendingApproval;
+/// Every workspace profile a chat's access may be (the e2e driver names them).
+pub fn access_levels() -> &'static [&'static str] { &["workspace_read", "ask_before_read", "code_ask_commands", "workspace_code"] }
 
 const STREAM_BATCH: Duration = Duration::from_millis(33);
 /// At most this many frames of render-time correction after one reveal_end.
@@ -137,6 +142,16 @@ pub struct Workspace {
     pub models: Option<api::Models>,
     pub model: Option<String>,
     model_menu: bool,
+    /// the composer's access menu (access_controls.rs)
+    access_menu: bool,
+    /// the gate is waiting for your answer to this action (shown above the composer)
+    pub approval: Option<PendingApproval>,
+    /// the model whose tool check is running
+    probe_busy: Option<String>,
+    /// the access chosen for a chat that does not exist yet (sent when it is created)
+    pending_access: Option<String>,
+    /// the "Enable Full access?" dialog, while open
+    pub full_access_confirm: Option<access_controls::FullAccessConfirm>,
     model_preferences: model_controls::Preferences,
     model_preferences_loaded: bool,
     codex_status: api::CodexStatus,
@@ -152,9 +167,8 @@ pub struct Workspace {
     pub interrupted: Option<Interrupted>,
     /// M9: a reply attached a folder ("work on <folder>"): reload Access when it ends
     load_access_after_stream: bool,
-    /// The selected project's workspace access (M3). This app cannot show approval
-    /// requests yet, so a project on Ask before read gets an explanation and an
-    /// explicit switch, never a silent change or a request left waiting.
+    /// The selected project's workspace access (M3); the composer's access menu
+    /// shows and changes its profile, and approval cards answer what it asks.
     pub access: Option<api::Access>,
     access_seq: u64,
     pub access_error: Option<String>,
@@ -323,6 +337,11 @@ impl Workspace {
             models: None,
             model: None,
             model_menu: false,
+            access_menu: false,
+            approval: None,
+            probe_busy: None,
+            pending_access: None,
+            full_access_confirm: None,
             model_preferences: model_controls::Preferences::default(),
             model_preferences_loaded: false,
             codex_status: api::CodexStatus::default(),
@@ -830,44 +849,6 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn asks_before_read(&self) -> bool {
-        self.access
-            .as_ref()
-            .filter(|a| self.project_id.as_deref() == Some(a.project_id.as_str()))
-            .and_then(|a| a.workspace.as_ref())
-            .map(|w| w.profile == "ask_before_read")
-            .unwrap_or(false)
-    }
-
-    /// M9: the selected project asks before each command, which this app cannot show
-    pub fn asks_before_commands(&self) -> bool {
-        self.access
-            .as_ref()
-            .filter(|a| self.project_id.as_deref() == Some(a.project_id.as_str()))
-            .and_then(|a| a.workspace.as_ref())
-            .map(|w| w.profile == "code_ask_commands")
-            .unwrap_or(false)
-    }
-
-    /// The explicit way out of Ask before read in this app: you press the button,
-    /// the runtime changes the profile, and the notice goes away once it has.
-    pub fn switch_to_workspace_read(&mut self, cx: &mut Context<Self>) {
-        let Some(pid) = self.project_id.clone() else { return };
-        logfile::event("ui.profile_switch", &[("to", "workspace_read".into())]);
-        let path = format!("/api/projects/{pid}/profile");
-        self.access_error = None;
-        self.api_call(cx, move |api| api.post::<api::Access>(&path, json!({"profile": "workspace_read"})), move |this, r, _| {
-            match r {
-                Ok(a) if this.project_id.as_deref() == Some(a.project_id.as_str()) => {
-                    this.access_seq += 1; // a list answer already on its way is older than this
-                    this.access = Some(a);
-                }
-                Ok(_) => {}
-                Err(e) => this.access_error = Some(e.message),
-            }
-        });
-    }
-
     pub fn select_project(&mut self, id: String, cx: &mut Context<Self>) {
         if self.project_id.as_deref() != Some(&id) {
             self.project_id = Some(id);
@@ -904,6 +885,7 @@ impl Workspace {
     /// event, which closes the connection; the runtime then stops the model
     /// and keeps the partial reply.
     fn detach_run(&mut self, cx: &mut Context<Self>) {
+        self.approval = None; // Stop closes the request in the runtime as well
         if let Some(run) = self.run.take() {
             // cancel_sent before stop: the stream thread must never see Stop without it
             run.cancel_sent.store(run.run_id.is_some(), Ordering::SeqCst);
@@ -918,6 +900,7 @@ impl Workspace {
     pub fn new_chat(&mut self, cx: &mut Context<Self>) {
         self.begin_view(cx);
         self.chat = None;
+        self.pending_access = None; // a new chat starts with the project's access
         self.context = None;
         self.msgs.clear();
         self.rebuild_rows();
@@ -1109,6 +1092,7 @@ impl Workspace {
         let project_id = self.project_id.clone().unwrap_or_else(|| "prj_general".into());
         let existing = self.chat.as_ref().map(|c| c.id.clone());
         let existing_for_ui = existing.clone();
+        let access = if existing.is_none() { self.pending_access.clone() } else { None };
         if resume.is_none() {
             self.composer.update(cx, |c, cx| c.set_text("", cx));
         }
@@ -1153,11 +1137,12 @@ impl Workspace {
             .spawn(move || {
                 let chat_id = match existing {
                     Some(id) => id,
-                    None => match api2.post::<api::OneChat>("/api/chats", json!({ "project_id": project_id })) {
+                    None => match api2.post::<api::OneChat>("/api/chats", json!({ "project_id": project_id, "access": access })) {
                         Ok(c) => {
                             let _ = created_tx.unbounded_send(StreamMsg::Event(json!({"type": "chat_created", "chat": {
                                 "id": c.chat.id, "project_id": c.chat.project_id, "title": c.chat.title,
-                                "updated_at": c.chat.updated_at, "archived": c.chat.archived, "messages": c.chat.messages}})));
+                                "updated_at": c.chat.updated_at, "archived": c.chat.archived, "messages": c.chat.messages,
+                                "access": c.chat.access}})));
                             c.chat.id
                         }
                         Err(e) => {
@@ -1255,6 +1240,10 @@ impl Workspace {
                             if ev.pointer("/tools/selected/attached").and_then(Value::as_bool).unwrap_or(false) {
                                 self.load_access_after_stream = true;
                             }
+                            // a folder is attached but this model gets no tools: say so, never silently
+                            if let Some(why) = ev.pointer("/tools/off_reason").and_then(Value::as_str) {
+                                self.notice = Some((why.to_string(), MetaKind::Warn, false));
+                            }
                         }
                         "delta" => msg.text.push_str(ev.get("text").and_then(Value::as_str).unwrap_or("")),
                         // M7: the reply is saved; the task looks for things to remember
@@ -1294,6 +1283,14 @@ impl Workspace {
                             let step = ev.get("step").and_then(Value::as_u64).unwrap_or(0);
                             let tool = ev.get("tool").and_then(Value::as_str).unwrap_or("a tool");
                             msg.meta = format!("Step {step}: {}…", api::step_label(tool, &ev["args"]));
+                        }
+                        "approval_required" => {
+                            self.approval = PendingApproval::from_event(&ev);
+                            msg.meta = "Waiting for your answer…".into();
+                        }
+                        "tool_result" => {
+                            // answered (here, by a time limit, or by Stop): the card has done its job
+                            self.approval = None;
                         }
                         "error" => {
                             let code = ev.get("code").and_then(Value::as_str).unwrap_or("error");
@@ -1354,6 +1351,7 @@ impl Workspace {
         if ended {
             self.msgs[ix].streaming = false;
             self.run = None;
+            self.approval = None;
             refresh_lists = true;
             // an empty reply is never saved; drop the pair from the view as well
             if self.msgs[ix].text.trim().is_empty() && ix >= 1 && self.msgs[ix].meta_kind != MetaKind::Normal {
@@ -1534,12 +1532,15 @@ impl Workspace {
         cx.notify();
     }
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model_menu || self.options_menu || self.project_input.is_some() || self.card_menu
+        if self.full_access_confirm.is_some() {
+            self.full_access_confirm = None;
+        } else if self.model_menu || self.access_menu || self.options_menu || self.project_input.is_some() || self.card_menu
             || self.memory_input.is_some() || self.memory_armed.is_some() {
             self.memory_input = None;
             self.memory_armed = None;
             self.card_menu = false;
             self.model_menu = false;
+            self.access_menu = false;
             self.options_menu = false;
             self.project_input = None;
             self.project_error = None;
@@ -2442,37 +2443,6 @@ impl Workspace {
                     .into_any_element(),
             );
         }
-        if self.asks_before_read() {
-            let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
-            let folder = self.access.as_ref().and_then(|a| a.workspace.as_ref()).map(|w| w.name.clone()).unwrap_or_default();
-            let error = self.access_error.clone();
-            notices.push(
-                ui::notice(Some(ui::NoticeKind::Warn))
-                    .child(
-                        div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
-                            .child(format!(
-                                "{project} uses Ask before read. This app cannot show approval requests yet, so chats here cannot read files in {folder}: each read is refused right away. Workspace read lets chats read ordinary files in that folder without asking; excluded files, links and paths outside it stay blocked, and every read still gets a receipt. Or keep Ask before read and answer requests in the browser page."
-                            ))
-                            .when_some(error, |d, e| d.child(div().text_color(danger()).child(e))),
-                    )
-                    .child(
-                        ui::pill("switch-workspace-read")
-                            .child("Switch to Workspace read")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.switch_to_workspace_read(cx))),
-                    )
-                    .into_any_element(),
-            );
-        }
-        if self.asks_before_commands() {
-            let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
-            notices.push(
-                ui::notice(Some(ui::NoticeKind::Warn))
-                    .child(div().flex_1().min_w_0().child(format!(
-                        "{project} uses Code, ask before commands. This app cannot show approval requests yet, so each command is refused right away; reading and editing files still work. Answer command requests in the browser page, or choose Code in workspace there (Details › Access)."
-                    )))
-                    .into_any_element(),
-            );
-        }
         if let (Some(it), false) = (self.interrupted.clone(), archived) {
             let can = self.can_send();
             notices.push(
@@ -2505,6 +2475,9 @@ impl Workspace {
                     .into_any_element(),
             );
         }
+        if let Some(card) = self.render_approval(cx) {
+            notices.push(card);
+        }
         let notice_col = |notices: Vec<AnyElement>, top: f32| {
             // block layout, not a centring flex row: a flex row measured the notices' text
             // without a definite width (one line per text), so a wrapping notice was given
@@ -2520,6 +2493,8 @@ impl Workspace {
         }
         let host = cx.entity();
         let state = self.list.clone();
+        // the list's width at the last layout (read here: the list is borrowed while it renders rows)
+        let list_w = self.list.viewport_bounds().size.width;
         // w_full: with an auto width here the notices' text was measured without a
         // definite width (one line per text), so a wrapping notice got too little height
         div()
@@ -2529,11 +2504,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .child(
-                list(state, move |ix, _window, cx| {
+                list(state, move |ix, window, cx| {
                     let host2 = host.clone();
                     let ws = host.read(cx);
                     match ws.rows.get(ix).and_then(|r| ws.msgs.get(r.msg).map(|m| (*r, m))) {
-                        Some((row, m)) => transcript::render_row(&host2, row, m, &ws.selection, ix == 0),
+                        Some((row, m)) => transcript::render_row(&host2, row, m, &ws.selection, ix == 0, window, list_w),
                         None => div().into_any_element(),
                     }
                 })
@@ -2603,18 +2578,20 @@ impl Workspace {
                     .bg(bg_raised())
                     .rounded(px(R_12))
                     .p(px(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(div().min_h(px(40.)).child(self.composer.clone()))
+                    // block, not a flex column: see composer.rs (the text must be measured
+                    // at the box's width, or wrapped lines spill over the bar)
+                    .child(div().w_full().min_h(px(40.)).child(self.composer.clone()))
                     .child(
                         // `.bar`
                         div()
+                            .mt(px(4.))
                             .relative()
                             .flex()
                             .items_center()
                             .gap(px(4.))
                             .child(ui::icon_btn("attach", "clip", false))
+                            // this chat's access, on the left like Codex's permission pill
+                            .child(self.render_access_control(cx))
                             .child(
                                 ui::pill("model-pill")
                                     .when(ollama_down, |d| d.text_color(warning()).hover(|s| s.bg(bg_hover()).text_color(warning())))
@@ -2622,6 +2599,7 @@ impl Workspace {
                                     .child(pill_label)
                                     .child(ui::hover_icon("chevron-down", &"model-pill".into(), pill_color, pill_hover))
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.access_menu = false;
                                         if this.model_menu {
                                             this.model_menu = false;
                                             cx.notify();
@@ -2631,7 +2609,6 @@ impl Workspace {
                                     })),
                             )
                             .children(self.render_model_controls(cx))
-                            .child(ui::pill("tools-pill").child(ui::hover_icon("sliders", &"tools-pill".into(), text_default(), text_strong())).child("Tools · 4"))
                             .child(send)
                             .children(menu),
                     ),
@@ -2776,7 +2753,8 @@ impl Render for Workspace {
                 .child(main)
                 .when(self.details && wide, |d| d.child(self.render_right_panel(cx)))
         };
-        let el = root.child(app);
+        let confirm = self.render_full_access_confirm(cx);
+        let el = root.relative().child(app).children(confirm);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.perf.render_count += 1;
         self.perf.render_ms_total += ms;

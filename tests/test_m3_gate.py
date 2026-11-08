@@ -93,6 +93,24 @@ class GateUnitTests(unittest.TestCase):
             self.gate.approvals.answer(approval_id, choice)
         return ask, asked
 
+    def test_chat_access_changed_while_a_card_is_open_makes_once_stale(self):
+        state = {"profile": "ask_before_read"}
+
+        def ask(verdict, approval_id):
+            state["profile"] = "workspace_read"      # changed in the composer while the card was open
+            self.gate.approvals.answer(approval_id, "once")
+        self.access.set_profile("prj_general", "workspace_code")
+        out = self.gate.run(self.task, "prj_general", None, Call("write_file", {"path": "new.txt", "content": "x"}),
+                            ask=ask, profile_of=lambda: state["profile"])
+        self.assertEqual((out.decision, out.code), ("denied", "blocked_by_profile"))
+        self.assertFalse((self.ws / "new.txt").exists())
+        # the chat's access is used instead of the project's, both ways
+        self.assertEqual(self.gate.evaluate("prj_general", Call("write_file", {"path": "a.txt", "content": "x"}),
+                                            profile="workspace_read").outcome, BLOCK)
+        self.access.set_profile("prj_general", "workspace_read")
+        self.assertEqual(self.gate.evaluate("prj_general", Call("write_file", {"path": "a.txt", "content": "x"}),
+                                            profile="workspace_code").outcome, ALLOW)
+
     def test_ask_profile_approve_once_is_used_once(self):
         self.access.set_profile("prj_general", "ask_before_read")
         self.assertEqual(self.verdict("read_file", path="readme.txt").outcome, ASK)
@@ -172,7 +190,7 @@ class GateUnitTests(unittest.TestCase):
         self.access.set_profile("prj_general", "ask_before_read")
         out = self.run_call("read_file", path="readme.txt")
         self.assertEqual((out.decision, out.code), ("denied", "approval_unavailable"))
-        self.assertIn("Switch the project to Workspace read", out.model_text)
+        self.assertIn("switch the project to Workspace read", out.model_text)
         self.assertEqual(self.access.workspace("prj_general").profile, "ask_before_read")   # never loosened
 
     def test_approval_timeout(self):
@@ -397,9 +415,49 @@ class ToolChatTests(unittest.TestCase):
             # a closed approval cannot be answered again
             self.assertEqual(rt.post_json(f"/api/approvals/{denied[0]['approval_id']}", {"choice": "once"})[0], 409)
 
+    def test_a_chats_own_access_wins_over_the_project_profile(self):
+        """Per-chat access (the composer's choice): stored on the chat, used by the
+        gate instead of the project's profile, read again at every call, and null
+        means the project's profile. Hard blocks stay the same at every level."""
+        with self.rt() as rt:
+            self.setup_rt(rt)                                   # the project: Workspace read
+            status, _, body = rt.post_json("/api/chats", {"project_id": "prj_general", "access": "ask_before_read"})
+            self.assertEqual(status, 201, body)
+            body = json.loads(body)
+            cid = body["chat"]["id"]
+            self.assertEqual(body["chat"]["access"], "ask_before_read")
+            asked = []
+
+            def approve(ev):
+                if ev["type"] == "approval_required":
+                    asked.append(ev)
+                    rt.post_json(f"/api/approvals/{ev['approval_id']}", {"choice": "once"})
+
+            ev = self.stream_chat(rt, cid, "reader:3b", "read notes/plan.md", approve)
+            self.assertEqual(len(asked), 1)                      # the chat asks, the project would not
+            self.assertEqual((ev[0]["tools"]["profile"], ev[0]["tools"]["project_profile"],
+                              ev[0]["tools"]["chat_access"]), ("ask_before_read", "workspace_read", "ask_before_read"))
+            self.assertIn("Ship M3 on Friday", "".join(e.get("text", "") for e in ev))
+            # another chat in the same project keeps the project's profile
+            other = rt.new_chat()
+            ev = self.stream_chat(rt, other, "reader:3b", "read notes/plan.md", approve)
+            self.assertEqual(len(asked), 1)
+            self.assertEqual(ev[0]["tools"]["chat_access"], None)
+            # back to the project's profile: no card
+            status, _, body = rt.post_json(f"/api/chats/{cid}/access", {"access": None})
+            self.assertEqual((status, json.loads(body)["chat"]["access"]), (200, None))
+            ev = self.stream_chat(rt, cid, "reader:3b", "read notes/plan.md", approve)
+            self.assertEqual(len(asked), 1)
+            # an unknown access is refused; the hard blocks hold under Code in workspace
+            self.assertEqual(rt.post_json(f"/api/chats/{cid}/access", {"access": "root"})[0], 400)
+            self.assertEqual(rt.post_json(f"/api/chats/{cid}/access", {"access": "workspace_code"})[0], 200)
+            ev = self.stream_chat(rt, cid, "reader:3b", "read notes/.ENV", approve)
+            self.assertNotIn("SHOUTY", "".join(e.get("text", "") for e in ev))
+            self.assertEqual(rt.get_json("/api/projects/prj_general/access")[1]["workspace"]["profile"], "workspace_read")
+
     def test_client_without_approval_cards_is_refused_at_once(self):
-        """The native app cannot show approval cards yet. Under Ask before read its
-        reads are refused immediately with a clear reason, never left waiting, and
+        """A client that does not show approval cards (it does not send
+        "approvals": true). Under Ask before read its reads are refused immediately with a clear reason, never left waiting, and
         the project's profile is not loosened behind your back."""
         with self.rt() as rt:
             self.setup_rt(rt)

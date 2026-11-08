@@ -1,30 +1,44 @@
-# M3 in the app: a project on Ask before read, the explicit switch, then reads.
+# M3 in the app: a project on Ask before reads, approval cards, then a chat's own access from the composer.
 # Data: General with workspace @OUT@/m3-fixture/ws on Ask before read (validate-m3.sh);
 # Ollama: stress.py fake-workspace (model workspace-reader:3b, tool check passed).
 wait_ready 30
 wait_models
 select_model workspace-reader:3b
 wait_access
-# 1. the project's mode is explained, with a way out; nothing was changed for you
+# 1. the composer shows the project's access; nothing was changed for you
 expect access ask_before_read
-expect ask_notice true
-screenshot @OUT@/m3-ask-notice.png
-# 2. a read is refused at once with the reason (never a five-minute wait)
+expect access_pill Ask before reads
+access_menu
+screenshot @OUT@/m3-access-menu.png
+access_menu
+# 2. a read waits for your answer on a card; Approve once lets exactly that read run
 send read readme.txt
+wait_approval 20
+expect approval fs.read
+screenshot @OUT@/m3-approval.png
+approve once
 wait_reply 20
-expect last_text cannot show approval requests
-expect no_text garden needs water
+expect last_text garden needs water
+expect approval none
+record approved
+# 3. Deny: the read is refused and the model is told so
+send read notes/plan.md
+wait_approval 20
+approve deny
+wait_reply 20
+expect no_text Ship M3 on Friday
 expect access ask_before_read
-record refused
-# 3. you press Switch to Workspace read
-switch_workspace_read
-expect access workspace_read
-expect ask_notice false
-# 4. ordinary reads now work without prompts; the hard blocks still hold
-new_chat
+record denied
+# 4. you choose Read only for this chat in the access menu; the project keeps Ask before reads
+set_access workspace_read
+expect chat_access workspace_read
+expect access_pill Read only
+expect access ask_before_read
+# 5. ordinary reads in this chat now work without prompts; the hard blocks still hold
 send read notes/plan.md
 wait_reply 20
 expect last_text Ship M3 on Friday
+expect approval none
 send read ../outside/secret.txt
 wait_reply 20
 expect no_text OUTSIDE-SECRET
@@ -35,5 +49,9 @@ send read notes/.ENV
 wait_reply 20
 expect no_text SHOUTY
 screenshot @OUT@/m3-workspace-read.png
+# 6. a new chat starts with the project's access again
+new_chat
+expect chat_access default
+expect access_pill Ask before reads
 record end
 quit

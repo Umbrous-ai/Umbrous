@@ -15,8 +15,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, relative, AnyElement, App, Entity, FontStyle, FontWeight, HighlightStyle, MouseButton,
-    SharedString, StrikethroughStyle, StyledText, UnderlineStyle,
+    div, prelude::*, px, AnyElement, App, Entity, FontStyle, FontWeight, HighlightStyle, MouseButton,
+    Pixels, SharedString, StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -330,7 +330,24 @@ fn block_gap(kind: &BlockKind, prev: Option<&BlockKind>) -> f32 {
     }
 }
 
-pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &Selection, first: bool) -> AnyElement {
+/// The width of a message bubble's text if it never wrapped: its longest line.
+/// The bubble is given this width (capped at 80% of the column) in block layout:
+/// as a shrink-to-fit item of a flex row its text was measured too wide, so a long
+/// message got a too-short bubble and its wrapped lines were painted over the reply.
+fn unwrapped_width(text: &str, window: &Window) -> Pixels {
+    let font = window.text_style().font();
+    text.split('\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let run = TextRun { len: l.len(), font: font.clone(), color: theme::text_strong().into(), background_color: None,
+                                underline: None, strikethrough: None };
+            window.text_system().shape_line(SharedString::from(l.to_string()), theme::fs_14(), &[run], None).width
+        })
+        .fold(px(0.), |a, b| if b > a { b } else { a })
+}
+
+pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &Selection, first: bool, window: &Window,
+                                    list_w: Pixels) -> AnyElement {
     use theme::*;
     // `.thread`: centred, 32 on the sides, 48 above the first message
     let outer = div().w_full().flex().justify_center().px(px(SP_32)).when(first, |d| d.pt(px(SP_48)));
@@ -342,12 +359,20 @@ pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &S
         RowKind::User => {
             let b = m.blocks.first().cloned().unwrap_or_else(|| Block { kind: BlockKind::Paragraph, text: String::new(), spans: vec![] });
             let s = sel.in_block(ix, 0, b.text.len());
-            outer
-                .when(!first, |d| d.pt(px(SP_48)))
+            // Block layout all the way, centred and right-aligned by auto margins: as
+            // flex items, the bubble's text was measured unwrapped and the row came out
+            // too short, so the rows after it were drawn over the wrapped lines.
+            div().w_full().px(px(SP_32)).pt(px(SP_48))
                 .child(
-                    inner.flex().justify_end().child(
+                    inner.mx_auto().child(
                         div()
-                            .max_w(relative(0.8))
+                            .ml_auto()
+                            // padding 16+16, border 1+1, and a pixel of slack for rounding; at most
+                            // 80% of the 696px column (narrower windows: of the list less its sides)
+                            .w({
+                                let col = if list_w > px(0.) { (list_w - px(2. * SP_32)).min(px(696.)) } else { px(696.) };
+                                (unwrapped_width(&b.text, window) + px(35.)).min(col * 0.8)
+                            })
                             .bg(bg_raised())
                             .border_1()
                             .border_color(border())

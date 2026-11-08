@@ -55,10 +55,18 @@ class HistoryRoutes:
             if not PROJECT_ID_RE.match(project_id):
                 self._send_json(400, {"error": "bad_project_id"})
                 return 400, "bad_project_id"
-            chat = hist.create_chat(project_id)
+            access = body.get("access")
+            chat = hist.create_chat(project_id, access=str(access) if access is not None else None)
             log_event(log, "history.chat_created", chat_id=chat.id, project_id=project_id)
             self._send_json(201, {"chat": chat.as_dict()})
             return 201, "chat_created"
+        if match.group(2) == "/access":
+            # the chat's own access, or null for the project's; the gate reads it at every call
+            access = body.get("access")
+            chat = hist.set_access(match.group(1), str(access) if access is not None else None)
+            log_event(log, "history.chat_access", chat_id=chat.id, access=chat.access or "project")
+            self._send_json(200, {"chat": chat.as_dict()})
+            return 200, "chat_access"
         archive = match.group(2) == "/archive"
         chat_id = hist.get_chat(match.group(1)).id  # raises for an unknown chat
         # Archiving takes the same per-chat lock as a reply. While a reply is

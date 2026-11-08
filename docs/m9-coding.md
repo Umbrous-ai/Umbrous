@@ -294,9 +294,12 @@ Umbrous.app uses the same runtime, so all of the above applies. In the app:
   attached with (and the own-source note);
 - the interrupted notice lists what was already changed and any command that
   was running;
-- the app cannot show approval requests yet (as in M3), so under *Code, ask
-  before commands* each command is refused at once and a notice says so; use
-  the browser page for those, or *Code in workspace*.
+- the composer's access pill chooses this chat's access, for example *Full
+  access* (Code in workspace, after a confirmation dialog) or *Workspace write*
+  (Code, ask before commands); under the latter each command waits on a card above
+  the composer (Approve once, Allow commands in this project, Deny);
+  `validate-m9.sh` checks both, with the receipts, in a second scenario
+  (`m9-approve.txt`) that also runs the tool check from the app.
 
 `desktop/e2e/validate-m9.sh WORKDIR` drives the real app with a fake model on
 two throwaway projects: "work on" attaches a folder, the task edits `calc.py`,

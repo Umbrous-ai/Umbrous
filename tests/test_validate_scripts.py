@@ -46,6 +46,9 @@ pass)     printf '{"expect":"x","ok":true}\n{"record":"end"}\n' > "$OUT"
           fi
           if [ "$name" = m9-coding ]; then  # play the M9 run: coding, Stop, killed and resumed
             PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-coding "$H/umbrous.db" "${CODING:-good}"
+          fi
+          if [ "$name" = m9-approve ]; then  # play the approval run: a command approved once, then a grant
+            PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-approve "$H/umbrous.db" "${APPROVE:-good}"
           fi;;
 assert)   printf '{"expect":"x","ok":true}\n{"step":"expect y","error":"got z"}\n' > "$OUT";;
 noend)    printf '{"expect":"x","ok":true}\n' > "$OUT";;
@@ -246,6 +249,11 @@ class NativeValidationExitStatus(unittest.TestCase):
             self.assertEqual(r.returncode, 1, (mode, r.stdout))
             self.assertIn(why, r.stdout, mode)
             self.assertIn("m9-coding: FAIL", r.stdout, mode)
+
+    def test_m9_checks_the_approval_receipts(self):
+        r = self.run_script("validate-m9.sh", APPROVE="nogrant")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("FAIL no receipt for the grant", r.stdout)
 
     def test_m9_checks_the_projects_and_the_records(self):
         for kind, why in (("duplicated", "FAIL project"), ("unfixed", "FAIL project"), ("tmp-left", "FAIL project"),
@@ -564,6 +572,23 @@ def seed_reset(db_path: str, kind: str) -> None:
     sys.exit(0)
 
 
+def seed_approve(db_path: str, kind: str) -> None:
+    """What the composer-approval scenario leaves: command receipts, one approved
+    once and one allowed by the grant you gave. `nogrant` leaves out the grant."""
+    from datetime import datetime, timedelta, timezone
+    from umbrous.persistence import db
+    from umbrous.receipts.model import Receipt, new_action_id, new_task_id
+    from umbrous.receipts.store import ReceiptStore
+    db.connect(Path(db_path)).close()
+    receipts = ReceiptStore(Path(db_path))
+    tid = new_task_id()
+    reasons = ["Approved once by you."] + ([] if kind == "nogrant" else ["Allowed by a grant for this project (cmd.run)."])
+    for reason in reasons:
+        now = datetime.now(timezone.utc)
+        receipts.add(Receipt(tid, new_action_id(), "cmd.run", "project:prj_general resource:.", "allowed", now,
+                             now + timedelta(milliseconds=3), reason), "prj_general", None)
+
+
 def seed_coding(db_path: str, kind: str) -> None:
     """What the M9 scenario leaves: both projects fixed (one multiply each), and
     the task records of coding, Stop, the killed task and its resume. Any other
@@ -627,16 +652,10 @@ def seed_coding(db_path: str, kind: str) -> None:
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "seed-coding":
-        seed_coding(sys.argv[2], sys.argv[3])
-    if len(sys.argv) > 1 and sys.argv[1] == "seed-tasks":
-        seed_tasks(sys.argv[2], sys.argv[3])
-    if len(sys.argv) > 1 and sys.argv[1] == "seed-resume":
-        seed_resume(sys.argv[2], sys.argv[3])
-    if len(sys.argv) > 1 and sys.argv[1] == "seed-memory":
-        seed_memory(sys.argv[2], sys.argv[3])
-    if len(sys.argv) > 1 and sys.argv[1] == "seed-reset":
-        seed_reset(sys.argv[2], sys.argv[3])
-    if len(sys.argv) > 1 and sys.argv[1] == "seed-review":
-        seed_review(sys.argv[2], sys.argv[3])
+    SEEDS = {"seed-approve": seed_approve, "seed-coding": seed_coding, "seed-tasks": seed_tasks,
+             "seed-resume": seed_resume, "seed-memory": seed_memory, "seed-reset": seed_reset,
+             "seed-review": seed_review}
+    if len(sys.argv) > 1 and sys.argv[1] in SEEDS:
+        SEEDS[sys.argv[1]](sys.argv[2], sys.argv[3])
+        sys.exit(0)
     unittest.main()

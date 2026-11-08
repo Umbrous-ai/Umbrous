@@ -83,6 +83,14 @@ class Project:
                 "chats": self.chats, "archived_chats": self.archived_chats}
 
 
+CHAT_ACCESS = ("workspace_read", "ask_before_read", "workspace_code", "code_ask_commands")
+
+
+def _check_access(access: Optional[str]) -> None:
+    if access is not None and access not in CHAT_ACCESS:
+        raise HistoryError(f"Unknown access {access!r}.", "bad_access")
+
+
 @dataclass(frozen=True)
 class ChatInfo:
     id: str
@@ -92,6 +100,8 @@ class ChatInfo:
     updated_at: str
     archived_at: Optional[str]
     messages: int = 0
+    # the chat's own access (a workspace profile), or None for the project's profile
+    access: Optional[str] = None
 
     @property
     def archived(self) -> bool:
@@ -100,7 +110,8 @@ class ChatInfo:
     def as_dict(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "title": self.title,
                 "created_at": self.created_at, "updated_at": self.updated_at,
-                "archived": self.archived, "archived_at": self.archived_at, "messages": self.messages}
+                "archived": self.archived, "archived_at": self.archived_at, "messages": self.messages,
+                "access": self.access}
 
 
 @dataclass(frozen=True)
@@ -170,20 +181,30 @@ class HistoryStore:
         return self.get_project(pid)
 
     # ---------------------------------------------------------------- chats
-    def create_chat(self, project_id: str, title: str = "New chat") -> ChatInfo:
+    def create_chat(self, project_id: str, title: str = "New chat", access: Optional[str] = None) -> ChatInfo:
         self.get_project(project_id)  # raises if it does not exist
+        _check_access(access)
         cid = "chat_" + secrets.token_hex(12)
         now = _now()
         with self._write_lock, self._db() as c:
-            c.execute("INSERT INTO chats (id, project_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                      (cid, project_id, title[:MAX_TITLE], now, now))
+            c.execute("INSERT INTO chats (id, project_id, title, created_at, updated_at, access) VALUES (?, ?, ?, ?, ?, ?)",
+                      (cid, project_id, title[:MAX_TITLE], now, now, access))
         return self.get_chat(cid)
+
+    def set_access(self, chat_id: str, access: Optional[str]) -> ChatInfo:
+        """The chat's own access (a workspace profile), or None for the project's.
+        The gate reads it at every call, so a change applies from the next action."""
+        _check_access(access)
+        self.get_chat(chat_id)
+        with self._write_lock, self._db() as c:
+            c.execute("UPDATE chats SET access = ? WHERE id = ?", (access, chat_id))
+        return self.get_chat(chat_id)
 
     def get_chat(self, chat_id: str) -> ChatInfo:
         with self._db() as c:
             row = c.execute("""
                 SELECT ch.id, ch.project_id, ch.title, ch.created_at, ch.updated_at, ch.archived_at,
-                       (SELECT COUNT(*) FROM messages m WHERE m.chat_id = ch.id)
+                       (SELECT COUNT(*) FROM messages m WHERE m.chat_id = ch.id), ch.access
                 FROM chats ch WHERE ch.id = ?""", (chat_id,)).fetchone()
         if row is None:
             raise HistoryError("That chat does not exist.", "no_such_chat")
@@ -195,7 +216,7 @@ class HistoryStore:
         with self._db() as c:
             rows = c.execute(f"""
                 SELECT ch.id, ch.project_id, ch.title, ch.created_at, ch.updated_at, ch.archived_at,
-                       (SELECT COUNT(*) FROM messages m WHERE m.chat_id = ch.id)
+                       (SELECT COUNT(*) FROM messages m WHERE m.chat_id = ch.id), ch.access
                 FROM chats ch
                 WHERE ch.project_id = ? AND ch.archived_at IS {'NOT ' if archived else ''}NULL
                 ORDER BY ch.updated_at DESC, ch.id""", (project_id,)).fetchall()

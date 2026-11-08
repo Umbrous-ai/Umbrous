@@ -11,7 +11,7 @@ use std::ops::Range;
 use gpui::{
     canvas, div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, CursorStyle, ElementInputHandler,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, HighlightStyle, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, TextLayout, UTF16Selection,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, StyledText, TextLayout, UTF16Selection,
     UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -40,7 +40,15 @@ pub struct Composer {
     compact: bool,
     /// remembered x position for up/down
     goal_x: Option<Pixels>,
+    /// the message box grows up to MAX_HEIGHT and then scrolls
+    scroll: ScrollHandle,
+    /// bring the caret into view at the next paint (set by typing and caret moves,
+    /// not by scrolling, so you can scroll away from the caret to read)
+    reveal: bool,
 }
+
+/// Tallest the message box grows before it scrolls (about ten lines).
+pub const MAX_HEIGHT: f32 = 220.;
 
 impl EventEmitter<ComposerEvent> for Composer {}
 
@@ -67,6 +75,8 @@ impl Composer {
             undo: vec![],
             redo: vec![],
             goal_x: None,
+            scroll: ScrollHandle::new(),
+            reveal: false,
         }
     }
 
@@ -96,6 +106,7 @@ impl Composer {
         self.selected = text.len()..text.len();
         self.marked = None;
         self.goal_x = None;
+        self.reveal = true;
         cx.notify();
     }
 
@@ -106,10 +117,12 @@ impl Composer {
     fn move_to(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.selected = ix..ix;
         self.reversed = false;
+        self.reveal = true;
         cx.notify();
     }
 
     fn select_to(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.reveal = true;
         if self.reversed { self.selected.start = ix } else { self.selected.end = ix }
         if self.selected.end < self.selected.start {
             self.reversed = !self.reversed;
@@ -173,6 +186,7 @@ impl Composer {
         self.selected = ix..ix;
         self.reversed = false;
         self.goal_x = None;
+        self.reveal = true;
         cx.notify();
     }
 
@@ -300,6 +314,7 @@ impl Composer {
         if let Some((text, sel)) = self.undo.pop() {
             self.redo.push((std::mem::replace(&mut self.content, text), self.selected.clone()));
             self.selected = sel;
+            self.reveal = true;
             cx.notify();
         }
     }
@@ -307,6 +322,7 @@ impl Composer {
         if let Some((text, sel)) = self.redo.pop() {
             self.undo.push((std::mem::replace(&mut self.content, text), self.selected.clone()));
             self.selected = sel;
+            self.reveal = true;
             cx.notify();
         }
     }
@@ -416,6 +432,7 @@ impl EntityInputHandler for Composer {
                 r.start + conv(s.start)..r.start + conv(s.end)
             })
             .unwrap_or(r.start + text.len()..r.start + text.len());
+        self.reveal = true;
         cx.notify();
     }
     fn bounds_for_range(&mut self, r: Range<usize>, element_bounds: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
@@ -466,7 +483,15 @@ impl Render for Composer {
         let show_caret = focused && self.selected.is_empty() && !self.disabled;
         let layout = styled.layout().clone();
 
+        let reveal = std::mem::take(&mut self.reveal) && !empty;
+        let scroll = self.scroll.clone();
+        let compact = self.compact;
+
+        // Block layout all the way down, with a definite width: inside a flex column the
+        // text was measured as one unwrapped line, so a long paragraph got a one-line
+        // box and its wrapped lines were painted over the toolbar and out of the window.
         div()
+            .id("composer-scroll")
             .key_context("Composer")
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
@@ -506,31 +531,53 @@ impl Render for Composer {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .w_full()
-            .min_h(px(if self.compact { 19.5 } else { 21. }))
-            .max_h(px(240.))
-            .overflow_hidden()
-            .relative()
-            .text_size(px(if self.compact { 13. } else { 14. }))
-            .line_height(px(if self.compact { 19.5 } else { 21. }))
+            .min_h(px(if compact { 19.5 } else { 21. }))
+            .max_h(px(if compact { 240. } else { MAX_HEIGHT }))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .text_size(px(if compact { 13. } else { 14. }))
+            .line_height(px(if compact { 19.5 } else { 21. }))
             .text_color(if self.disabled { theme::text_subtle() } else { theme::text_strong() })
-            .child(styled)
             .child(
-                canvas(
-                    move |_, _, _| {},
-                    move |bounds, _, window, cx| {
-                        window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
-                        entity.update(cx, |c, _| c.painted = true);
-                        if show_caret {
-                            if let Some(p) = layout.position_for_index(cursor) {
-                                window.paint_quad(fill(Bounds::new(p, size(px(1.5), layout.line_height())), theme::accent()));
-                            }
-                        }
-                    },
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
+                // the text and, over it, the caret and input handler; both scroll together
+                div()
+                    .w_full()
+                    .relative()
+                    .child(styled)
+                    .child(
+                        canvas(
+                            move |_, _, _| {},
+                            move |bounds, _, window, cx| {
+                                window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
+                                entity.update(cx, |c, _| c.painted = true);
+                                let caret = layout.position_for_index(cursor);
+                                if show_caret {
+                                    if let Some(p) = caret {
+                                        window.paint_quad(fill(Bounds::new(p, size(px(1.5), layout.line_height())), theme::accent()));
+                                    }
+                                }
+                                if let (true, Some(p)) = (reveal, caret) {
+                                    // keep the caret's line inside the visible part of the box
+                                    let view = scroll.bounds();
+                                    let lh = layout.line_height();
+                                    let mut off = scroll.offset();
+                                    if p.y < view.top() {
+                                        off.y += view.top() - p.y;
+                                    } else if p.y + lh > view.bottom() {
+                                        off.y -= p.y + lh - view.bottom();
+                                    }
+                                    if off != scroll.offset() {
+                                        scroll.set_offset(off);
+                                        window.refresh();
+                                    }
+                                }
+                            },
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    ),
             )
     }
 }

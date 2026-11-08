@@ -286,6 +286,12 @@ MIGRATIONS = (
     DROP TABLE workspaces;
     ALTER TABLE workspaces_m9 RENAME TO workspaces;
     """,
+    # version 10: a chat's own access (one of the workspace profiles), chosen in the
+    # composer like Codex's per-session permission. NULL means the project's profile.
+    """
+    ALTER TABLE chats ADD COLUMN access TEXT CHECK (access IS NULL OR access IN
+        ('workspace_read', 'ask_before_read', 'workspace_code', 'code_ask_commands'));
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

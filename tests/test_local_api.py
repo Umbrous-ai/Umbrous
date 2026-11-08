@@ -57,7 +57,7 @@ class LocalApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["milestone"], "M9")
-        self.assertEqual(body["schema_version"], 9)
+        self.assertEqual(body["schema_version"], 10)
         self.assertEqual(body["bind"], self.rt.host)
         self.assertGreaterEqual(body["launches"], 1)
 

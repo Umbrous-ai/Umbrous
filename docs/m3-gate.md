@@ -179,40 +179,33 @@ Clients that do not know them ignore them (the desktop app does).
 ## The desktop app
 
 Umbrous.app starts the same Python runtime, so the gate, the hard blocks and
-the receipts apply there unchanged. The native interface does not show steps,
-approval cards, Sources or an Access editor yet. What that means, decided by
-Freddy on 2026-11-07:
+the receipts apply there unchanged.
 
-- **Workspace read is the default.** Attaching a folder authorizes ordinary
-  reads inside it without repeated prompts. Exclusions, path checks and
-  receipts stay exactly as they are.
-- **Ask before read is an optional, stricter mode that the app cannot serve
-  yet,** so the app never offers it. Only the browser page can answer its cards.
-  The page says so when it sends a message (`"approvals": true`). A client that
-  doesn't send that flag, such as the app, gets each read that needs approval
-  **refused at once** with `approval_unavailable` and a clear reason. Nothing
-  waits five minutes. A grant you gave earlier in the page still applies.
-- **A project already on Ask before read is never loosened for you.** In the
-  app it shows a notice that explains the mode and offers **Switch to
-  Workspace read**. Only that button, the page's Access section, or
-  `bin/umbrous workspace PROJECT --profile workspace_read` changes it.
-  Setting Ask before read from the CLI prints the same warning.
-- Attach a workspace and run the tool check from the terminal for now
-  (`bin/umbrous workspace …`, `bin/umbrous probe …`), or in the browser page.
+Since 2026-11-08 (Freddy: "in the composer I should either give the agent full
+access or approve, like Codex does it") the app shows approval cards and sends
+`"approvals": true`, like the browser page. The composer's access pill sets
+each chat's own access (the project's profile is the default); see [desktop.md](desktop.md#access-and-approvals-in-the-composer).
+Before that, the app could not answer cards: Workspace read was its default,
+a project on Ask before read showed a notice with **Switch to Workspace read**,
+and each read that needed approval was refused at once. That refusal
+(`approval_unavailable`) still applies to any client that does not send the
+flag, and a project's profile is still never loosened for you.
 
 Checked in the real app by `desktop/e2e/validate-m3.sh WORKDIR`, which is also
 part of `validate-native.sh`. It needs `build-native.sh --e2e` and uses a
 throwaway data folder, the M3 fixture and a fake Ollama. The script
 (`desktop/e2e/scripts/m3-access.txt`) does this:
 
-1. It opens General, which is on Ask before read, and checks that the notice
-   is shown and the profile is unchanged.
-2. It asks for a read. The reply says reads can't be approved here, quickly and
-   without the file's text, and the profile is still Ask before read.
-3. It presses Switch to Workspace read. The notice goes away.
-4. It reads `notes/plan.md` and gets the answer from the file. Reading
+1. It opens General, which is on Ask before read, and checks that the
+   composer's access pill says so and the profile is unchanged.
+2. It asks for a read. A card asks; Approve once lets exactly that read run,
+   and the answer comes from the file.
+3. It asks for another read and presses Deny. The file's text never appears
+   and the profile is still Ask before read.
+4. It chooses Read only for that chat; the project stays on Ask before read.
+5. In that chat it reads `notes/plan.md` and gets the answer from the file. Reading
    `../outside/secret.txt`, `link.txt` and `notes/.ENV` is still refused, and no
-   secret appears.
+   secret appears. A new chat starts on the project's Ask before reads again.
 
 At the end it lists the receipts.
 
@@ -237,7 +230,7 @@ error.
 platform. It covers a clean run and every kind of scenario failure, among them
 a failed launch that leaves no results, and a panic in each of the last scenarios.
 
-The native approval cards, Access view and Sources are the next step.
+Sources and a full Access view (grants, revoke) are still only in the page.
 
 ## Changes to existing files
 
@@ -310,6 +303,6 @@ Say you want `*.tfstate` (Terraform state, often full of secrets) never read.
 | File | Covers |
 |---|---|
 | `tests/test_m3_fs.py` | Normal read with lines and hash; line window; symlink as file and as folder; hard link; FIFO without hanging; device file; too large, binary, non-UTF-8; folder and missing; excluded names in any case and Unicode form; listing hides excluded and marks symlinks; search never follows links or reads excluded; result and time bounds; symlinked root; **swap race** (3,000 swaps) |
-| `tests/test_m3_gate.py` | Gate order and every block reason; profiles; once is single-use and bound to arguments, project and policy version; grants and revoke; detach and re-attach revoke grants; unknown tools and bad arguments; receipts for every outcome; chat with evidence; unverified model gets no tools; no workspace gets no tools; hostile file; round and call limits; context budget cut; ask profile through the API with once, grant, deny; stop while a card is waiting; **a client without approval cards (the app) is refused at once, the profile is not loosened, an earlier grant still applies, switching to Workspace read works**; access API; no file content or paths in logs; `purge receipts` needs `--yes` |
+| `tests/test_m3_gate.py` | Gate order and every block reason; profiles; once is single-use and bound to arguments, project and policy version; grants and revoke; detach and re-attach revoke grants; unknown tools and bad arguments; receipts for every outcome; chat with evidence; unverified model gets no tools; no workspace gets no tools; hostile file; round and call limits; context budget cut; ask profile through the API with once, grant, deny; stop while a card is waiting; **a client without approval cards is refused at once, the profile is not loosened, an earlier grant still applies, switching to Workspace read works**; access API; no file content or paths in logs; `purge receipts` needs `--yes` |
 | `desktop/e2e/validate-m3.sh` | The real app on macOS: the Ask before read notice, a read refused at once, Switch to Workspace read, a read answered from the file, outside / symlink / `.ENV` still blocked |
 | `tests/test_browser_m3.py` | Headless Chromium: attach from Access, a read with Sources, outside / `.ENV` / symlink blocked with no card, search, Ask before read with once, grant (listed, then no card), revoke, deny, outside still blocked under ask, steps and Sources after reopening, detach. Skipped without Node + Playwright |
