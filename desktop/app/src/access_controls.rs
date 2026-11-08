@@ -161,14 +161,20 @@ impl Workspace {
         logfile::event("ui.workspace_attach", &[("profile", profile.into())]);
         self.access_error = None;
         let path = format!("/api/projects/{pid}/workspace");
-        // the chat this choice was made in (None: the new chat not created yet)
-        let chat_at_choice = self.chat.as_ref().map(|c| c.id.clone());
-        self.api_call(cx, move |api| api.post::<api::Access>(&path, json!({ "root": root, "profile": "workspace_read" })), move |this, r, cx| match r {
+        // The transcript this choice was made in. `view` changes on New chat, opening a
+        // chat and switching project, but not when an unsaved chat is saved by its first
+        // message: an id alone cannot tell two unsaved chats apart (both None).
+        let view_at_choice = self.view;
+        let delay = self.e2e_attach_delay_ms;
+        self.api_call(cx, move |api| {
+            if delay > 0 { std::thread::sleep(std::time::Duration::from_millis(delay)); }
+            api.post::<api::Access>(&path, json!({ "root": root, "profile": "workspace_read" }))
+        }, move |this, r, cx| match r {
             Ok(a) if this.project_id.as_deref() == Some(a.project_id.as_str()) => {
                 this.access_seq += 1;
                 this.access = Some(a);
                 // only if you are still in the chat you chose it for
-                if this.chat.as_ref().map(|c| c.id.clone()) == chat_at_choice { this.set_chat_access(Some(profile), cx); }
+                if this.view == view_at_choice { this.set_chat_access(Some(profile), cx); }
             }
             Ok(_) => {}
             Err(e) => this.access_error = Some(e.message),

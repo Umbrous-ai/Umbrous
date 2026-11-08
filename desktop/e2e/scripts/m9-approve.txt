@@ -70,6 +70,17 @@ expect access_pill Full access
 new_chat
 expect chat_access default
 expect access_pill Read only
+# 4b. the attach answers only after you started another new chat: the level chosen in the
+#     first (unsaved) chat must not land in the new one
+add_project Race
+select_project Race
+new_chat
+attach_folder_then_new_chat workspace_code @OUT@/m9-fixture/d/proj
+expect access workspace_read
+expect chat_access default
+expect access_pill Read only
+select_project Fresh
+new_chat
 # 5. the card shows the whole command, verbatim, even past 80 characters and a line break;
 #    Deny refuses it (project Fresh has no grant)
 set_access code_ask_commands

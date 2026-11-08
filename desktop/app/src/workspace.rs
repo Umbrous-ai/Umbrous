@@ -198,6 +198,8 @@ pub struct Workspace {
     pub e2e_preview_delay_ms: u64,
     /// e2e only: hold Start fresh's chat-list request this long
     pub e2e_list_delay_ms: u64,
+    /// e2e only: hold a folder attach this long, to test a late reply after New chat
+    pub e2e_attach_delay_ms: u64,
     sidebar: bool,
     /// the right sidebar (Changes and Sources), shown and hidden by the header's panel button
     details: bool,
@@ -366,6 +368,7 @@ impl Workspace {
             reset_panel: 0,
             e2e_preview_delay_ms: 0,
             e2e_list_delay_ms: 0,
+            e2e_attach_delay_ms: 0,
             access_seq: 0,
             access_error: None,
             sidebar: true,

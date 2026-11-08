@@ -233,6 +233,16 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             window.update(cx, |ws, _, cx| ws.attach_folder(root, p, cx)).ok();
             wait_until(cx, window, 10, "folder attached", move |ws| ws.chat_access().as_deref() == Some(p)).await?;
         }
+        "attach_folder_then_new_chat" => {
+            // the attach answers only after New chat: the level must not land in the new chat
+            let (level, root) = arg.split_once(' ').ok_or("attach_folder_then_new_chat LEVEL PATH")?;
+            let p: &'static str = crate::workspace::access_levels().iter().copied().find(|p| *p == level)
+                .ok_or_else(|| format!("unknown access {level}"))?;
+            let root = root.to_string();
+            window.update(cx, |ws, _, cx| { ws.e2e_attach_delay_ms = 1500; ws.attach_folder(root, p, cx); ws.new_chat(cx); ws.e2e_attach_delay_ms = 0 }).ok();
+            wait_until(cx, window, 10, "folder attached", |ws| ws.access.as_ref().and_then(|a| a.workspace.as_ref()).is_some()).await?;
+            sleep(cx, 500).await;
+        }
         "choose_level" => {
             // what clicking a row of the access menu does (Full access opens its dialog)
             let p: &'static str = crate::workspace::access_levels().iter().copied().find(|p| *p == arg)
