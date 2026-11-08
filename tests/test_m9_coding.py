@@ -164,7 +164,7 @@ class ToolTests(unittest.TestCase):
 
     def test_replace_a_whole_file_needs_the_version_it_replaces(self):
         r = self.call("read_file", path="calc.py")
-        self.assertIn(f"sha256 {sha(CALC)}", r.model_text)
+        self.assertNotIn(sha(CALC), r.model_text)        # not shown: the task's own read is the expected version
         out = self.call("write_file", path="calc.py", content=FIXED)
         self.assertEqual((out.decision, out.observed["op"]), ("allowed", "replaced"))
         self.assertEqual((self.ws / "calc.py").read_text(), FIXED)
@@ -246,6 +246,10 @@ class ToolTests(unittest.TestCase):
         bad = self.call("run_command", command="exit 3")
         self.assertEqual((bad.decision, bad.observed["exit"]), ("allowed", 3))
         self.assertIn("exited with status 3", bad.model_text)
+        self.assertIn("(no output)", bad.model_text)                   # empty streams are not shown
+        quiet = self.call("run_command", command="echo hello")
+        self.assertIn("--- stdout (6 bytes) ---\nhello", quiet.model_text)
+        self.assertNotIn("stderr", quiet.model_text)
         self.assertEqual(self.intents[0]["op"], "command")
 
     def test_command_runs_in_the_workspace_without_the_session_token(self):

@@ -409,8 +409,10 @@ what changed.
 Coding requests fit the actual serialized transcript, including tool arguments,
 within the configured input budget. Older complete tool rounds are removed before
 new results are shortened. A fresh runtime progress record carries recent confirmed
-edits (including resulting hashes), command statuses/exit codes, action outcomes,
-and counts across those removals. File contents and command output remain untrusted;
+edits (path and kind of change), command statuses/exit codes, failed or refused
+actions, and counts across those removals. The record is sent last, after the newest
+results, so the rest of the request stays the same from step to step and a model
+server can reuse its cached prompt (docs/tokens.md). File contents and command output remain untrusted;
 progress records label their JSON values as data, not instructions.
 
 This avoids replacing successful edits with generic “result removed” messages,

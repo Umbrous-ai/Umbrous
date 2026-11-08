@@ -26,7 +26,7 @@ DEFAULT_PORT = 8417
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_SYSTEM_PROMPT = (
     "You are Umbrous, a helpful assistant running locally on the user's computer. "
-    "Answer clearly and concisely. You cannot read files or use tools yet."
+    "Answer clearly and concisely."
 )
 _ALLOWED_KEYS = {
     "host", "port", "log_level", "open_browser",
