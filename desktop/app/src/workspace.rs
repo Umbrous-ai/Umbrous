@@ -1185,8 +1185,12 @@ impl Workspace {
                     },
                 };
                 let r = api2.chat_stream(&chat_id, &model, &text, resume.as_deref(), use_memory, |ev| {
+                    // M9: Stop during a tool (a command) ends it with its result and then the
+                    // runtime's "Stopped by you" event, one right after the other: keep reading
+                    // past that result so the reply shows how the task ended.
+                    let tool_result = ev.get("type").and_then(Value::as_str) == Some("tool_result");
                     let _ = tx.unbounded_send(StreamMsg::Event(ev));
-                    !stop.load(Ordering::SeqCst)
+                    !stop.load(Ordering::SeqCst) || tool_result
                 });
                 let _ = tx.unbounded_send(StreamMsg::Ended(r.err()));
             })
