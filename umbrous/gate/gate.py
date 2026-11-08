@@ -203,6 +203,18 @@ class ToolContext:
     command_timeout_s: int = 120
     command_timeout_max_s: int = 1800
 
+    # `seen` is keyed by the path as the disk spells it, not as the model did:
+    # on a case-insensitive disk `calc.py` and `CALC.py` are one file, and an
+    # edit through the other spelling must still be checked (edit.canonical_path).
+    def _key(self, root: str, rel: str) -> str:
+        return edit.canonical_path(root, rel)
+
+    def remember(self, root: str, rel: str, sha256: str) -> None:
+        self.seen[self._key(root, rel)] = sha256
+
+    def version(self, root: str, rel: str) -> Optional[str]:
+        return self.seen.get(self._key(root, rel))
+
 
 @dataclass
 class Call:
@@ -524,7 +536,7 @@ class Gate:
                 ev = [EvidenceRef("file", r.path, r.sha256, r.size_bytes,
                                   (r.first_line, r.last_line) if r.last_line >= r.first_line else None)]
                 observed = {"lines_total": r.total_lines, "partial": r.truncated or r.first_line > 1}
-                ctx.seen[r.path] = r.sha256     # M9: a change to this file starts from this version
+                ctx.remember(ws.root, r.path, r.sha256)   # M9: a change to this file starts from this version
                 body = body.replace(f"read_file {r.path} lines", f"read_file {r.path} (sha256 {r.sha256}) lines", 1)
             elif v.action == "fs.list":
                 r = fs.list_dir(ws.root, v.parts)
@@ -578,7 +590,7 @@ class Gate:
                 ctx: ToolContext) -> Outcome:
         a = v.clean_args
         path = "/".join(v.parts)
-        expect = (a.get("expected_sha256") or "").strip().lower() or ctx.seen.get(path)
+        expect = (a.get("expected_sha256") or "").strip().lower() or ctx.version(ws.root, path)
         try:
             if v.action == "fs.write":
                 content = a["content"]
@@ -596,7 +608,7 @@ class Gate:
         except Exception as exc:   # e.g. the intent could not be recorded: nothing was written
             return self._finish(task_id, action_id, project_id, chat_id, v, started, "uncertain", "tool_crashed",
                                 f"The change failed unexpectedly ({exc.__class__.__name__}).")
-        ctx.seen[r.path] = r.after
+        ctx.remember(ws.root, r.path, r.after)
         words = {"created": "Created", "replaced": "Replaced", "edited": "Edited", "unchanged": "Unchanged",
                  "already_applied": "Already applied"}
         lines = r.diff.count("\n") + 1 if r.diff else 0
@@ -636,7 +648,8 @@ class Gate:
                                     f"({exc.__class__.__name__}).")
             try:
                 c = reg.start(task_id, a["command"], ws.root,
-                              started=lambda pid: ctx.command_started({"pid": pid, "command": shown}))
+                              started=lambda pid, ident: ctx.command_started({"pid": pid, "identity": ident,
+                                                                              "command": shown}))
             except OSError as exc:
                 return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", "start_failed",
                                     f"The command could not be started ({exc.strerror or exc.__class__.__name__}).")
@@ -668,6 +681,9 @@ class Gate:
                   f"(id {r.cmd_id}; check it with check_command)", "timed_out": f"did not finish within its time "
                   f"limit and was stopped after {r.ms / 1000:.1f} s", "stopped": "was stopped"}[state]
         took = f" after {r.ms / 1000:.1f} s" if state == "exited" else ""
+        if state == "exited" and c.lingering():
+            took += ("; processes it started are still running (in the background), and they are stopped when "
+                     "this task ends")
         body = (f"{'run_command' if v.action == 'cmd.run' else 'check_command'}: {shown}\n{status}{took}\n"
                 f"--- stdout ({r.stdout_bytes:,} bytes) ---\n{r.stdout.rstrip()}\n"
                 f"--- stderr ({r.stderr_bytes:,} bytes) ---\n{r.stderr.rstrip()}")

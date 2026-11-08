@@ -461,6 +461,22 @@ pub fn resume_note(r: &Resume) -> Option<String> {
 }
 
 /// M9: what a running step is doing, for the reply's meta line while it runs.
+/// M9: whether the chat stream is read on after an event of type `ty`.
+///
+/// Before Stop, always. After Stop, when the runtime was asked to cancel the
+/// run, until its last event (`done` or `error`): a stopped task can send
+/// several events first (a cancelled command's result, the next tool call and
+/// its cancelled result, …) and the last one carries "Stopped by you" and the
+/// task's report. When it could not be asked (Stop came before the run had an
+/// id), reading ends here, which closes the connection, and the runtime stops
+/// the run for that.
+pub fn keep_reading(stopped: bool, cancel_sent: bool, ty: &str) -> bool {
+    if !stopped {
+        return true;
+    }
+    cancel_sent && !matches!(ty, "done" | "error")
+}
+
 pub fn step_label(tool: &str, args: &Value) -> String {
     let s = |k: &str| args.get(k).and_then(Value::as_str).filter(|p| !p.is_empty());
     let path = s("path").unwrap_or(".");
@@ -605,6 +621,20 @@ pub struct Health {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stop_reads_on_to_the_last_event() {
+        // Stop during a batch of tool calls: everything up to the final error is read
+        let seq = ["tool_result", "tool_call", "tool_result", "tool_call", "tool_result", "error"];
+        let read: Vec<bool> = seq.iter().map(|t| keep_reading(true, true, t)).collect();
+        assert_eq!(read, [true, true, true, true, true, false]);
+        assert!(!keep_reading(true, true, "done"));
+        // not stopped: every event
+        assert!(seq.iter().all(|t| keep_reading(false, false, t)));
+        // Stop before the run had an id: no cancel was sent, so reading ends (closing the stream)
+        assert!(!keep_reading(true, false, "start"));
+        assert!(!keep_reading(true, false, "tool_result"));
+    }
+
     use super::*;
 
     #[test]

@@ -57,6 +57,9 @@ struct Run {
     chat_id: String,
     run_id: Option<String>,
     stop: Arc<AtomicBool>,
+    /// M9: set once Stop has asked the runtime to cancel this run (it knew the
+    /// run id), so the stream is read on to the runtime's last event
+    cancel_sent: Arc<AtomicBool>,
     /// M6: the memory items this reply was given (from `start`), so a reply
     /// that is stopped or fails part way still names them
     memory_ids: Vec<String>,
@@ -891,6 +894,8 @@ impl Workspace {
     /// and keeps the partial reply.
     fn detach_run(&mut self, cx: &mut Context<Self>) {
         if let Some(run) = self.run.take() {
+            // cancel_sent before stop: the stream thread must never see Stop without it
+            run.cancel_sent.store(run.run_id.is_some(), Ordering::SeqCst);
             run.stop.store(true, Ordering::SeqCst);
             if let Some(run_id) = run.run_id.clone() {
                 self.api_call(cx, move |api| api.post::<Value>("/api/chat/cancel", json!({ "run_id": run_id })), |_, _, _| {});
@@ -1156,9 +1161,10 @@ impl Workspace {
         self.append_rows(n);
         self.append_rows(n + 1);
         let stop = Arc::new(AtomicBool::new(false));
+        let cancel_sent = Arc::new(AtomicBool::new(false));
         self.run_seq += 1;
         let token = self.run_seq;
-        self.run = Some(Run { token, msg_ix: n + 1, chat_id: existing.clone().unwrap_or_default(), run_id: None, stop: stop.clone(), memory_ids: vec![] });
+        self.run = Some(Run { token, msg_ix: n + 1, chat_id: existing.clone().unwrap_or_default(), run_id: None, stop: stop.clone(), cancel_sent: cancel_sent.clone(), memory_ids: vec![] });
         cx.notify();
 
         let Some(api) = self.api.clone() else { return };
@@ -1185,12 +1191,10 @@ impl Workspace {
                     },
                 };
                 let r = api2.chat_stream(&chat_id, &model, &text, resume.as_deref(), use_memory, |ev| {
-                    // M9: Stop during a tool (a command) ends it with its result and then the
-                    // runtime's "Stopped by you" event, one right after the other: keep reading
-                    // past that result so the reply shows how the task ended.
-                    let tool_result = ev.get("type").and_then(Value::as_str) == Some("tool_result");
+                    let more = api::keep_reading(stop.load(Ordering::SeqCst), cancel_sent.load(Ordering::SeqCst),
+                                                 ev.get("type").and_then(Value::as_str).unwrap_or(""));
                     let _ = tx.unbounded_send(StreamMsg::Event(ev));
-                    !stop.load(Ordering::SeqCst) || tool_result
+                    more
                 });
                 let _ = tx.unbounded_send(StreamMsg::Ended(r.err()));
             })
@@ -1476,6 +1480,8 @@ impl Workspace {
 
     pub fn stop_reply(&mut self, cx: &mut Context<Self>) {
         if let Some(run) = self.run.as_ref() {
+            // cancel_sent before stop: the stream thread must never see Stop without it
+            run.cancel_sent.store(run.run_id.is_some(), Ordering::SeqCst);
             run.stop.store(true, Ordering::SeqCst);
             if let Some(run_id) = run.run_id.clone() {
                 self.api_call(cx, move |api| api.post::<Value>("/api/chat/cancel", json!({ "run_id": run_id })), |_, _, _| {});

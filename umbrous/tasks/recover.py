@@ -65,7 +65,7 @@ from umbrous.logging_setup import log_event
 from umbrous.receipts.store import ReceiptStore
 from umbrous.tasks.store import OPEN, TaskStore
 from umbrous.tools import edit
-from umbrous.tools.run import kill_group, process_alive
+from umbrous.tools.run import kill_group, process_alive, same_process
 
 WRITE_TOOLS = ("write_file", "edit_file")
 COMMAND_TOOLS = ("run_command", "check_command")
@@ -198,11 +198,18 @@ def _reconcile_write(tasks: TaskStore, a: dict, events: list, root: Optional[str
 def _stop_leftover(tasks: TaskStore, task_id: str, a: dict, events: list) -> None:
     """M9: a command the dead runtime started may still be running (its own
     process group). It belonged to an ended task: stop it, and say so."""
-    started = _intent(events, a["action_id"], "command.started")
-    pid = (started or {}).get("pid")
-    if isinstance(pid, int) and pid > 1 and process_alive(pid):
+    started = _intent(events, a["action_id"], "command.started") or {}
+    pid = started.get("pid")
+    if not (isinstance(pid, int) and pid > 1 and process_alive(pid)):
+        return
+    # The id alone proves nothing: after a restart (or a reboot) it may belong to
+    # an unrelated process. Signal it only when it is still the very process that
+    # was started: same boot, same start time, still leading its own group.
+    if same_process(pid, started.get("identity")):
         kill_group(pid)
         tasks.event(task_id, "command.stopped_after_restart", a["action_id"], pid=pid)
+    else:
+        tasks.event(task_id, "command.not_signalled", a["action_id"], pid=pid)
 
 
 def rebuild_report(full: dict, by_action: Dict[str, dict], status: str, code: str, reply_saved: bool) -> dict:
@@ -220,6 +227,10 @@ def rebuild_report(full: dict, by_action: Dict[str, dict], status: str, code: st
         elif e["kind"] == "command.stopped_after_restart":
             uncertainty.append(f"A command this task started was still running after the restart and was stopped "
                                f"(process {e['data'].get('pid')}).")
+        elif e["kind"] == "command.not_signalled":
+            uncertainty.append(f"Process {e['data'].get('pid')} is running, but it could not be shown to be the "
+                               f"command this task started (its id may have been reused), so it was left alone. "
+                               f"Check it yourself.")
     for a in actions:
         counts[a["status"]] = counts.get(a["status"], 0) + 1
         where = f"{a['tool']} {a['resource']}"

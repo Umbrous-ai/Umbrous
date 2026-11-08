@@ -61,7 +61,28 @@ MUTATIONS = [
      "umbrous/tasks/run.py", 'self.note(f"{len(changed)} file change(s) were made, and no command was run to check them.")',
      "pass",
      [T + "LoopTests.test_the_report_says_when_the_last_check_failed_or_none_ran"]),
+    ("stopping what a finished command left running in its group",
+     "umbrous/tools/run.py", "            if not c.done() or group_alive(c.pid):\n", "            if not c.done():\n",
+     [T + "ToolTests.test_ending_the_task_stops_what_a_finished_command_left_running"]),
+    ("checking a process's identity before signalling it after a restart",
+     "umbrous/tools/run.py", "    return identity(pid) == {\"boot\": ident[\"boot\"], \"start\": ident[\"start\"]}",
+     "    return True",
+     [T + "RecoveryTests.test_a_reused_process_id_is_not_signalled"]),
 ]
+
+
+def _case_insensitive_disk() -> bool:
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "Probe").write_text("")
+        return Path(d, "probe").exists()
+
+
+# Only a disk that does not tell calc.py from CALC.py (the macOS default) can show this one.
+CASE_MUTATION = ("remembering a file's version under the disk's own spelling",
+                 "umbrous/gate/gate.py", "        return edit.canonical_path(root, rel)", "        return rel",
+                 [T + "ToolTests.test_a_remembered_version_is_found_through_the_disk_spelling"])
+if _case_insensitive_disk():
+    MUTATIONS.append(CASE_MUTATION)
 
 
 def run_tests(copy: Path, tests) -> bool:
@@ -81,6 +102,8 @@ def main() -> int:
             print("FAIL the unmutated copy does not pass the guarding tests")
             return 1
         print(f"ok   unmutated: all {len(every)} guarding tests pass")
+        if CASE_MUTATION not in MUTATIONS:
+            print(f"skip without {CASE_MUTATION[0]}: this disk tells file names apart by case")
         for what, rel, old, new, tests in MUTATIONS:
             f = base / rel
             original = f.read_text()

@@ -15,8 +15,16 @@ the total size, so a chatty build cannot fill memory or the model's context.
     Stop     the run loop's cancel token is polled every 0.1 s; the process
              group is stopped at once.
 
-A command never outlives its task: when the task ends, every background
-command it started that is still running is stopped (`end_task`).
+A command never outlives its task: when the task ends, every command it
+started whose process group still has a process in it is stopped
+(`end_task`). That includes a command whose shell has exited but left a
+process behind (`sleep 60 &`): the shell exiting ends the command's result,
+not its group.
+
+Each command's leader is recorded with its identity: the boot it ran in and
+its start time (`identity`). After a restart, recovery signals a group only
+when its leader is still the very process that was started; a process that
+merely reuses the id is left alone (`same_process`).
 
 What this is not: an OS sandbox. A command runs as you and can do anything
 you can, inside the workspace or outside it. The working directory is the
@@ -83,13 +91,19 @@ class Command:
     err: Capture = field(default_factory=Capture)
     stopped_by: Optional[str] = None       # you | time_limit | task_end | stop
     readers: list = field(default_factory=list)
+    identity: Optional[dict] = None
 
     @property
     def pid(self) -> int:
         return self.proc.pid
 
     def done(self) -> bool:
+        """The shell (the group's leader) has exited."""
         return self.proc.poll() is not None
+
+    def lingering(self) -> bool:
+        """The shell has exited but its process group still has processes."""
+        return self.done() and group_alive(self.pid)
 
     def ms(self) -> int:
         return int((time.monotonic() - self.started) * 1000)
@@ -138,6 +152,99 @@ def kill_group(pid: int) -> None:
             time.sleep(0.02)
 
 
+def group_alive(pgid: int) -> bool:
+    """Is there still a running process in this group that we may signal?
+    While the group has a member, its id cannot be given to another process,
+    so the group is still the command's. A member that has exited but not yet
+    been reaped (a zombie) does not count."""
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    states = _group_states(pgid)
+    return states is None or any(not st.startswith("Z") for st in states)
+
+
+def _group_states(pgid: int) -> Optional[List[str]]:
+    """The state letters of the group's members, or None if they cannot be listed."""
+    if os.path.isdir("/proc/self"):
+        out = []
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/stat") as f:
+                    fields = f.read().rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            if len(fields) > 2 and fields[2] == str(pgid):
+                out.append(fields[0])
+        return out
+    try:
+        lines = subprocess.run(["/bin/ps", "-A", "-o", "pgid=,stat="], capture_output=True, text=True, timeout=5,
+                               env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"}).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [f[1] for f in (ln.split() for ln in lines) if len(f) >= 2 and f[0] == str(pgid)]
+
+
+# ---------------------------------------------------------------- identity
+def _boot_id() -> Optional[str]:
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            return f.read().strip() or None
+    except OSError:
+        pass
+    try:   # macOS: "{ sec = 1762560000, usec = 123456 } Sat Nov  8 …"
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True,
+                             timeout=5).stdout
+        return out.split("}")[0].strip(" {") or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+_BOOT: List[Optional[str]] = []
+
+
+def boot_id() -> Optional[str]:
+    if not _BOOT:
+        _BOOT.append(_boot_id())
+    return _BOOT[0]
+
+
+def start_time(pid: int) -> Optional[str]:
+    """When the process started, as the system reports it (None if it is gone)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return "jiffies:" + f.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        pass
+    if os.path.exists("/proc/self/stat"):
+        return None                 # Linux, and the process is gone
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=5, env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"}).stdout.strip()
+        return ("lstart:" + " ".join(out.split())) if out else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def identity(pid: int) -> Optional[dict]:
+    """What tells this process apart from a later one that reuses its id."""
+    boot, start = boot_id(), start_time(pid)
+    return {"boot": boot, "start": start} if boot and start else None
+
+
+def same_process(pid: int, ident) -> bool:
+    """Recovery: is `pid` still the process recorded as `ident`, and still the
+    leader of its own group? False whenever that cannot be shown."""
+    if not isinstance(ident, dict) or not ident.get("boot") or not ident.get("start"):
+        return False
+    if not process_alive(pid):
+        return False
+    return identity(pid) == {"boot": ident["boot"], "start": ident["start"]}
+
+
 # Umbrous.app starts its runtime with a minimal PATH (/usr/bin:/bin:...), and a
 # command does not load your shell profile. These usual tool folders are added
 # at the end when they exist, so `cargo`, `brew`-installed tools and the like
@@ -161,7 +268,8 @@ class CommandRegistry:
         self._lock = threading.Lock()
         self._cmds: Dict[str, Command] = {}
 
-    def start(self, task_id: str, command: str, cwd: str, started: Callable[[int], None] = lambda pid: None) -> Command:
+    def start(self, task_id: str, command: str, cwd: str,
+              started: Callable[[int, Optional[dict]], None] = lambda pid, ident: None) -> Command:
         env = dict(os.environ)
         env.pop("UMBROUS_SESSION_TOKEN", None)
         env["PATH"] = command_path(env.get("PATH", ""))
@@ -170,6 +278,7 @@ class CommandRegistry:
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
                                 env=env, close_fds=True)
         c = Command("cmd_" + secrets.token_hex(6), task_id, command, proc, time.monotonic())
+        c.identity = identity(proc.pid)
         for stream, cap in ((proc.stdout, c.out), (proc.stderr, c.err)):
             t = threading.Thread(target=_pump, args=(stream, cap), daemon=True)
             t.start()
@@ -177,7 +286,7 @@ class CommandRegistry:
         with self._lock:
             self._cmds[c.cmd_id] = c
         try:
-            started(proc.pid)
+            started(proc.pid, c.identity)
         except Exception:
             pass
         return c
@@ -203,6 +312,8 @@ class CommandRegistry:
             time.sleep(POLL_S)
 
     def stop(self, c: Command, by: str) -> None:
+        """Stop the command's whole process group: its shell if it is still
+        running, and whatever it left behind if it is not."""
         if not c.done():
             c.stopped_by = c.stopped_by or by
             kill_group(c.pid)
@@ -210,6 +321,8 @@ class CommandRegistry:
                 c.proc.wait(2)
             except subprocess.TimeoutExpired:
                 pass
+        elif group_alive(c.pid):
+            kill_group(c.pid)
         for t in c.readers:
             t.join(1.0)
 
@@ -219,6 +332,10 @@ class CommandRegistry:
                              c.out.text(), c.err.text(), c.out.total, c.err.total, c.pid)
 
     def forget(self, c: Command) -> None:
+        """Done with its result. A command that left processes behind stays
+        registered, so `end_task` stops them."""
+        if c.lingering():
+            return
         with self._lock:
             self._cmds.pop(c.cmd_id, None)
 
@@ -230,19 +347,19 @@ class CommandRegistry:
                 self._cmds.pop(c.cmd_id, None)
         n = 0
         for c in mine:
-            if not c.done():
+            if not c.done() or group_alive(c.pid):
                 self.stop(c, "task_end")
                 n += 1
         return n
 
     def running(self, task_id: str) -> int:
         with self._lock:
-            return sum(1 for c in self._cmds.values() if c.task_id == task_id and not c.done())
+            return sum(1 for c in self._cmds.values() if c.task_id == task_id and (not c.done() or c.lingering()))
 
     def live(self) -> List[Command]:
         """Every command still running, of any task (for status and tests)."""
         with self._lock:
-            return [c for c in self._cmds.values() if not c.done()]
+            return [c for c in self._cmds.values() if not c.done() or c.lingering()]
 
 
 def process_alive(pid: int) -> bool:

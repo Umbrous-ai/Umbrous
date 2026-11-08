@@ -301,6 +301,54 @@ def remove_tmp(root: str, rel: str) -> bool:
         return False
 
 
+def canonical_path(root: str, rel: str) -> str:
+    """The path as the disk itself spells it. A task remembers the version of
+    a file it read or wrote under this name: on a case-insensitive disk (the
+    macOS default) `calc.py` and `CALC.py` are one file, and so are the two
+    Unicode forms of an accented name, so a change through either spelling must
+    start from the version the task saw. Each component that exists is
+    replaced by the folder entry that is the same file (same device and inode)
+    and differs only by case or Unicode form; a part that does not exist yet
+    is kept as given."""
+    parts = tuple(p for p in rel.split("/") if p)
+    out: List[str] = []
+    try:
+        with open_root(root) as root_fd:
+            fds: List[int] = []
+            cur = root_fd
+            try:
+                for i, name in enumerate(parts):
+                    try:
+                        st = os.stat(name, dir_fd=cur, follow_symlinks=False)
+                        entries = os.listdir(cur)
+                    except OSError:
+                        return "/".join(out + list(parts[i:]))
+                    actual = name
+                    if name not in entries:
+                        want = fold(name)
+                        for e in entries:
+                            if fold(e) == want:
+                                try:
+                                    est = os.stat(e, dir_fd=cur, follow_symlinks=False)
+                                except OSError:
+                                    continue
+                                if (est.st_dev, est.st_ino) == (st.st_dev, st.st_ino):
+                                    actual = e
+                                    break
+                    out.append(actual)
+                    if i < len(parts) - 1:
+                        if not stat.S_ISDIR(st.st_mode):
+                            return "/".join(out + list(parts[i + 1:]))
+                        cur = _open_component(actual, cur, fs._DIR_FLAGS)
+                        fds.append(cur)
+            finally:
+                for fd in reversed(fds):
+                    os.close(fd)
+    except (FsError, OSError):
+        return "/".join(parts)
+    return "/".join(out)
+
+
 def current_hash(root: str, rel: str) -> Tuple[str, Optional[str]]:
     """Recovery and resume: ("present", sha) | ("absent", None) | ("unreadable", None)."""
     parts = tuple(p for p in rel.split("/") if p)
@@ -314,5 +362,5 @@ def current_hash(root: str, rel: str) -> Tuple[str, Optional[str]]:
     return ("absent", None) if data is None else ("present", sha(data))
 
 
-__all__ = ["find", "change", "edit_compute", "remove_tmp", "current_hash", "Conflict", "ChangeResult", "FindResult",
+__all__ = ["find", "change", "canonical_path", "edit_compute", "remove_tmp", "current_hash", "Conflict", "ChangeResult", "FindResult",
            "MAX_WRITE_BYTES", "TMP_PREFIX", "component_flags", "errno"]

@@ -37,7 +37,7 @@ from umbrous.persistence import db
 from umbrous.receipts.model import new_action_id, new_task_id
 from umbrous.receipts.store import ReceiptStore
 from umbrous.tools import edit
-from umbrous.tools.run import CommandRegistry, process_alive
+from umbrous.tools.run import CommandRegistry, identity, process_alive
 
 CALC = "def add(a, b):\n    return a + b\n\n\n# TODO: multiply\n"
 TESTS = ("import unittest\nfrom calc import add, multiply\n\n\nclass T(unittest.TestCase):\n"
@@ -61,6 +61,30 @@ def make_project(base: Path) -> Path:
     (p / ".git").mkdir()
     (p / ".git" / "config").write_text("[core]\n")
     return p
+
+
+def _exists(pid: int) -> bool:
+    """A process with this id exists (and is not a zombie we could still reap)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        st = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return True
+    return bool(st) and not st.startswith("Z")
+
+
+def _case_insensitive(folder: Path) -> bool:
+    probe = folder / "Umbrous-Case-Probe"
+    probe.write_text("")
+    try:
+        return (folder / "umbrous-case-probe").exists()
+    finally:
+        probe.unlink()
 
 
 class ToolTests(unittest.TestCase):
@@ -285,6 +309,36 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(self.commands.end_task(self.task), 1)
         time.sleep(0.5)
         self.assertFalse(process_alive(pid))
+
+    def test_ending_the_task_stops_what_a_finished_command_left_running(self):
+        # the shell exits at once; the sleep it started stays in its process group
+        out = self.call("run_command", command="sleep 60 & echo $!")
+        self.assertEqual((out.observed["status"], out.observed["exit"]), ("exited", 0), out.model_text)
+        child = int(out.detail.strip().splitlines()[-1])
+        self.assertTrue(process_alive(child) or _exists(child))
+        self.assertIn("still running", out.model_text)          # the model is told
+        self.assertEqual(self.commands.end_task(self.task), 1)
+        deadline = time.monotonic() + 3
+        while _exists(child) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(_exists(child), "the child outlived its task")
+
+    def test_a_command_that_left_nothing_running_is_forgotten(self):
+        self.call("run_command", command="true")
+        self.assertEqual(self.commands.running(self.task), 0)
+        self.assertEqual(self.commands.end_task(self.task), 0)
+
+    def test_a_remembered_version_is_found_through_the_disk_spelling(self):
+        self.assertEqual(edit.canonical_path(str(self.ws), "calc.py"), "calc.py")
+        self.assertEqual(edit.canonical_path(str(self.ws), "src/new/x.py"), "src/new/x.py")   # not there yet
+        if not _case_insensitive(self.ws):
+            self.skipTest("this disk tells calc.py and CALC.py apart")
+        self.assertEqual(edit.canonical_path(str(self.ws), "CALC.py"), "calc.py")
+        self.call("read_file", path="calc.py")
+        (self.ws / "calc.py").write_text(CALC + "# changed by someone else\n")
+        out = self.call("edit_file", path="CALC.py", old_text="# TODO: multiply\n", new_text="# x\n")
+        self.assertEqual((out.decision, out.code), ("failed", "conflict"), out.message)
+        self.assertIn("someone else", (self.ws / "calc.py").read_text())
 
     def test_output_is_bounded_and_redacted(self):
         out = self.call("run_command", command="yes line | head -c 500000; echo password=hunter2")
@@ -548,8 +602,8 @@ class RecoveryTests(unittest.TestCase):
     def test_an_interrupted_command_is_unknown_and_its_process_is_stopped(self):
         proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
         try:
-            cid, tid = self.seed("run_command", {"pid": proc.pid, "command": "sleep 60"}, kind="command.started",
-                                 resource=".")
+            cid, tid = self.seed("run_command", {"pid": proc.pid, "identity": identity(proc.pid),
+                                                 "command": "sleep 60"}, kind="command.started", resource=".")
             with self.rt() as rt:
                 t = self.task(rt, tid)
                 self.assertEqual((t["actions"][0]["status"], t["actions"][0]["retry"] if "retry" in t["actions"][0]
@@ -563,6 +617,27 @@ class RecoveryTests(unittest.TestCase):
         finally:
             if proc.poll() is None:
                 proc.kill()
+
+    def test_a_reused_process_id_is_not_signalled(self):
+        # the record names a process id that is now an unrelated process (same id, other start)
+        proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        try:
+            real = identity(proc.pid)
+            self.assertIsNotNone(real)
+            for ident in ({"boot": real["boot"], "start": "lstart:Thu Jan  1 00:00:00 1970"},
+                          {"boot": "another-boot", "start": real["start"]}, None):
+                _, tid = self.seed("run_command", {"pid": proc.pid, "identity": ident, "command": "sleep 60"},
+                                   kind="command.started", resource=".")
+                with self.rt() as rt:
+                    t = self.task(rt, tid)
+                    kinds = [e["kind"] for e in t["events"]]
+                    self.assertNotIn("command.stopped_after_restart", kinds, ident)
+                    self.assertIn("command.not_signalled", kinds)
+                    self.assertTrue(any("left alone" in u for u in t["report"]["uncertainty"]))
+                self.assertIsNone(proc.poll(), f"an unrelated process was signalled ({ident})")
+        finally:
+            proc.kill()
+            proc.wait(5)
 
     def test_resume_tells_the_model_what_was_done_and_does_not_redo_it(self):
         (self.proj / "calc.py").write_text(CALC.replace("# TODO: multiply\n", "def multiply(a, b):\n    return a + b\n"))
