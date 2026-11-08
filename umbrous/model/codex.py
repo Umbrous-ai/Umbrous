@@ -511,7 +511,7 @@ class CodexAdapter:
                          "serviceTierForTurn": "priority" if speed == "fast" else "default", "environments": [],
                          "input": [{"type": "text", "text": prompt}], "outputSchema": output_schema(tools)},
                          timeout=min(d.first_token, d.total), cancel=cancel)
-            chunks, size, first = [], 0, True
+            answers, size, first = {}, 0, True
             first_deadline = started + d.first_token
             idle_deadline = time.monotonic() + d.idle
             buffered, server.pending = server.pending, []
@@ -533,21 +533,45 @@ class CodexAdapter:
                     delta = params.get("delta", "")
                     if not isinstance(delta, str):
                         raise ProviderError("Codex returned an invalid text delta.")
-                    chunks.append(delta)
+                    ident = params.get("itemId")
+                    answer = answers.setdefault(ident, {"chunks": [], "phase": None})
+                    answer["chunks"].append(delta)
                     size += len(delta)
                     if size > MAX_REPLY:
                         raise ProviderError("Codex returned an answer beyond the safe size limit.")
                 elif method in ("item/started", "item/completed"):
-                    kind = (params.get("item") or {}).get("type")
+                    item = params.get("item") or {}
+                    kind = item.get("type")
                     if kind not in ("userMessage", "agentMessage", "reasoning", "contextCompaction"):
                         raise ProviderError("Codex attempted an action outside Umbrous's gate; the turn was stopped.")
+                    if kind == "agentMessage":
+                        answer = answers.setdefault(item.get("id"), {"chunks": [], "phase": None})
+                        answer["phase"] = item.get("phase")
+                        if method == "item/completed":
+                            text = item.get("text")
+                            if not isinstance(text, str):
+                                raise ProviderError("Codex returned an invalid completed message.")
+                            # Completed text is authoritative, not another delta. Some
+                            # transports supply it without streaming any text first.
+                            size += max(0, len(text) - sum(map(len, answer["chunks"])))
+                            if size > MAX_REPLY:
+                                raise ProviderError("Codex returned an answer beyond the safe size limit.")
+                            answer["chunks"] = [text]
+                            first = False
+                            idle_deadline = time.monotonic() + d.idle
                 elif method == "turn/completed":
                     turn = params.get("turn") or {}
                     if turn.get("status") != "completed":
                         if cancel.cancelled or turn.get("status") == "interrupted":
                             raise Cancelled("Stopped.")
                         raise ProviderError("The ChatGPT request failed. Check account limits and the selected model settings.")
-                    reply, calls = decode_reply("".join(chunks), tools)
+                    # Never concatenate distinct assistant messages: commentary is
+                    # not part of the structured answer and cannot propose actions.
+                    candidates = [a for a in answers.values() if a["phase"] == "final_answer"]
+                    if not candidates:
+                        candidates = [a for a in answers.values() if a["phase"] is None]
+                    text = "".join(candidates[-1]["chunks"]) if candidates else ""
+                    reply, calls = decode_reply(text, tools)
                     if reply:
                         yield ChatDelta(reply)
                     if calls:

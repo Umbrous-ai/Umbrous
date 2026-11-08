@@ -117,6 +117,57 @@ class CodexTests(unittest.TestCase):
             with self.assertRaises(ProviderError): decode_reply(json.dumps(data), [TOOL])
         self.assertEqual(output_schema([])['properties']['calls']['maxItems'], 0)
 
+    def message_events(self, ident, text, phase=None, deltas=True):
+        item = {'type': 'agentMessage', 'id': ident, 'text': '', 'phase': phase}
+        events = [{'method': 'item/started', 'params': {'item': dict(item)}}]
+        if deltas:
+            events.append({'method': 'item/agentMessage/delta',
+                           'params': {'itemId': ident, 'delta': text}})
+        item['text'] = text
+        events.append({'method': 'item/completed', 'params': {'item': item}})
+        return events
+
+    def test_commentary_is_not_concatenated_with_final_envelope(self):
+        for phase in ('final_answer', None):
+            with self.subTest(phase=phase):
+                events = self.message_events('progress', 'I will check the app.', 'commentary')
+                events += self.message_events('answer', json.dumps({'reply': 'Ready', 'calls': []}), phase)
+                events += [{'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+                a, _ = self.adapter(events=events)
+                self.assertEqual(list(a.chat_stream('codex/test-model', [])),
+                                 [ChatDelta('Ready'), ChatDone('codex/test-model', done_reason='stop')])
+
+    def test_completed_message_works_without_deltas(self):
+        events = self.message_events('answer', json.dumps({'reply': '', 'calls': [
+            {'name': 'read_file', 'arguments': '{"path":"x"}'}]}), 'final_answer', deltas=False)
+        events += [{'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+        a, _ = self.adapter(events=events)
+        self.assertEqual(list(a.chat_stream('codex/test-model', [], tools=[TOOL]))[0],
+                         ChatToolCalls((('read_file', {'path': 'x'}),)))
+
+    def test_commentary_proposals_are_never_executed(self):
+        events = self.message_events('progress', json.dumps({'reply': '', 'calls': [
+            {'name': 'read_file', 'arguments': '{"path":"x"}'}]}), 'commentary')
+        events += [{'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+        a, _ = self.adapter(events=events)
+        with self.assertRaises(ProviderError):
+            list(a.chat_stream('codex/test-model', [], tools=[TOOL]))
+
+    def test_invalid_final_does_not_fall_back_to_earlier_valid_message(self):
+        events = self.message_events('earlier', json.dumps({'reply': 'stale', 'calls': []}))
+        events += self.message_events('answer', 'invalid JSON', 'final_answer')
+        events += [{'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}}]
+        a, _ = self.adapter(events=events)
+        with self.assertRaises(ProviderError):
+            list(a.chat_stream('codex/test-model', []))
+
+    def test_completed_text_still_obeys_size_limit(self):
+        events = self.message_events('answer', 'x' * 101, 'final_answer', deltas=False)
+        a, _ = self.adapter(events=events)
+        with patch('umbrous.model.codex.MAX_REPLY', 100):
+            with self.assertRaisesRegex(ProviderError, 'safe size limit'):
+                list(a.chat_stream('codex/test-model', []))
+
     def test_failed_turn_is_never_success(self):
         a, servers = self.adapter(events=[{'method': 'turn/completed', 'params': {'turn': {'status': 'failed', 'error': {'message': 'secret'}}}}])
         with self.assertRaisesRegex(ProviderError, 'ChatGPT request failed') as err:
