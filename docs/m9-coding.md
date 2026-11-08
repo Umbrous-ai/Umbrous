@@ -403,3 +403,41 @@ what changed.
   recovery are tested with a scripted model; a small local model may still
   make poor changes or give up. The report and the diffs are there so you can
   judge.
+
+### Keeping progress through context compaction
+
+Coding requests fit the actual serialized transcript, including tool arguments,
+within the configured input budget. Older complete tool rounds are removed before
+new results are shortened. A fresh runtime progress record carries recent confirmed
+edits (including resulting hashes), command statuses/exit codes, action outcomes,
+and counts across those removals. File contents and command output remain untrusted;
+progress records label their JSON values as data, not instructions.
+
+This avoids replacing successful edits with generic “result removed” messages,
+then forcing the model to guess whether it changed anything. An edit is not proof
+of a passing test, and a successful inspection command is not a test run. The
+record explicitly identifies changes made since the last command and asks for
+relevant verification. Detailed old file contents may still require a targeted
+reread. The progress record is bounded to recent entries and is not full long-term
+memory; extremely small configured windows can omit it rather than discard the
+user's request or system policy.
+
+Native action status now distinguishes a proposal from the gate's actual start,
+which occurs after any required approval. Completed runs with unresolved checks
+are labelled accordingly rather than simply “Task completed”. Execution lifecycle
+status in the task database remains separate from proof that every user objective
+was achieved.
+
+Regression: `python3 -m unittest tests.test_coding_context` covers oversized edit
+arguments, complete-round eviction, and an edit/read/verify sequence that preserves
+its receipt and stays within the input budget. Optional real-model check:
+`python3 -m tests.live_coding_context --live --model codex/MODEL`; it uses only a
+disposable workspace and requires a successful edit and passing test command.
+
+The self-editing failure that motivated this fix recorded four successful edits
+but ended with a model answer saying their results were unavailable. Its task
+history showed repeated inspection, output truncation, and no verified build/test
+completion. The new opt-in Codex check completed in five steps, retained one
+confirmed edit, and ran `python3 -m unittest test_value.py` successfully in a
+4,096-token fixture context. This establishes that the edit/read/verify path works;
+it does not establish completion of every broad product-improvement request.

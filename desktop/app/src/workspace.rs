@@ -1437,11 +1437,15 @@ impl Workspace {
                             // M4: say which step is running, so Stop has something to interrupt that you can see
                             let step = ev.get("step").and_then(Value::as_u64).unwrap_or(0);
                             let tool = ev.get("tool").and_then(Value::as_str).unwrap_or("a tool");
-                            msg.meta = format!("Step {step}: {}…", api::step_label(tool, &ev["args"]));
+                            msg.meta = format!("Proposed · Step {step}: {}…", api::step_label(tool, &ev["args"]));
+                        }
+                        "tool_started" => {
+                            let tool = ev.get("tool").and_then(Value::as_str).unwrap_or("a tool");
+                            msg.meta = format!("Working · {}…", api::step_label(tool, &ev["args"]));
                         }
                         "approval_required" => {
                             self.approval = PendingApproval::from_event(&ev);
-                            msg.meta = "Waiting for your answer…".into();
+                            msg.meta = "Blocked · Review the action below, then approve or deny it.".into();
                         }
                         "tool_result" => {
                             // answered (here, by a time limit, or by Stop): the card has done its job

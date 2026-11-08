@@ -470,6 +470,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                 messages.insert(1 if messages and messages[0]["role"] == "system" else 0,
                                 {"role": "system", "content": brief})
                 used += estimate_tokens(brief)
+        from umbrous.runloop.coding_context import fit as fit_coding, progress as coding_progress
         rounds, evidence, budget_spent = 0, [], False
         try:
             while True:
@@ -487,9 +488,16 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                                      "Answer now from what you have, and say if something could not be checked."})
                 if trun:
                     trun.step_started(offer)
+                request_messages = messages
+                if coding and trun.tool_calls:
+                    record = coding_progress(trun)
+                    fitted, used = fit_coding(messages, plan.budget - BUDGET_FLOOR, record)
+                    request_messages = fitted
+                    # The first message is the refreshed progress record, not history.
+                    messages = [m for m in fitted if m is not record]
                 step_text, calls, done = [], [], None
                 stream = resolved_reply if resolved_reply is not None else adapter.chat_stream(
-                    model.name, messages, options=options, cancel=cancel, deadlines=deadlines_from(config),
+                    model.name, request_messages, options=options, cancel=cancel, deadlines=deadlines_from(config),
                     tools=ollama_tools(tool_names) if offer else None)
                 resolved_reply = None
                 for piece in stream:
@@ -553,16 +561,14 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                                 result = ev["outcome"]
                             elif ev["type"] == "_started":
                                 trun.action_started(action_id)
+                                yield {"type": "tool_started", "tool": tool, "args": args,
+                                       "step": rounds, "action_id": action_id}
                             else:
                                 yield ev
                     text, cut = result.model_text, False
                     room = plan.budget - used - BUDGET_FLOOR
                     need = estimate_tokens(text)
-                    if coding and need > room:
-                        # M9: a long coding task drops its oldest tool results before cutting a new one
-                        used -= _compact(messages, need - room + 256)
-                        room = plan.budget - used - BUDGET_FLOOR
-                    if need > room:
+                    if not coding and need > room:
                         cut = True
                         if room < 64:
                             text = ("Result left out: the context budget for this reply is used up. "
@@ -729,22 +735,6 @@ def _tool_timeout(config: Config, name: object, args: object) -> float:
     elif name == "check_command":
         t = max(t, (a.get("wait_s") if isinstance(a.get("wait_s"), int) else 10) + 15)
     return t
-
-
-COMPACTED = "[An earlier tool result was removed here to make room in the context. Call the tool again if you need it.]"
-
-
-def _compact(messages: list, need: int) -> int:
-    """M9: replace the oldest tool results (all but the last two) with a short
-    note until about `need` tokens are free. Returns the tokens freed."""
-    tools = [i for i, m in enumerate(messages) if m.get("role") == "tool" and m.get("content") != COMPACTED]
-    freed = 0
-    for i in tools[:-2]:
-        if freed >= need:
-            break
-        freed += max(0, estimate_tokens(messages[i]["content"]) - estimate_tokens(COMPACTED))
-        messages[i] = dict(messages[i], content=COMPACTED)
-    return freed
 
 
 def _dedupe(evidence: list) -> list:

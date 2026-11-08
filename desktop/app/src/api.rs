@@ -522,10 +522,7 @@ pub fn folder_note(tools: &Value) -> Option<String> {
     let root = tools.get("root").and_then(Value::as_str)?;
     let attached = tools.pointer("/selected/attached").and_then(Value::as_bool).unwrap_or(false);
     let own = tools.get("self_source").and_then(Value::as_bool).unwrap_or(false);
-    if !attached && !own {
-        return None;
-    }
-    let mut s = format!("Working in {root}");
+    let mut s = format!("Workspace: {root}");
     if attached {
         s.push_str(" (attached now with Code in workspace: Umbrous may edit files and run commands there, as you, without a sandbox)");
     }
@@ -579,7 +576,16 @@ pub fn report_line(rep: &Value) -> Option<(String, bool)> {
     if unc > 0 {
         parts.push(format!("{unc} thing{} not fully checked", if unc == 1 { "" } else { "s" }));
     }
-    let attention = status != "completed" || unc > 0 || len("failures") > 0 || !limits.is_empty();
+    let command_failed = cmds.iter().any(|c| {
+        c.get("status").and_then(Value::as_str) != Some("exited")
+            || c.get("exit").and_then(Value::as_i64) != Some(0)
+    });
+    if changes > 0 && cmds.is_empty() {
+        parts.push("No commands run; changes not verified by checks".into());
+    }
+    let attention = status != "completed" || unc > 0 || len("failures") > 0
+        || !limits.is_empty() || command_failed || (changes > 0 && cmds.is_empty());
+    if status == "completed" && attention { parts[0] = "Finished with unresolved checks".into(); }
     Some((parts.join(" · "), attention))
 }
 
@@ -702,11 +708,11 @@ mod tests {
                          "changes": [{"path": "calc.py"}, {"path": "calc.py"}],
                          "commands": [{"status": "exited", "exit": 1}, {"status": "exited", "exit": 0}]});
         assert_eq!(report_line(&rep).unwrap().0,
-                   "Task completed · 7 steps · 6 of 6 actions completed · 2 changes · 2 commands (1 not passing)");
+                   "Finished with unresolved checks · 7 steps · 6 of 6 actions completed · 2 changes · 2 commands (1 not passing)");
         let rep = json!({"status": "completed", "steps": 2, "tool_calls": 1, "actions": {"completed": 1},
                          "changes": [], "commands": [{"status": "timed_out", "exit": null}]});
         assert_eq!(report_line(&rep).unwrap().0,
-                   "Task completed · 2 steps · 1 of 1 actions completed · 0 changes · 1 command (1 not passing)");
+                   "Finished with unresolved checks · 2 steps · 1 of 1 actions completed · 0 changes · 1 command (1 not passing)");
     }
 
     #[test]
@@ -715,8 +721,8 @@ mod tests {
         assert_eq!(step_label("run_command", &json!({"command": "python3  -m\nunittest"})), "running python3 -m unittest");
         assert_eq!(step_label("read_file", &json!({})), "reading .");
         assert_eq!(step_label("nope", &json!({})), "running a tool");
-        assert_eq!(folder_note(&json!({"root": "/p", "selected": {"attached": false}, "self_source": false})), None);
-        assert!(folder_note(&json!({"root": "/p", "selected": {"attached": true}})).unwrap().starts_with("Working in /p (attached now"));
+        assert_eq!(folder_note(&json!({"root": "/p", "selected": {"attached": false}, "self_source": false})), Some("Workspace: /p.".into()));
+        assert!(folder_note(&json!({"root": "/p", "selected": {"attached": true}})).unwrap().starts_with("Workspace: /p (attached now"));
         assert!(folder_note(&json!({"root": "/u", "self_source": true})).unwrap().contains("rebuild and restart"));
         let r: Resume = serde_json::from_value(json!({"possible": true, "done": [{"tool": "edit_file", "resource": "calc.py"}],
                                                       "commands_unknown": ["."]})).unwrap();
@@ -729,14 +735,14 @@ mod tests {
     fn report_line_sums_up_a_task() {
         let rep = json!({"status": "completed", "steps": 4, "tool_calls": 3, "actions": {"completed": 3},
                          "uncertainty": ["x"], "failures": [], "limits_hit": []});
-        assert_eq!(report_line(&rep), Some(("Task completed · 4 steps · 3 of 3 actions completed · 1 thing not fully checked".into(), true)));
+        assert_eq!(report_line(&rep), Some(("Finished with unresolved checks · 4 steps · 3 of 3 actions completed · 1 thing not fully checked".into(), true)));
         let rep = json!({"status": "cancelled", "steps": 1, "tool_calls": 0, "actions": {}, "uncertainty": [],
                          "failures": [], "limits_hit": []});
         assert_eq!(report_line(&rep), Some(("Task stopped · 1 step · 0 of 0 actions completed".into(), true)));
         let rep = json!({"status": "completed", "steps": 7, "tool_calls": 6, "actions": {"completed": 6},
                          "uncertainty": ["a", "b"], "failures": [], "limits_hit": ["steps"]});
         assert_eq!(report_line(&rep).unwrap().0,
-                   "Task completed · 7 steps · 6 of 6 actions completed · step limit reached · 2 things not fully checked");
+                   "Finished with unresolved checks · 7 steps · 6 of 6 actions completed · step limit reached · 2 things not fully checked");
         let clean = json!({"status": "completed", "steps": 2, "tool_calls": 1, "actions": {"completed": 1},
                            "uncertainty": [], "failures": [], "limits_hit": []});
         assert!(!report_line(&clean).unwrap().1);
