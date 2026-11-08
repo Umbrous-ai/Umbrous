@@ -31,6 +31,13 @@ expect reset closed
 expect sessions What do you remember
 expect sessions Keep this chat
 record cancelled
+# 1b. Delete chat… on one chat, cancelled while its preview loads, then on the
+# other: the late reply for the first must not replace the second's preview
+reset_race What do you remember | Keep this chat
+expect reset preview 1 items: Keep this chat
+reset_cancel
+expect sessions What do you remember
+expect sessions Keep this chat
 # 2. a mixed selection, previewed
 reset_open
 reset_tick chat What do you remember

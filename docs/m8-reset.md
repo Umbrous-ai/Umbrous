@@ -93,6 +93,11 @@ sends the selection that is ticked now. In the app the ticks fold away while
 a preview is shown ("Change selection" brings them back and drops the
 preview), and Delete sits right under the items with "What stays" below it, so
 Delete is in view at the default window size; the page scrolls Delete into view.
+The app keeps Start fresh's generation on the workspace, not in the panel, and
+bumps it on open, close, every tick change and every preview, so a reply to a
+panel that was closed (or reopened for another chat) is never shown. The e2e
+run checks this with a held preview for one chat, cancelled, then Delete chat…
+on another.
 
 ## What stays, and why the result says so
 

@@ -272,6 +272,22 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 wait_until(cx, window, 10, "preview", |ws| ws.reset.as_ref().map(|r| r.preview.is_some() || r.error.is_some()).unwrap_or(false)).await?;
             }
         }
+        "reset_race" => {
+            // `reset_race TITLE A | TITLE B`: Delete chat… for A, cancelled while
+            // A's preview is still loading (held 2.5 s), then Delete chat… for B.
+            // A's late reply must not replace B's preview (M8 review).
+            let (a, b) = arg.split_once('|').map(|(a, b)| (a.trim().to_string(), b.trim().to_string())).ok_or("reset_race A | B")?;
+            let ids = window.update(cx, |ws, _, _| {
+                let find = |t: &str| ws.chats.iter().find(|c| c.title.contains(t)).map(|c| c.id.clone());
+                (find(&a), find(&b))
+            }).map_err(|_| "window gone".to_string())?;
+            let (Some(a_id), Some(b_id)) = ids else { return Err(format!("reset_race: no chat {a} or {b}")) };
+            window.update(cx, |ws, _, cx| { ws.e2e_preview_delay_ms = 2500; ws.open_reset(Some(a_id), cx) }).ok();
+            wait_until(cx, window, 10, "A's preview in flight", |ws| ws.reset.as_ref().map(|r| r.working).unwrap_or(false)).await?;
+            window.update(cx, |ws, _, cx| { ws.close_reset(cx); ws.e2e_preview_delay_ms = 0; ws.open_reset(Some(b_id), cx) }).ok();
+            wait_until(cx, window, 10, "B's preview", |ws| ws.reset.as_ref().map(|r| r.preview.is_some() || r.error.is_some()).unwrap_or(false)).await?;
+            sleep(cx, 3500).await; // A's reply has come back by now
+        }
         "reset_tick" => {
             // a tick box: all_chats | chat TITLE | all_personal | personal TEXT | all_project | project TEXT | start_fresh
             let (what, val) = arg.split_once(' ').map(|(a, b)| (a, b.trim().to_string())).unwrap_or((arg, String::new()));

@@ -86,8 +86,6 @@ pub struct ResetUi {
     pub working: bool,
     /// Options › Delete chat…: preview as soon as the chat list is in
     preview_on_load: bool,
-    /// bumped by every preview and tick change; an older preview reply is dropped
-    seq: u64,
 }
 
 /// One tick box in Start fresh.
@@ -162,6 +160,12 @@ pub struct Workspace {
     pub use_memory: bool,
     /// M8: Start fresh (selective reset), while open
     pub reset: Option<ResetUi>,
+    /// Start fresh's generation: bumped on open, close, every tick change and
+    /// every preview. It lives here, not in ResetUi, so a reply to a panel that
+    /// was closed (and maybe reopened for another chat) is never applied.
+    reset_seq: u64,
+    /// e2e only: hold each preview request this long, to test late replies
+    pub e2e_preview_delay_ms: u64,
     sidebar: bool,
     /// the right sidebar (Changes and Sources), shown and hidden by the header's panel button
     details: bool,
@@ -316,6 +320,8 @@ impl Workspace {
             memory_armed: None,
             use_memory: true,
             reset: None,
+            reset_seq: 0,
+            e2e_preview_delay_ms: 0,
             access_seq: 0,
             access_error: None,
             sidebar: true,
@@ -586,6 +592,8 @@ impl Workspace {
             ui.choice.chats.insert(c);
         }
         self.reset = Some(ui);
+        self.reset_seq += 1;
+        let seq = self.reset_seq;
         logfile::event("ui.reset_open", &[]);
         self.load_memory(cx);
         let for_project = pid.clone();
@@ -597,6 +605,9 @@ impl Workspace {
                 Ok(all)
             },
             move |this, r, cx| {
+                if this.reset_seq != seq {
+                    return; // closed, or opened again, since
+                }
                 let Some(ui) = this.reset.as_mut() else { return };
                 if ui.choice.project_id != for_project {
                     return;
@@ -617,6 +628,7 @@ impl Workspace {
 
     /// Cancel: close it. Nothing was sent that could delete anything.
     pub fn close_reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_seq += 1;
         if self.reset.take().is_some() {
             logfile::event("ui.reset_cancel", &[]);
         }
@@ -624,6 +636,7 @@ impl Workspace {
     }
 
     pub fn toggle_reset(&mut self, tick: ResetTick, cx: &mut Context<Self>) {
+        self.reset_seq += 1;
         let Some(ui) = self.reset.as_mut() else { return };
         let c = &mut ui.choice;
         fn flip(set: &mut std::collections::BTreeSet<String>, id: String) {
@@ -641,7 +654,6 @@ impl Workspace {
             ResetTick::StartFresh => c.start_fresh = !c.start_fresh,
         }
         // a different choice needs its own preview; one still loading is dropped
-        ui.seq += 1;
         ui.working = false;
         ui.preview = None;
         ui.warning = None;
@@ -656,6 +668,7 @@ impl Workspace {
         if ui.working {
             return;
         }
+        self.reset_seq += 1;
         ui.preview = None;
         ui.warning = None;
         ui.error = None;
@@ -675,14 +688,20 @@ impl Workspace {
         ui.warning = None;
         ui.done = None;
         let sel = ui.choice.selection();
-        ui.seq += 1;
-        let asked = ui.seq;
-        self.api_call(cx, move |api| api.post::<api::ResetPreview>("/api/reset/preview", json!({"selection": sel})),
-            move |this, r, _| {
-                let Some(ui) = this.reset.as_mut() else { return };
-                if ui.seq != asked {
-                    return; // the ticks changed while it loaded: that preview is not for them
+        self.reset_seq += 1;
+        let asked = self.reset_seq;
+        let delay = self.e2e_preview_delay_ms;
+        self.api_call(cx, move |api| {
+                if delay > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
                 }
+                api.post::<api::ResetPreview>("/api/reset/preview", json!({"selection": sel}))
+            },
+            move |this, r, _| {
+                if this.reset_seq != asked {
+                    return; // closed, reopened or re-ticked while it loaded: not for what is shown
+                }
+                let Some(ui) = this.reset.as_mut() else { return };
                 ui.working = false;
                 match r {
                     Ok(p) => ui.preview = Some(p),
@@ -703,7 +722,19 @@ impl Workspace {
         ui.working = true;
         let body = json!({"selection": ui.choice.selection(), "preview_id": preview.preview_id});
         logfile::event("ui.reset_confirm", &[("items", preview.items.len().to_string())]); // ids stay in the runtime log
+        let seq = self.reset_seq;
         self.api_call(cx, move |api| api.post::<api::ResetDone>("/api/reset", body), move |this, r, cx| {
+            if this.reset_seq != seq || this.reset.is_none() {
+                // the panel was closed (or reopened) meanwhile: show nothing in
+                // it, but what was deleted must still leave the lists
+                if let Ok(done) = &r {
+                    if this.chat.as_ref().map(|c| done.items.iter().any(|i| i.id == c.id)).unwrap_or(false) {
+                        this.new_chat(cx);
+                    }
+                    this.load_projects(None, cx);
+                }
+                return;
+            }
             let Some(ui) = this.reset.as_mut() else { return };
             ui.working = false;
             match r {
@@ -807,6 +838,7 @@ impl Workspace {
             self.memory_input = None;
             self.memory_armed = None;
             self.reset = None;
+            self.reset_seq += 1;
             self.new_chat(cx);
             self.load_chats(cx);
         }
