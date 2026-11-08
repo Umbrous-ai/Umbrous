@@ -89,6 +89,17 @@ what the agent may then do, and **Enable Full access** works only after
 before read (set in the browser page or the CLI) shows as *Ask before reads*;
 the menu does not offer it.
 
+The folder name sits beside the access pill and opens that folder in Finder.
+A plain-language line explains the current level: **Can read files**, **Can
+edit; asks before commands**, or **Can run commands without asking**. Both
+command-capable levels explicitly say commands are **not sandboxed**.
+
+**Start working on a project** guides you through model → folder → access →
+compatibility. Pick the model in the composer, select a folder with the native
+picker, and choose access. The harmless tool check starts automatically and
+finishes with **Ready—what would you like to do?** Ordinary chat works without
+a folder, and **Continue chatting** leaves the setup card at any time.
+
 The choice is stored with the chat (`chats.access`, schema 10; `POST
 /api/chats/<id>/access`), and a new chat starts on the project default. A level
 picked before a new chat's first message is sent when the chat is created.
@@ -102,7 +113,7 @@ With no folder attached, choosing a level opens the system folder picker and
 attaches the folder you pick; the level is stored on the chat it was chosen in,
 and the project's default for every other chat is Read only (so Full access
 never spreads to other chats this way). The menu
-shows only the three levels (Freddy: fewer things on screen); it adds a line
+shows the three access levels and Manage project permissions; it adds a line
 only when something needs you (no folder yet, a model without the tool check).
 
 When the gate asks, a card appears above the composer: what the model wants
@@ -110,15 +121,27 @@ to do, the action and its target; for a command, the whole command line
 verbatim in a scrolling block (never the shortened step label, since Approve
 once authorizes exactly that string) and that it runs unsandboxed,
 and **Approve once**, **Allow … in this project** (a grant, revocable in the
-browser page's Access section) and **Deny**. Stop, leaving the chat, or the
-approval time limit closes the request. Every answer ends in a receipt.
+native **Manage project permissions** dialog or the browser Access section)
+and **Deny**. **Manage project permissions** is beside these choices and in
+the access menu. It lists active grants and offers **Revoke** for each one.
+Revocation affects future actions; it does not stop an already running command.
+Full access continues to allow commands even after grants are revoked.
+Stop or the approval time limit closes a request; switching chats keeps it
+running and restores its approval card when you return. Every answer ends in
+a receipt.
 
-A model only gets tools after it passes the tool check. When a folder is
-attached and the selected model has not, the pill turns amber
-(*… · no tools*) and the menu offers **Check tools**, which runs the harmless
-round trip (for a ChatGPT model, one short request on your subscription). It
-waits as long as the probe may take (two model calls of up to 180 s each).
-A reply that starts without tools for that reason also says so in a notice.
+A model only gets tools after it passes compatibility. A separate setup card
+shows why tools are unavailable, with **Check compatibility**, **Choose another
+model**, or **Retry connection**. The access pill describes permissions rather
+than mixing them with model capability. Checks display actual stages:
+connecting to the provider, requesting a tool call, and verifying the tool
+result. The two calls can take up to 180 seconds each. **Cancel check** interrupts
+the provider request; cancelled checks do not replace saved compatibility.
+ChatGPT checks consume subscription allowance. Ordinary chat stays available.
+
+The composer shows the model name and reasoning effort together (for example,
+**GPT-6.1-Sol Medium**), without a model icon or a separate reasoning/speed pill.
+Click that control to select the model, reasoning effort, or speed.
 
 The message box grows with its text up to about ten lines and then scrolls,
 keeping the caret in view; the toolbar always stays below it. A sent message's
@@ -187,8 +210,8 @@ serves), is the visual source of truth. The native views reproduce it:
   `#141414`, panels `#1B1B1B`, raised `#222222`, borders `#2A2A2A`/`#353535`,
   text `#7F7F7F`/`#B5B5B5`/`#F2F2F2`, accent `#8B7CF6`, the 4–48 px spacing and
   4–12 px radius scales, SF Pro at 400/500, SF Mono).
-- `desktop/app/assets/icons/` are the 41 icons from the page's SVG sprite,
-  extracted unchanged (1 px outlines on a 16 px grid).
+- `desktop/app/assets/icons/` contains the shared interface icons and thin activity artwork. Live activity
+  uses the attributed Moicons assets in `desktop/app/assets/moicons/`.
 - `desktop/app/src/ui.rs` has one helper per CSS class (`.nav`, `.icon-btn`,
   `.pill`, `.notice`, `.panel`, `.kv`, `.rsec`, `.row`, `.tg`), and the views name
   the class they mirror: the three floating panels (300 / flexible / 300, gap 6,
@@ -197,16 +220,20 @@ serves), is the visual source of truth. The native views reproduce it:
   `.msg-u` bubbles, `.answer` text at 16/1.6, `.reply-meta`, the composer with
   attach, model pill, the access pill (it replaced the page's placeholder
   Tools · 4) and the round send button.
-- The right sidebar shows only Changes and Sources (Freddy, 2026-11-07; it
-  replaces the page's Details list of Runtime, Session, Tools, Files and Steps).
-  The header's panel button shows and hides it; it starts shown and hides below
-  1180 px wide, as the page's media query did. Its rows follow Freddy's reference
-  screenshot: the project's name with a ⋯ menu (Show data folder), Changes with
-  added and removed line counts, a divider, then Sources (+, Web search, View
-  all); 20 pt side padding, 30 pt rows, 13 pt text. Changes reads +0 -0 because
-  nothing in Umbrous can change files until tools arrive (M3); adding sources
-  and View all wait for the same. Runtime facts that used to be there are
-  elsewhere: Ollama state in the model pill and notices, the version in About.
+- The right panel starts closed and hides below 1180 px. It prioritizes
+  **Changed files** and **Sources used** from successful tool actions in the
+  current chat, loaded from durable task records and refreshed after actions.
+  Empty states explain what will appear; **Refresh activity** reloads the data.
+  These are recorded edits, not a Git diff: commands may change additional
+  files, and externally reverted edits remain in the activity history. File
+  contents and fabricated line counts are never displayed. Workspace path,
+  access, model, and active background chats remain below the activity.
+- Activity indicators use Moicons adapted to GPUI, including the native rotating
+  thinking loader. See `desktop/app/assets/moicons/README.md` for provenance.
+- Codex answer text streams progressively from the structured reply string.
+  Incomplete escapes wait for the next chunk; tool proposals are emitted only
+  after the complete envelope passes validation. Providers that send only a
+  completed message still appear at once; Umbrous does not fake typing.
 
 `desktop/e2e/scripts/` and `stress.py seed-reference` reproduce the page's sample
 content (projects, sessions, the "pass rate" reply) as real data so both can be

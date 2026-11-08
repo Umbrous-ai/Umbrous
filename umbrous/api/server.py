@@ -149,6 +149,8 @@ class Runtime:
         self.page_csp = content_security_policy(self.page.decode("utf-8"))
         self.static = {path: f.read_bytes() for path, f in STATIC_FILES.items()}
         self.router = router or create_router(config)
+        from umbrous.model.probe_jobs import ProbeJobs
+        self.probes = ProbeJobs(self.router)
         self.history = HistoryStore(config.db_path)
         self.access = AccessStore(config.db_path, config.home)
         self.receipts = ReceiptStore(config.db_path)
@@ -271,11 +273,13 @@ class Handler(HistoryRoutes, AccessRoutes, MemoryRoutes, TaskRoutes, ModelRoutes
             return 200, "models"
         if path in ("/api/providers/codex", "/api/providers/codex/login"):
             return self._provider(path)
-        if self.command == "POST" and path in ("/api/models/probe", "/api/chat", "/api/chat/cancel"):
+        if self.command == "POST" and path in ("/api/models/probe", "/api/models/probe/start", "/api/models/probe/status", "/api/models/probe/cancel", "/api/chat", "/api/chat/cancel"):
             body = self._read_json()
             if body is None:
                 self._send_json(400, {"error": "expected a JSON object with Content-Type: application/json"})
                 return 400, "bad_json"
+            if path.startswith("/api/models/probe/"):
+                return self._probe_job(path, body)
             if path == "/api/models/probe":
                 return self._probe(body)
             if path == "/api/chat":
@@ -349,6 +353,7 @@ class LoopbackServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         runtime = getattr(self.RequestHandlerClass, "runtime", None)
         if runtime is not None:
+            runtime.probes.close()
             runtime.runs.cancel_all()
             runtime.router.close()
         super().server_close()

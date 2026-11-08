@@ -269,6 +269,42 @@ def output_schema(tools):
                                          "name": name_schema, "arguments": {"type": "string"}}}}}}
 
 
+def reply_prefix(text):
+    """Decode only a leading reply string; never expose JSON or proposed calls.
+
+    Incomplete escapes and surrogate pairs wait for the next provider delta.
+    The complete envelope is still validated before any tool proposal is yielded.
+    """
+    import re
+    match = re.match(r'\s*\{\s*"reply"\s*:\s*"', text)
+    if not match:
+        return ""
+    start = pos = match.end()
+    end = pos
+    while pos < len(text):
+        char = text[pos]
+        if char == '"':
+            break
+        if char == "\\":
+            if pos + 1 >= len(text):
+                break
+            width = 6 if text[pos + 1] == "u" else 2
+            if pos + width > len(text):
+                break
+            pos += width
+        else:
+            pos += 1
+        end = pos
+    try:
+        value = json.loads('"' + text[start:end] + '"')
+        if value and 0xD800 <= ord(value[-1]) <= 0xDBFF:
+            value = value[:-1]
+        value.encode("utf-8")
+        return value
+    except (ValueError, UnicodeError):
+        return ""
+
+
 def decode_reply(text, tools):
     try:
         data = json.loads(text)
@@ -446,10 +482,10 @@ class CodexAdapter:
     def show(self, model):
         return model
 
-    def chat_once(self, model, messages, tools=None, options=None, timeout=None):
+    def chat_once(self, model, messages, tools=None, options=None, timeout=None, cancel=None):
         d = self.deadlines if timeout is None else Deadlines(first_token=timeout, idle=timeout, total=timeout)
         content, calls = [], []
-        for piece in self.chat_stream(model, messages, options=options, deadlines=d, tools=tools):
+        for piece in self.chat_stream(model, messages, options=options, deadlines=d, tools=tools, cancel=cancel):
             if isinstance(piece, ChatDelta):
                 content.append(piece.text)
             elif isinstance(piece, ChatToolCalls):
@@ -512,6 +548,7 @@ class CodexAdapter:
                          "input": [{"type": "text", "text": prompt}], "outputSchema": output_schema(tools)},
                          timeout=min(d.first_token, d.total), cancel=cancel)
             answers, size, first = {}, 0, True
+            streamed_id, streamed_reply = None, ""
             first_deadline = started + d.first_token
             idle_deadline = time.monotonic() + d.idle
             buffered, server.pending = server.pending, []
@@ -539,6 +576,16 @@ class CodexAdapter:
                     size += len(delta)
                     if size > MAX_REPLY:
                         raise ProviderError("Codex returned an answer beyond the safe size limit.")
+                    if answer["phase"] == "final_answer":
+                        prefix = reply_prefix("".join(answer["chunks"]))
+                        if prefix:
+                            if streamed_id not in (None, ident) or not prefix.startswith(streamed_reply):
+                                raise ProviderError("Codex changed its streamed answer unexpectedly; no new action was executed.")
+                            streamed_id = ident
+                            fresh = prefix[len(streamed_reply):]
+                            streamed_reply = prefix
+                            if fresh:
+                                yield ChatDelta(fresh)
                 elif method in ("item/started", "item/completed"):
                     item = params.get("item") or {}
                     kind = item.get("type")
@@ -572,8 +619,10 @@ class CodexAdapter:
                         candidates = [a for a in answers.values() if a["phase"] is None]
                     text = "".join(candidates[-1]["chunks"]) if candidates else ""
                     reply, calls = decode_reply(text, tools)
-                    if reply:
-                        yield ChatDelta(reply)
+                    if streamed_reply and (not reply.startswith(streamed_reply) or (candidates and answers.get(streamed_id) is not candidates[-1])):
+                        raise ProviderError("Codex changed its streamed answer unexpectedly; no new action was executed.")
+                    if reply[len(streamed_reply):]:
+                        yield ChatDelta(reply[len(streamed_reply):])
                     if calls:
                         yield ChatToolCalls(calls)
                     yield ChatDone(model, done_reason="stop")

@@ -263,6 +263,22 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             window.update(cx, |ws, _, cx| ws.toggle_access_menu(cx)).ok();
             next_frame(window, cx).await;
         }
+        "setup_start" => { window.update(cx, |ws, _, cx| ws.start_project_setup(cx)).ok(); }
+        "setup_model_next" => { window.update(cx, |ws, _, cx| ws.setup_model_next(cx)).ok(); }
+        "wait_activity" => { wait_until(cx, window, 10, "chat activity", |ws| ws.activity_snapshot()["sources"].as_array().map(|v| !v.is_empty()).unwrap_or(false)).await?; }
+        "wait_grants" => {
+            let count: usize = arg.parse().unwrap_or(0);
+            wait_until(cx, window, 10, "project grants", move |ws| ws.access.as_ref().map(|a| a.grants.len() == count).unwrap_or(false)).await?;
+        }
+        "wait_probe" => { wait_until(cx, window, 30, "compatibility finished", |ws| !ws.probe_running()).await?; }
+        "cancel_probe" => { window.update(cx, |ws, _, cx| ws.cancel_probe(cx)).ok(); }
+        "manage_permissions" => { window.update(cx, |ws, _, cx| ws.open_permissions(cx)).ok(); }
+        "revoke_first_grant" => {
+            window.update(cx, |ws, _, cx| {
+                if let Some(id) = ws.access.as_ref().and_then(|a| a.grants.first()).and_then(|g| g["id"].as_str()).map(str::to_string) { ws.revoke_permission(id, cx); }
+            }).ok();
+            wait_until(cx, window, 10, "grant revoked", |ws| ws.access.as_ref().map(|a| a.grants.is_empty()).unwrap_or(false)).await?;
+        }
         "wait_approval" => {
             // until the gate asks (an approval card is shown)
             wait_until(cx, window, arg.parse().unwrap_or(30), "approval card", |ws| ws.approval.is_some()).await?;
@@ -469,6 +485,9 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
         "expect" => {
             let (what, val) = arg.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((arg, ""));
             let got: String = window.update(cx, |ws, _, _| match what {
+                "setup_stage" => ws.setup_stage().map(|n| n.to_string()).unwrap_or_else(|| "none".into()),
+                "grants" => ws.access.as_ref().map(|a| a.grants.len()).unwrap_or(0).to_string(),
+                "activity" => ws.activity_snapshot().to_string(),
                 "messages" => ws.msgs.len().to_string(),
                 "chat" => ws.chat.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "none".into()),
                 "running" => ws.is_running().to_string(),
@@ -525,7 +544,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             }).map_err(|_| "window gone".to_string())?;
             let ok = match what {
                 "chat" if val != "none" => got.contains(val),
-                "last_meta" | "sessions" | "last_text" | "reply_metas" | "memory" => got.contains(val),
+                "activity" | "last_meta" | "sessions" | "last_text" | "reply_metas" | "memory" => got.contains(val),
                 "reset" if val != "closed" => got.contains(val),
                 "sessions_lack" | "projects_lack" => !got.contains(val),
                 "projects" | "deletion" => got.contains(val),

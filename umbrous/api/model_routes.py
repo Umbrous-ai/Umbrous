@@ -14,6 +14,23 @@ log = logging.getLogger("umbrous.api")
 
 
 class ModelRoutes:
+    def _probe_job(self, path, body):
+        try:
+            if path.endswith("/start"):
+                result = self.runtime.probes.start(str(body.get("model", "")))
+            elif path.endswith("/cancel"):
+                result = self.runtime.probes.cancel(str(body.get("id", "")))
+            else:
+                result = self.runtime.probes.view(str(body.get("id", "")))
+        except KeyError:
+            self._send_json(404, {"error": "no_such_probe", "message": "This check is no longer available. Retry compatibility."})
+            return 404, "no_such_probe"
+        except ValueError as exc:
+            self._send_json(409, {"error": "probe_busy", "message": str(exc)})
+            return 409, "probe_busy"
+        self._send_json(200, result)
+        return 200, "probe_status"
+
     def _probe(self, body: dict) -> Tuple[int, str]:
         from umbrous.model.base import ModelError
         try:

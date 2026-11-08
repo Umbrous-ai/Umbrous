@@ -121,10 +121,18 @@ class ModelRouter:
         probe = self.probe_result(m)
         return bool(probe and probe["passed"])
 
-    def probe(self, name: str, timeout: float = 180.0) -> Tuple[ProbeResult, ModelInfo]:
+    def probe(self, name: str, timeout: float = 180.0, cancel=None, progress=None) -> Tuple[ProbeResult, ModelInfo]:
         m = self.resolve(name)
-        with self._probe_lock:  # one probe at a time; each loads a model into memory
-            result = run_probe(self.adapter_for(m.name), m.name, timeout=timeout)
+        from umbrous.model.base import Cancelled
+        while not self._probe_lock.acquire(timeout=0.1):
+            if cancel is not None and cancel.cancelled:
+                raise Cancelled("Compatibility check cancelled.")
+        try:
+            result = run_probe(self.adapter_for(m.name), m.name, timeout=timeout, cancel=cancel, progress=progress)
+        finally:
+            self._probe_lock.release()
+        if cancel is not None and cancel.cancelled:
+            raise Cancelled("Compatibility check cancelled.")
         conn = self._db()
         try:
             db.save_probe(conn, m.name, m.digest, result.passed, result.stage, result.detail, result.ms)

@@ -2,7 +2,7 @@
 //!
 //! All network and parsing work runs off the UI thread (`background_spawn` or a
 //! dedicated thread for a streaming reply). The UI thread only applies results.
-//! Nothing here polls on a timer: Ollama and runtime state are refreshed when
+//! Only active compatibility checks poll; Ollama and runtime state refresh when
 //! the window becomes active, when you open the model menu, or press Retry.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +31,8 @@ use crate::transcript::{self, MetaKind, Msg, Pos, Role, Row, Selection, Selectio
 mod model_controls;
 #[path = "access_controls.rs"]
 mod access_controls;
+#[path = "project_setup.rs"]
+mod project_setup;
 pub use access_controls::PendingApproval;
 #[path = "deletion.rs"]
 mod deletion;
@@ -173,6 +175,12 @@ pub struct Workspace {
     pub approval: Option<PendingApproval>,
     /// the model whose tool check is running
     probe_busy: Option<String>,
+    probe_state: Option<Value>,
+    probe_seq: u64,
+    probe_cancel_requested: bool,
+    setup_step: Option<u8>,
+    permissions_open: bool,
+    chat_context: Option<Value>,
     /// the access chosen for a chat that does not exist yet (sent when it is created)
     pending_access: Option<String>,
     /// the "Enable Full access?" dialog, while open
@@ -378,6 +386,12 @@ impl Workspace {
             access_menu: false,
             approval: None,
             probe_busy: None,
+            probe_state: None,
+            probe_seq: 0,
+            probe_cancel_requested: false,
+            setup_step: None,
+            permissions_open: false,
+            chat_context: None,
             pending_access: None,
             full_access_confirm: None,
             model_preferences: model_controls::Preferences::default(),
@@ -573,6 +587,7 @@ impl Workspace {
     /// The selected project's access (workspace and profile). Asked again whenever
     /// the chat list is, so a change made in the browser page or the CLI shows up.
     pub fn load_access(&mut self, cx: &mut Context<Self>) {
+        self.load_chat_activity(cx);
         let Some(pid) = self.project_id.clone() else { return };
         self.access_seq += 1;
         let seq = self.access_seq;
@@ -931,6 +946,9 @@ impl Workspace {
         self.detach_run(cx);
         self.rebuild_rows();
         self.view += 1;
+        self.setup_step = None;
+        self.permissions_open = false;
+        self.chat_context = None;
         self.parse_in_flight = false;
         self.opening = None;
         self.loading_chat = false;
@@ -1119,6 +1137,7 @@ impl Workspace {
                     Ok((chat, msgs, interrupted)) => {
                         let archived = chat.archived;
                         this.chat = Some(chat);
+                        this.load_chat_activity(cx);
                         this.context = None;
                         this.msgs = msgs;
                         this.interrupted = interrupted;
@@ -1460,6 +1479,7 @@ impl Workspace {
                             msg.activity_icon = Some("shield");
                         }
                         "tool_result" => {
+                            refresh_lists = true;
                             // answered (here, by a time limit, or by Stop): the card has done its job
                             self.approval = None;
                             msg.meta = "Thinking…".into();
@@ -1539,6 +1559,7 @@ impl Workspace {
         self.schedule_parse(ix, cx);
         self.refresh_msg_rows(ix, usize::MAX); // only the meta row changes here; blocks change after parsing
         if refresh_lists {
+            self.load_chat_activity(cx);
             self.load_projects(None, cx);
         }
         if std::mem::take(&mut self.load_access_after_stream) {
@@ -1720,6 +1741,7 @@ impl Workspace {
         cx.notify();
     }
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.permissions_open { self.permissions_open = false; cx.notify(); return; }
         if self.full_access_confirm.is_some() {
             self.full_access_confirm = None;
         } else if self.deletion.is_some() {
@@ -2307,9 +2329,27 @@ impl Workspace {
             div().flex().items_center().justify_between().h(px(30.)).px(px(20.))
                 .text_size(fs_13()).text_color(text_default()).child(title).child(button)
         };
+        let mut activity = div().px(px(20.)).py(px(12.)).flex().flex_col().gap(px(10.));
+        for (key, title, empty) in [("changes", "Changed files", "Files Umbrous edits in this chat will appear here."), ("sources", "Sources used", "Files read or searched in this chat will appear here.")] {
+            activity = activity.child(div().text_color(text_strong()).child(title));
+            let entries = self.chat_context.as_ref().and_then(|v| v[key].as_array());
+            if entries.map(|v| v.is_empty()).unwrap_or(true) {
+                activity = activity.child(div().text_size(fs_12()).child(empty));
+            }
+            if let Some(entries) = entries {
+                for item in entries.iter().take(30) {
+                    let path = item["path"].as_str().unwrap_or("Workspace");
+                    let tool = item["tool"].as_str().unwrap_or("").replace('_', " ");
+                    activity = activity.child(div().text_size(fs_12()).child(path.to_string()).child(div().text_color(text_subtle()).child(tool)));
+                }
+            }
+        }
+        activity = activity.child(div().text_size(fs_12()).text_color(text_subtle()).child("Recorded edits, not a Git diff. Commands may change other files."))
+            .child(ui::pill("refresh-chat-activity").child("Refresh activity").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_chat_activity(cx))));
+        if let Some(error) = self.chat_context.as_ref().and_then(|v| v["error"].as_str()) { activity = activity.child(div().text_size(fs_12()).text_color(warning()).child(error.to_string())); }
         let workspace = self.access.as_ref().and_then(|a| a.workspace.as_ref());
         let path = workspace.map(|w| w.root.clone()).filter(|p| !p.is_empty());
-        let mut context = div().px(px(20.)).py(px(12.)).flex().flex_col().gap(px(12.))
+        let mut context = div().id("project-context-scroll").flex_1().min_h(px(0.)).overflow_y_scroll().px(px(20.)).py(px(12.)).flex().flex_col().gap(px(12.)).child(activity)
             .child(div().text_color(text_strong()).child("Workspace"))
             .child(div().text_size(fs_12()).child(path.clone().unwrap_or_else(|| "No folder connected. Describe the project and Umbrous will look for it.".into())))
             .child(div().text_size(fs_12()).child(format!("Access: {}", self.access_pill_label())))
@@ -2759,21 +2799,15 @@ impl Workspace {
         use theme::*;
         let archived = self.chat.as_ref().map(|c| c.archived).unwrap_or(false);
         let mut notices: Vec<AnyElement> = vec![];
-        if self.msgs.is_empty() && !self.loading_chat {
+        if let Some(setup) = self.render_project_setup(cx) { notices.push(setup); }
+        if self.msgs.is_empty() && !self.loading_chat && self.setup_step.is_none() {
             notices.push(div().flex().flex_col().gap(px(12.))
                 .child(div().text_size(px(28.)).text_color(text_strong()).child("What would you like to work on?"))
-                .child(div().text_size(fs_14()).child("Ask a question, describe a change, or name a project. Umbrous will find the workspace when needed."))
+                .child(div().text_size(fs_14()).child("Ask anything, or connect a project to work with its files."))
+                .child(ui::pill("start-project").child("Start working on a project").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_project_setup(cx))))
                 .into_any_element());
         }
-        if !archived && self.project_id.is_some() && self.access.as_ref().map(|a| a.workspace.is_none()).unwrap_or(false) {
-            notices.push(
-                ui::notice(None)
-                    .child(div().flex_1().min_w_0().child("No folder selected yet. Tell me which project to work on and I’ll look for it, or connect a folder."))
-                    .child(ui::pill("connect-workspace").child("Connect folder")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.choose_level("code_ask_commands", cx))))
-                    .into_any_element(),
-            );
-        }
+        if let Some(check) = self.render_compatibility(cx) { notices.push(check); }
         if archived {
             notices.push(
                 ui::notice(Some(ui::NoticeKind::Warn))
@@ -2920,6 +2954,7 @@ impl Workspace {
                     // block, not a flex column: see composer.rs (the text must be measured
                     // at the box's width, or wrapped lines spill over the bar)
                     .child(div().w_full().min_h(px(40.)).child(self.composer.clone()))
+                    .children(self.render_access_summary())
                     .child(
                         // `.bar`
                         div()
@@ -2931,11 +2966,12 @@ impl Workspace {
 
                             // this chat's access, on the left like Codex's permission pill
                             .child(self.render_access_control(cx))
+                            .children(self.render_folder_pill(cx))
                             .child(
                                 ui::pill("model-pill")
                                     .when(ollama_down, |d| d.text_color(warning()).hover(|s| s.bg(bg_hover()).text_color(warning())))
-                                    .child(ui::hover_icon("cpu", &"model-pill".into(), pill_color, pill_hover))
                                     .child(pill_label)
+                                    .children(self.render_model_controls(cx))
                                     .child(ui::hover_icon("chevron-down", &"model-pill".into(), pill_color, pill_hover))
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.access_menu = false;
@@ -2947,7 +2983,6 @@ impl Workspace {
                                         }
                                     })),
                             )
-                            .children(self.render_model_controls(cx))
                             .child(send)
                             .children(menu),
                     ),
@@ -3093,11 +3128,12 @@ impl Render for Workspace {
                 .child(main)
                 .when(self.details && wide, |d| d.child(self.render_right_panel(cx)))
         };
+        let permissions = self.render_permissions(cx);
         let confirm = self.render_full_access_confirm(cx);
         let settings = self.render_settings(cx);
         let reset = self.render_reset_dialog(cx);
         let deletion = self.render_deletion(cx);
-        let el = root.relative().child(app).children(settings).children(reset).children(deletion).children(confirm);
+        let el = root.relative().child(app).children(settings).children(reset).children(deletion).children(permissions).children(confirm);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.perf.render_count += 1;
         self.perf.render_ms_total += ms;

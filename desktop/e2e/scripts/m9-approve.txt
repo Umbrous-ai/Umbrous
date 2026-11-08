@@ -8,7 +8,7 @@ wait_access
 select_model coder:3b
 # 1. a folder is attached but the model has not passed the tool check: the pill says so
 expect tools_blocked true
-expect access_pill Workspace write · no tools
+expect access_pill Workspace write
 access_menu
 screenshot @OUT@/m9-approve-check.png
 check_tools

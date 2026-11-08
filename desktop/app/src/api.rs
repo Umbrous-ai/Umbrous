@@ -681,6 +681,8 @@ pub struct AccessWorkspace {
 pub struct Access {
     pub project_id: String,
     pub workspace: Option<AccessWorkspace>,
+    #[serde(default)]
+    pub grants: Vec<Value>,
 }
 
 #[allow(dead_code)] // logged nowhere yet; kept as the claim step's sanity check

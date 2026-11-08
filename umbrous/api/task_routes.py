@@ -32,7 +32,7 @@ class TaskRoutes:
             for t in listed:     # M5: say whether an interrupted task can be resumed
                 if t["status"] == "unknown":
                     t["resume"] = resume_info(rt.tasks, rt.history, t["task_id"])
-            self._send_json(200, {"tasks": listed})
+            self._send_json(200, {"tasks": listed, "activity": rt.tasks.chat_activity(chat_id)})
             return 200, "tasks"
         task_id = path[len("/api/tasks/"):]
         task = rt.tasks.get(task_id) if TASK_ID_RE.match(task_id) else None

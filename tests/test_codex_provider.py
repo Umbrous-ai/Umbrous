@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from umbrous.model.base import CancelToken, Cancelled, ChatDelta, ChatDone, ChatToolCalls, Deadlines, ModelTimeout, ProviderError
 from umbrous.model.codex import (AppServer, CodexAdapter, CodexSignInRequired, DISABLED_FEATURES,
-                                 _environment, _startup_command, decode_reply, output_schema)
+                                 _environment, _startup_command, decode_reply, output_schema, reply_prefix)
 
 CATALOG = {"model": "test-model", "displayName": "Test model", "hidden": False,
            "defaultReasoningEffort": "low", "supportedReasoningEfforts": [{"reasoningEffort": "low"}, {"reasoningEffort": "high"}],
@@ -136,6 +136,30 @@ class CodexTests(unittest.TestCase):
                 a, _ = self.adapter(events=events)
                 self.assertEqual(list(a.chat_stream('codex/test-model', [])),
                                  [ChatDelta('Ready'), ChatDone('codex/test-model', done_reason='stop')])
+
+    def test_final_reply_streams_before_turn_completion(self):
+        events = [{"method": "item/started", "params": {"item": {"type":"agentMessage", "id":"a", "phase":"final_answer"}}},
+                  {"method":"item/agentMessage/delta", "params":{"itemId":"a", "delta":'{"reply":"First '}},
+                  {"method":"item/agentMessage/delta", "params":{"itemId":"a", "delta":'second","calls":[]}'}},
+                  {"method":"turn/completed", "params":{"turn":{"status":"completed"}}}]
+        adapter, servers = self.adapter(events=events)
+        stream = adapter.chat_stream('codex/test-model', [])
+        self.assertEqual(next(stream), ChatDelta('First '))
+        self.assertFalse(servers[-1].closed)
+        self.assertEqual(next(stream), ChatDelta('second'))
+        self.assertEqual(list(stream), [ChatDone('codex/test-model', done_reason='stop')])
+
+    def test_reply_prefix_keeps_escapes_and_tool_arguments_private(self):
+        text = json.dumps({"reply": 'Line 1\n"quoted" 😀', "calls": [{"arguments":"secret"}]})
+        previous = ''
+        for end in range(len(text) + 1):
+            value = reply_prefix(text[:end])
+            self.assertTrue(value.startswith(previous))
+            self.assertNotIn('secret', value)
+            value.encode('utf-8')
+            previous = value
+        self.assertEqual(previous, 'Line 1\n"quoted" 😀')
+        self.assertEqual(reply_prefix('{"calls":[{"reply":"secret"}]}'), '')
 
     def test_completed_message_works_without_deltas(self):
         events = self.message_events('answer', json.dumps({'reply': '', 'calls': [

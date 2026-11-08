@@ -229,6 +229,22 @@ class TaskStore:
             "report": report,
         }
 
+    def chat_activity(self, chat_id: str) -> dict:
+        """Recorded successful file actions, not a fabricated working-tree diff."""
+        with self._db() as c:
+            rows = c.execute("SELECT a.tool, a.resource, t.workspace, MAX(a.ended_at) FROM task_actions a "
+                             "JOIN tasks t ON t.task_id = a.task_id WHERE t.chat_id = ? AND a.status = 'completed' "
+                             "GROUP BY a.tool, a.resource, t.workspace ORDER BY MAX(a.ended_at) DESC LIMIT 200", (chat_id,)).fetchall()
+        changes, sources = [], []
+        for tool, path, workspace, at in rows:
+            item = dict(path=path, workspace=workspace, tool=tool, at=at)
+            if tool in ("write_file", "edit_file"):
+                changes.append(item)
+            elif tool in ("read_file", "search_files", "find_files", "list_files"):
+                sources.append(item)
+        return dict(changes=changes, sources=sources,
+                    note="Recorded file edits in this chat. Commands may change other files; this is not a Git diff.")
+
     def for_chat(self, chat_id: str, limit: int = 500) -> List[dict]:
         """Each task of a chat with its report (no events): what the page needs to redraw a chat."""
         with self._db() as c:

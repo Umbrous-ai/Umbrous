@@ -88,14 +88,20 @@ class OllamaAdapter:
         )
 
     def _request(self, method: str, path: str, body: Optional[dict] = None,
-                 timeout: Optional[float] = None) -> Tuple[int, Any]:
+                 timeout: Optional[float] = None, cancel=None) -> Tuple[int, Any]:
         """One non-streaming call. Returns (status, parsed JSON or text)."""
         conn = self._connect(self.deadlines.connect)
+        if cancel is not None:
+            if cancel.cancelled:
+                raise Cancelled("Compatibility check cancelled.")
+            cancel.on_cancel(lambda: _abort(conn))
         try:
             try:
                 conn.connect()
             except OSError as exc:
                 raise self._unreachable(exc) from None
+            if cancel is not None and cancel.cancelled:
+                raise Cancelled("Compatibility check cancelled.")
             conn.sock.settimeout(timeout or self.deadlines.first_token)
             payload = json.dumps(body).encode() if body is not None else None
             headers = {"Content-Type": "application/json"} if payload is not None else {}
@@ -173,14 +179,14 @@ class OllamaAdapter:
 
     # --- chat ------------------------------------------------------------------
     def chat_once(self, model: str, messages: List[dict], tools: Optional[List[dict]] = None,
-                  options: Optional[dict] = None, timeout: Optional[float] = None) -> dict:
+                  options: Optional[dict] = None, timeout: Optional[float] = None, cancel=None) -> dict:
         """A complete, non-streamed reply. Used by the tool-call probe."""
         body: Dict[str, Any] = {"model": model, "messages": messages, "stream": False}
         if tools:
             body["tools"] = tools
         if options:
             body["options"] = options
-        status, data = self._request("POST", "/api/chat", body, timeout=timeout or self.deadlines.first_token)
+        status, data = self._request("POST", "/api/chat", body, timeout=timeout or self.deadlines.first_token, cancel=cancel)
         if status != 200 or not isinstance(data, dict):
             self._raise_for(status, data, model)
         if "error" in data:

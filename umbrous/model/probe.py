@@ -24,7 +24,7 @@ import secrets
 import time
 from dataclasses import dataclass
 
-from umbrous.model.base import ModelAdapter, ModelError, ToolsUnsupported
+from umbrous.model.base import ModelAdapter, ModelError, ToolsUnsupported, Cancelled
 
 TOOL_NAME = "get_probe_code"
 TOOL = {
@@ -48,7 +48,7 @@ class ProbeResult:
     ms: int
 
 
-def run_probe(adapter: ModelAdapter, model: str, timeout: float = 180.0) -> ProbeResult:
+def run_probe(adapter: ModelAdapter, model: str, timeout: float = 180.0, cancel=None, progress=None) -> ProbeResult:
     started = time.monotonic()
     code = "UMB-" + secrets.token_hex(3).upper()
     options = {"temperature": 0}
@@ -56,9 +56,17 @@ def run_probe(adapter: ModelAdapter, model: str, timeout: float = 180.0) -> Prob
     def done(passed: bool, stage: str, detail: str) -> ProbeResult:
         return ProbeResult(model, passed, stage, detail, int((time.monotonic() - started) * 1000))
 
+    def stage(name, detail):
+        if cancel is not None and cancel.cancelled:
+            raise Cancelled("Compatibility check cancelled.")
+        if progress:
+            progress(name, detail)
+
+    extra = {"cancel": cancel} if cancel is not None else {}
+    stage("ask", "Checking whether the model can call a tool…")
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": QUESTION}]
     try:
-        first = adapter.chat_once(model, messages, tools=[TOOL], options=options, timeout=timeout)
+        first = adapter.chat_once(model, messages, tools=[TOOL], options=options, timeout=timeout, **extra)
     except ToolsUnsupported:
         return done(False, "ask", "Ollama says this model does not support tool calls.")
     except ModelError as exc:
@@ -77,8 +85,9 @@ def run_probe(adapter: ModelAdapter, model: str, timeout: float = 180.0) -> Prob
         {"role": "assistant", "content": msg.get("content") or "", "tool_calls": [call]},
         {"role": "tool", "content": json.dumps({"code": code}), "tool_name": TOOL_NAME},
     ]
+    stage("answer", "Checking whether the model can use the tool result…")
     try:
-        second = adapter.chat_once(model, messages, tools=[TOOL], options=options, timeout=timeout)
+        second = adapter.chat_once(model, messages, tools=[TOOL], options=options, timeout=timeout, **extra)
     except ModelError as exc:
         return done(False, "answer", f"The model asked for the tool but the follow-up failed: {exc.message}")
     answer = (second.get("message") or {}).get("content") or ""

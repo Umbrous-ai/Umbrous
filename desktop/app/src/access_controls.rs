@@ -71,12 +71,12 @@ impl PendingApproval {
 }
 
 impl Workspace {
-    fn selected_model_info(&self) -> Option<&api::ModelInfo> {
+    pub(super) fn selected_model_info(&self) -> Option<&api::ModelInfo> {
         self.models.as_ref().and_then(|ms| ms.models.iter().find(|m| Some(&m.name) == self.model.as_ref()))
     }
 
     /// The selected project's folder, if its access is loaded.
-    fn folder(&self) -> Option<&api::AccessWorkspace> {
+    pub(super) fn folder(&self) -> Option<&api::AccessWorkspace> {
         self.access.as_ref().filter(|a| self.project_id.as_deref() == Some(a.project_id.as_str())).and_then(|a| a.workspace.as_ref())
     }
 
@@ -106,14 +106,17 @@ impl Workspace {
         logfile::event("ui.chat_access", &[("to", access.unwrap_or("project").into())]);
         let Some(chat) = self.chat.clone() else {
             self.pending_access = access.map(str::to_string);
+            if self.setup_step == Some(2) { self.setup_step = Some(3); self.check_tools(cx); }
             cx.notify();
             return;
         };
+        let view = self.view;
         let path = format!("/api/chats/{}/access", chat.id);
-        self.api_call(cx, move |api| api.post::<api::OneChat>(&path, json!({ "access": access })), move |this, r, _| match r {
+        self.api_call(cx, move |api| api.post::<api::OneChat>(&path, json!({ "access": access })), move |this, r, cx| match r {
             Ok(one) => {
                 if let Some(c) = this.chat.as_mut().filter(|c| c.id == one.chat.id) { c.access = one.chat.access.clone(); }
                 if let Some(c) = this.chats.iter_mut().find(|c| c.id == one.chat.id) { c.access = one.chat.access; }
+                if this.view == view && this.setup_step == Some(2) { this.setup_step = Some(3); this.check_tools(cx); }
             }
             Err(e) => this.access_error = Some(e.message),
         });
@@ -141,15 +144,19 @@ impl Workspace {
     /// Pick a folder for the project with the system's folder picker and attach it. The
     /// project's default for other chats is Read only; the level you chose is stored on
     /// this chat only. Picking the folder is the choice; nothing is attached otherwise.
-    fn choose_folder(&mut self, profile: &'static str, cx: &mut Context<Self>) {
+    pub(super) fn choose_folder(&mut self, profile: &'static str, cx: &mut Context<Self>) {
         if self.project_id.is_none() { return }
         self.access_menu = false;
+        let view = self.view;
+        let project = self.project_id.clone();
         let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false,
                                                           prompt: Some("Use this folder".into()) });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
             let Some(root) = paths.into_iter().next() else { return };
-            this.update(cx, |this, cx| this.attach_folder(root.to_string_lossy().to_string(), profile, cx)).ok();
+            this.update(cx, |this, cx| {
+                if this.view == view && this.project_id == project { this.attach_folder(root.to_string_lossy().to_string(), profile, cx); }
+            }).ok();
         }).detach();
         cx.notify();
     }
@@ -174,32 +181,13 @@ impl Workspace {
                 this.access_seq += 1;
                 this.access = Some(a);
                 // only if you are still in the chat you chose it for
-                if this.view == view_at_choice { this.set_chat_access(Some(profile), cx); }
+                if this.view == view_at_choice {
+                    this.set_chat_access(Some(profile), cx);
+                    if this.setup_step == Some(1) { this.setup_step = Some(2); }
+                }
             }
             Ok(_) => {}
             Err(e) => this.access_error = Some(e.message),
-        });
-        cx.notify();
-    }
-
-    /// Run the harmless tool round trip on the selected model (umbrous/model/probe.py).
-    /// Only a model that passes may drive the workspace tools.
-    pub fn check_tools(&mut self, cx: &mut Context<Self>) {
-        let Some(model) = self.model.clone() else { return };
-        if self.probe_busy.is_some() { return }
-        self.probe_busy = Some(model.clone());
-        logfile::event("ui.probe", &[]);
-        let m2 = model.clone();
-        self.api_call(cx, move |api| api.post_long::<Value>("/api/models/probe", json!({ "model": m2 })), move |this, r, cx| {
-            this.probe_busy = None;
-            match r {
-                Ok(v) if v.get("passed").and_then(Value::as_bool) == Some(true) =>
-                    this.notice = Some((format!("{model} passed the tool check. It can now use the project's folder."), MetaKind::Normal, false)),
-                Ok(v) => this.notice = Some((format!("{model} did not pass the tool check ({}). It stays usable for plain chat, without tools.",
-                    v.get("detail").and_then(Value::as_str).unwrap_or("no tool call")), MetaKind::Warn, false)),
-                Err(e) => this.notice = Some((e.message, MetaKind::Bad, false)),
-            }
-            this.load_models(false, cx);
         });
         cx.notify();
     }
@@ -239,7 +227,6 @@ impl Workspace {
         match self.effective_profile() {
             None if self.access.is_none() => "Access".to_string(),
             None => "Chat only".to_string(),
-            Some(p) if self.tools_blocked_by_check() => format!("{} · no tools", level_label(&p)),
             Some(p) => level_label(&p).to_string(),
         }
     }
@@ -367,6 +354,7 @@ impl Workspace {
         if let Some(e) = &self.access_error {
             menu = menu.child(div().px(px(8.)).py(px(6.)).text_size(fs_12()).text_color(danger()).child(e.clone()));
         }
+        menu = menu.child(ui::pill("manage-access-permissions").child("Manage project permissions").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx))));
         Some(menu.into_any_element())
     }
 
@@ -407,7 +395,8 @@ impl Workspace {
             .child(div().mt(px(8.)).flex().flex_wrap().gap(px(6.))
                 .child(btn("approve-once", "Approve once".into(), "once", true))
                 .child(btn("approve-grant", format!("Allow {} in this project", ap.grant_word()), "grant", false))
-                .child(btn("approve-deny", "Deny".into(), "deny", false)))
+                .child(btn("approve-deny", "Deny".into(), "deny", false))
+                .child(ui::pill("manage-approval-permissions").child("Manage project permissions").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx)))))
             .when_some(ap.error.clone(), |d, e| d.child(div().mt(px(6.)).w_full().text_size(fs_12()).text_color(danger()).child(e)))
             .into_any_element())
     }

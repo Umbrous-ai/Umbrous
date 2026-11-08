@@ -145,14 +145,15 @@ impl Workspace {
             }
         });
     }
-    pub(super) fn render_model_controls(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_model_controls(&self, _cx: &mut Context<Self>) -> Vec<AnyElement> {
         let cloud = self.models.as_ref().and_then(|ms| ms.models.iter().find(|m| Some(&m.name) == self.model.as_ref())).map(|m| m.is_cloud()).unwrap_or(false);
         if !cloud { return vec![] }
         let controls = self.current_model_controls();
-        vec![ui::pill("reasoning-pill").child(format!("Reasoning · {}", controls.reasoning_effort.as_deref().unwrap_or("default")))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| { this.model_menu = !this.model_menu; cx.notify(); })).into_any_element(),
-             ui::pill("speed-pill").child(if controls.speed == "fast" { "Fast" } else { "Standard" })
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| { this.model_menu = !this.model_menu; cx.notify(); })).into_any_element()]
+        let effort = controls.reasoning_effort.as_deref().unwrap_or("default");
+        let mut chars = effort.chars();
+        let label = chars.next().map(|c| c.to_uppercase().to_string() + chars.as_str()).unwrap_or_default();
+        vec![div().text_color(theme::text_subtle()).child(label).into_any_element()]
+
     }
     pub(super) fn render_model_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.model_menu { return None }
@@ -175,7 +176,7 @@ impl Workspace {
         for (i, md) in models.iter().enumerate() {
             let name = md.name.clone();
             let provider = if md.is_cloud() { "ChatGPT · cloud" } else { "Ollama · local" };
-            let label = if md.tool_capable { "tool calls verified" } else { "plain chat only" };
+            let label = if md.tool_capable { "tool calls verified" } else { "compatibility not verified" };
             let sub = [provider.to_string(), md.parameter_size.clone(), md.context_length.map(|c| format!("ctx {}", fmt_k(c))).unwrap_or_default(), label.to_string()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
             let on = self.model.as_ref() == Some(&name);
             let cloud = md.is_cloud();
