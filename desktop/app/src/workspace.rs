@@ -1259,8 +1259,8 @@ impl Workspace {
             text: String::new(),
             blocks: Arc::new(vec![]),
             parsed_len: 0,
-            meta: "Working…".into(),
-            activity_icon: Some("logo"),
+            meta: "Thinking…".into(),
+            activity_icon: Some("cpu"),
             meta_kind: MetaKind::Normal,
             streaming: true,
         });
@@ -1383,8 +1383,8 @@ impl Workspace {
                                     .map(|a| a.iter().filter_map(|m| m.get("id").and_then(Value::as_str)).map(str::to_string).collect())
                                     .unwrap_or_default();
                             }
-                            msg.meta = "Working…".into();
-                            msg.activity_icon = Some("logo");
+                            msg.meta = "Thinking…".into();
+                            msg.activity_icon = Some("cpu");
                             let c = &ev["context"];
                             if let (Some(est), Some(win)) = (c["estimated_tokens"].as_u64(), c["window"].as_u64()) {
                                 self.context = Some((est, win));
@@ -1409,7 +1409,7 @@ impl Workspace {
                         // M7: the reply is saved; the task looks for things to remember
                         "suggesting" => {
                             msg.meta = "Finishing…".into();
-                            msg.activity_icon = Some("logo");
+                            msg.activity_icon = Some("list-check");
                         },
                         "done" => {
                             msg.activity_icon = None;
@@ -1462,8 +1462,8 @@ impl Workspace {
                         "tool_result" => {
                             // answered (here, by a time limit, or by Stop): the card has done its job
                             self.approval = None;
-                            msg.meta = "Working…".into();
-                            msg.activity_icon = Some("logo");
+                            msg.meta = "Thinking…".into();
+                            msg.activity_icon = Some("cpu");
                         }
                         "error" => {
                             msg.activity_icon = None;
