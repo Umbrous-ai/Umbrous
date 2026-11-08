@@ -16,7 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 T = "tests.test_m9_coding."
 
-# (what is removed, file, old text, new text, tests that must now fail)
+# (what is removed, file, old text, new text, tests that must now fail); old may be a list of
+# (old, new) pairs, all applied together (new is then None)
 MUTATIONS = [
     ("the hash check against the version the task read",
      "umbrous/tools/edit.py", "if expect is not None and before != expect:", "if False:",
@@ -73,8 +74,16 @@ MUTATIONS = [
      "        self.release(c)",
      [T + "ToolTests.test_a_group_is_owned_until_it_is_released_and_never_signalled_after"]),
     ("the supervisor stopping the group when the runtime goes away",
-     "umbrous/tools/run.py", 'if b"x" not in got:', "if False:",
+     "umbrous/tools/run.py", "    if not let_go:\n", "    if False:\n",
      [T + "ToolTests.test_the_group_is_stopped_if_the_runtime_goes_away"]),
+    ("the supervisor stopping the group when the status pipe is broken",
+     "umbrous/tools/run.py",
+     # back to the reviewed version: the write is not guarded, and cleanup runs only on a normal way out
+     [("                except OSError:\n                    break           # nobody is reading: the runtime is gone\n",
+       "                except ValueError:\n                    break\n"),
+      ("finally:\n    # Every way out", "except ValueError:\n    pass\nif True:\n    # Every way out")],
+     None,
+     [T + "ToolTests.test_a_broken_status_pipe_still_stops_the_group"]),
     ("checking a process's identity before signalling it after a restart",
      "umbrous/tools/run.py", "    return identity(pid) == {\"boot\": ident[\"boot\"], \"start\": ident[\"start\"]}",
      "    return True",
@@ -118,11 +127,15 @@ def main() -> int:
         for what, rel, old, new, tests in MUTATIONS:
             f = base / rel
             original = f.read_text()
-            if original.count(old) != 1:
+            pairs = old if isinstance(old, list) else [(old, new)]
+            if any(original.count(o) != 1 for o, _ in pairs):
                 print(f"FAIL {what}: the text to remove is not in {rel} exactly once (update this proof)")
                 bad += 1
                 continue
-            f.write_text(original.replace(old, new))
+            mutated = original
+            for o, n in pairs:
+                mutated = mutated.replace(o, n)
+            f.write_text(mutated)
             try:
                 caught = not run_tests(base, tests)
             finally:

@@ -21,6 +21,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -37,7 +38,7 @@ from umbrous.persistence import db
 from umbrous.receipts.model import new_action_id, new_task_id
 from umbrous.receipts.store import ReceiptStore
 from umbrous.tools import edit
-from umbrous.tools.run import CommandRegistry, _running_members, identity, process_alive
+from umbrous.tools.run import SUPERVISOR, CommandRegistry, _running_members, identity, process_alive
 
 CALC = "def add(a, b):\n    return a + b\n\n\n# TODO: multiply\n"
 TESTS = ("import unittest\nfrom calc import add, multiply\n\n\nclass T(unittest.TestCase):\n"
@@ -359,6 +360,39 @@ class ToolTests(unittest.TestCase):
         while _running_members(c.pid) and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertEqual(_running_members(c.pid), [], "the command outlived the runtime")
+
+    def test_a_broken_status_pipe_still_stops_the_group(self):
+        # the runtime goes away just as the shell finishes: writing the status fails,
+        # and the supervisor must still stop what the shell left running
+        pidfile = self.ws / "child.pid"
+        st_r, st_w = os.pipe()
+        ctl_r, ctl_w = os.pipe()
+        os.close(st_r)                                    # nobody will read the status
+        sup = subprocess.Popen([sys.executable, "-I", "-S", "-c", SUPERVISOR,
+                                f"sleep 60 >/dev/null 2>&1 & echo $! > {pidfile}; sleep 0.3",
+                                str(st_w), str(ctl_r)], pass_fds=(st_w, ctl_r), start_new_session=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.close(st_w)
+        os.close(ctl_r)
+        try:
+            sup.wait(5)                                   # the control pipe is still open: it left on its own
+            deadline = time.monotonic() + 3
+            while not pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            child = int(pidfile.read_text())
+            deadline = time.monotonic() + 3
+            while _exists(child) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(_exists(child), "the shell's child outlived its supervisor")
+        finally:
+            os.close(ctl_w)
+            if sup.poll() is None:
+                sup.kill()
+                sup.wait()
+            try:
+                os.killpg(sup.pid, signal.SIGKILL)
+            except OSError:
+                pass
 
     def test_a_command_that_left_nothing_running_is_forgotten(self):
         self.call("run_command", command="true")

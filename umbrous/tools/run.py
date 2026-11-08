@@ -159,40 +159,53 @@ if pid == 0:
         os.execv("/bin/sh", ["/bin/sh", "-c", cmd])
     finally:
         os._exit(127)
-null = os.open(os.devnull, os.O_RDWR)
-os.dup2(null, 0); os.dup2(null, 1); os.dup2(null, 2)
-wake_r, wake_w = os.pipe()
-os.set_blocking(wake_w, False)
-signal.set_wakeup_fd(wake_w)
-signal.signal(signal.SIGCHLD, lambda *a: None)
-code, got = None, b""
-while True:
-    if code is None:
+let_go = False
+try:
+    null = os.open(os.devnull, os.O_RDWR)
+    os.dup2(null, 0); os.dup2(null, 1); os.dup2(null, 2)
+    wake_r, wake_w = os.pipe()
+    os.set_blocking(wake_w, False)
+    signal.set_wakeup_fd(wake_w)
+    signal.signal(signal.SIGCHLD, lambda *a: None)
+    code, got = None, b""
+    while True:
+        if code is None:
+            try:
+                done, status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                done, status = pid, 0
+            if done == pid:
+                code = -os.WTERMSIG(status) if os.WIFSIGNALED(status) else os.WEXITSTATUS(status)
+                try:
+                    os.write(st, b"%d\n" % code)
+                except OSError:
+                    break           # nobody is reading: the runtime is gone
+                finally:
+                    try:
+                        os.close(st)
+                    except OSError:
+                        pass
+        ready, _, _ = select.select([ctl, wake_r], [], [], 1.0)
+        if wake_r in ready:
+            os.read(wake_r, 512)
+        if ctl in ready:
+            chunk = os.read(ctl, 16)
+            if not chunk:
+                break
+            got += chunk
+    let_go = b"x" in got
+finally:
+    # Every way out but the runtime's "let go" (the runtime went away, the
+    # status pipe broke, anything unexpected) stops the group first, so nothing
+    # the command started is left running without an owner.
+    if not let_go:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
-            done, status = os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            done, status = pid, 0
-        if done == pid:
-            code = -os.WTERMSIG(status) if os.WIFSIGNALED(status) else os.WEXITSTATUS(status)
-            os.write(st, b"%d\n" % code)
-            os.close(st)
-    ready, _, _ = select.select([ctl, wake_r], [], [], 1.0)
-    if wake_r in ready:
-        os.read(wake_r, 512)
-    if ctl in ready:
-        chunk = os.read(ctl, 16)
-        if not chunk:
-            break
-        got += chunk
-if b"x" not in got:
-    # the runtime went away without letting go: leave nothing running behind it
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    try:
-        os.killpg(0, signal.SIGTERM)
-        time.sleep(0.3)
-        os.killpg(0, signal.SIGKILL)
-    except OSError:
-        pass
+            os.killpg(0, signal.SIGTERM)
+            time.sleep(0.3)
+            os.killpg(0, signal.SIGKILL)
+        except OSError:
+            pass
 """
 
 
