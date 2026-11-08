@@ -135,6 +135,7 @@ pub struct Workspace {
     pub deletion: Option<DeleteDialog>,
     deletion_seq: u64,
     settings_open: bool,
+    settings_memory: bool,
     settings_archived: Option<Vec<api::ChatInfo>>,
     settings_error: Option<String>,
     settings_seq: u64,
@@ -344,6 +345,7 @@ impl Workspace {
             deletion: None,
             deletion_seq: 0,
             settings_open: false,
+            settings_memory: false,
             settings_archived: None,
             settings_error: None,
             settings_seq: 0,
@@ -2063,8 +2065,20 @@ impl Workspace {
                         this.settings_open = false;
                         cx.notify();
                     }))))
-                .child(ui::nav("settings-archived-tab", true).child("Archived chats"))
-                .child(list)).into_any_element())
+                .child(div().flex().gap(px(8.))
+                    .child(ui::nav("settings-archived-tab", !self.settings_memory).child("Archived chats")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.settings_memory = false;
+                            this.load_settings_archived(cx);
+                            cx.notify();
+                        })))
+                    .child(ui::nav("settings-memory-tab", self.settings_memory).child("Memory")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.settings_memory = true;
+                            this.load_memory(cx);
+                            cx.notify();
+                        }))))
+                .child(if self.settings_memory { self.render_memory(cx) } else { list.into_any_element() })).into_any_element())
     }
 
     fn render_reset_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2212,13 +2226,11 @@ impl Workspace {
             .child(title_row("Sources".into(), ui::icon_btn("card-add-source", "plus", false)))
             .child(web)
             .child(all)
-            .child(div().mx(px(20.)).mt(px(7.)).mb(px(6.)).h(px(1.)).bg(card_divider()))
-            .child(self.render_memory(cx))
             .children(menu)
             .into_any_element()
     }
 
-    /// M6: Memory, under Sources: personal memory and this project's memory,
+    /// Settings → Memory: personal memory and this project's memory,
     /// two separate stores. Click an item to edit it; × twice deletes it; + adds.
     /// Replies list the ids of the items they were given in their meta line.
     fn render_memory(&mut self, cx: &mut Context<Self>) -> AnyElement {
