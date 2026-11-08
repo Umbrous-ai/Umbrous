@@ -95,9 +95,11 @@ preview), and Delete sits right under the items with "What stays" below it, so
 Delete is in view at the default window size; the page scrolls Delete into view.
 The app keeps Start fresh's generation on the workspace, not in the panel, and
 bumps it on open, close, every tick change and every preview, so a reply to a
-panel that was closed (or reopened for another chat) is never shown. The e2e
-run checks this with a held preview for one chat, cancelled, then Delete chat…
-on another.
+panel that was closed (or reopened for another chat) is never shown. A second
+counter, for the panel's lifetime only (open, close, project switch), guards
+the chat list and a confirm's result, so ticking while the list loads keeps
+it. The e2e run checks both: a held preview for one chat, cancelled, then
+Delete chat… on another; and a tick while a held chat list is loading.
 
 ## What stays, and why the result says so
 

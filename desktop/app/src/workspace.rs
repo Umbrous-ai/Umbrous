@@ -164,8 +164,14 @@ pub struct Workspace {
     /// every preview. It lives here, not in ResetUi, so a reply to a panel that
     /// was closed (and maybe reopened for another chat) is never applied.
     reset_seq: u64,
+    /// The panel's lifetime: bumped only on open, close and project switch.
+    /// The chat list and a confirm's result check this one, so a tick change
+    /// while the list loads does not throw the list away.
+    reset_panel: u64,
     /// e2e only: hold each preview request this long, to test late replies
     pub e2e_preview_delay_ms: u64,
+    /// e2e only: hold Start fresh's chat-list request this long
+    pub e2e_list_delay_ms: u64,
     sidebar: bool,
     /// the right sidebar (Changes and Sources), shown and hidden by the header's panel button
     details: bool,
@@ -321,7 +327,9 @@ impl Workspace {
             use_memory: true,
             reset: None,
             reset_seq: 0,
+            reset_panel: 0,
             e2e_preview_delay_ms: 0,
+            e2e_list_delay_ms: 0,
             access_seq: 0,
             access_error: None,
             sidebar: true,
@@ -593,19 +601,24 @@ impl Workspace {
         }
         self.reset = Some(ui);
         self.reset_seq += 1;
-        let seq = self.reset_seq;
+        self.reset_panel += 1;
+        let panel = self.reset_panel;
+        let delay = self.e2e_list_delay_ms;
         logfile::event("ui.reset_open", &[]);
         self.load_memory(cx);
         let for_project = pid.clone();
         self.api_call(
             cx,
             move |api| {
+                if delay > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
                 let mut all = api.get::<api::Chats>(&format!("/api/chats?project_id={pid}"))?.chats;
                 all.extend(api.get::<api::Chats>(&format!("/api/chats?project_id={pid}&archived=1"))?.chats);
                 Ok(all)
             },
             move |this, r, cx| {
-                if this.reset_seq != seq {
+                if this.reset_panel != panel {
                     return; // closed, or opened again, since
                 }
                 let Some(ui) = this.reset.as_mut() else { return };
@@ -629,6 +642,7 @@ impl Workspace {
     /// Cancel: close it. Nothing was sent that could delete anything.
     pub fn close_reset(&mut self, cx: &mut Context<Self>) {
         self.reset_seq += 1;
+        self.reset_panel += 1;
         if self.reset.take().is_some() {
             logfile::event("ui.reset_cancel", &[]);
         }
@@ -722,9 +736,9 @@ impl Workspace {
         ui.working = true;
         let body = json!({"selection": ui.choice.selection(), "preview_id": preview.preview_id});
         logfile::event("ui.reset_confirm", &[("items", preview.items.len().to_string())]); // ids stay in the runtime log
-        let seq = self.reset_seq;
+        let panel = self.reset_panel;
         self.api_call(cx, move |api| api.post::<api::ResetDone>("/api/reset", body), move |this, r, cx| {
-            if this.reset_seq != seq || this.reset.is_none() {
+            if this.reset_panel != panel || this.reset.is_none() {
                 // the panel was closed (or reopened) meanwhile: show nothing in
                 // it, but what was deleted must still leave the lists
                 if let Ok(done) = &r {
@@ -839,6 +853,7 @@ impl Workspace {
             self.memory_armed = None;
             self.reset = None;
             self.reset_seq += 1;
+            self.reset_panel += 1;
             self.new_chat(cx);
             self.load_chats(cx);
         }

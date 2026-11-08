@@ -288,6 +288,17 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             wait_until(cx, window, 10, "B's preview", |ws| ws.reset.as_ref().map(|r| r.preview.is_some() || r.error.is_some()).unwrap_or(false)).await?;
             sleep(cx, 3500).await; // A's reply has come back by now
         }
+        "reset_tick_while_loading" => {
+            // Start fresh with its chat list held 2 s; tick "Start a new chat
+            // afterwards" before it arrives. The list must still appear (M8 review).
+            window.update(cx, |ws, _, cx| { ws.e2e_list_delay_ms = 2000; ws.open_reset(None, cx); ws.e2e_list_delay_ms = 0 }).ok();
+            window.update(cx, |ws, _, cx| ws.toggle_reset(crate::workspace::ResetTick::StartFresh, cx)).ok();
+            let early = window.update(cx, |ws, _, _| ws.reset.as_ref().map(|r| r.chats.is_some()).unwrap_or(true)).unwrap_or(true);
+            if early {
+                return Err("reset_tick_while_loading: the list was not still loading when ticked".into());
+            }
+            wait_until(cx, window, 10, "the chat list after a tick", |ws| ws.reset.as_ref().map(|r| r.chats.is_some()).unwrap_or(false)).await?;
+        }
         "reset_tick" => {
             // a tick box: all_chats | chat TITLE | all_personal | personal TEXT | all_project | project TEXT | start_fresh
             let (what, val) = arg.split_once(' ').map(|(a, b)| (a, b.trim().to_string())).unwrap_or((arg, String::new()));

@@ -38,6 +38,10 @@ expect reset preview 1 items: Keep this chat
 reset_cancel
 expect sessions What do you remember
 expect sessions Keep this chat
+# 1c. a tick while the chat list is still loading keeps the list coming
+reset_tick_while_loading
+expect reset open
+reset_cancel
 # 2. a mixed selection, previewed
 reset_open
 reset_tick chat What do you remember
