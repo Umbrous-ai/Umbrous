@@ -2321,12 +2321,6 @@ impl Workspace {
                     box_ = box_.child(div().py(px(2.)).child(div().text_size(fs_13()).text_color(text_strong()).child(i.label()))
                         .child(div().text_size(fs_12()).text_color(text_subtle()).child(i.tag())));
                 }
-                box_ = box_.child(div().pt(px(6.)).text_size(fs_12()).text_color(text_subtle()).child("What stays"));
-                for k in &p.kept {
-                    box_ = box_.child(div().py(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(k.text.clone()));
-                }
-                box_ = box_.child(div().py(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(p.not_touched.clone()))
-                    .child(div().py(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(p.backups.clone()));
                 if !p.blocked.is_empty() {
                     box_ = box_.child(div().py(px(2.)).text_size(fs_12()).text_color(danger())
                         .child("A reply is running in a selected chat. Stop it or let it finish, then preview again."));
@@ -2339,6 +2333,14 @@ impl Workspace {
                 row = row.child(Self::small_button("reset-cancel", "Cancel".into(), false)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_reset(cx))));
                 box_ = box_.child(row);
+                // What stays comes after Delete, so a short list keeps Delete in
+                // view at the default window size; it is the same text as before.
+                box_ = box_.child(div().pt(px(6.)).text_size(fs_12()).text_color(text_subtle()).child("What stays"));
+                for k in &p.kept {
+                    box_ = box_.child(div().py(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(k.text.clone()));
+                }
+                box_ = box_.child(div().py(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(p.not_touched.clone()))
+                    .child(div().py(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(p.backups.clone()));
             }
             col = col.child(box_);
         }

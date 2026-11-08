@@ -91,7 +91,8 @@ change to the ticks clears the preview and its Delete, and a preview answer
 that arrives after the ticks changed is thrown away, so Delete only ever
 sends the selection that is ticked now. In the app the ticks fold away while
 a preview is shown ("Change selection" brings them back and drops the
-preview), which also keeps Delete in view; the page scrolls Delete into view.
+preview), and Delete sits right under the items with "What stays" below it, so
+Delete is in view at the default window size; the page scrolls Delete into view.
 
 ## What stays, and why the result says so
 
