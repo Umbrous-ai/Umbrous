@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from tests.fake_ollama import FakeModel, FakeOllama
 from tests.helpers import RunningRuntime
-from umbrous.runloop.coding_context import SUPERSEDED, cost, fit, progress, supersede
+from umbrous.runloop.coding_context import NOTES, SUPERSEDED, compact_old, cost, fit, progress, supersede, trim
 from umbrous.gate.gate import ollama_tools, wrap_untrusted
 
 
@@ -101,3 +101,39 @@ class TokenSavingTests(unittest.TestCase):
         self.assertEqual(tools['edit_file']['parameters']['required'], ['path', 'old_text', 'new_text'])
         self.assertIn('exactly once', tools['edit_file']['description'])
         self.assertIn('conflict', tools['write_file']['description'])
+
+    def test_old_results_later_steps_made_redundant_keep_only_their_header(self):
+        listing = wrap_untrusted('find_files *.py in .: 60 match(es)\n' + '\n'.join(f'pkg/module_{i}.py' for i in range(60)))
+        read_a = wrap_untrusted('read_file a.py lines 1-40 of 40.\n' + ''.join(f'{i}: x = {i}\n' for i in range(1, 41)))
+        read_b = wrap_untrusted('read_file b.py lines 1-2 of 2.\n1: p\n2: q')
+        run = wrap_untrusted('run_command: make\nexited with status 1\n--- stdout (900 bytes) ---\n' + 'FAIL test_x\n' * 60)
+        messages = ([{'role': 'user', 'content': 'go'}]
+                    + _round('find_files', {'pattern': '*.py'}, listing)
+                    + _round('read_file', {'path': 'a.py'}, read_a)
+                    + _round('read_file', {'path': 'b.py'}, read_b)
+                    + _round('run_command', {'command': 'make'}, run)
+                    + _round('edit_file', {'path': 'a.py', 'old_text': 'x', 'new_text': 'z'}, wrap_untrusted('edited'))
+                    + _round('run_command', {'command': 'make test'}, run))
+        self.assertGreater(compact_old(messages), 0)
+        tools = [m['content'] for m in messages if m['role'] == 'tool']
+        self.assertIn('find_files *.py in .: 60 match(es)', tools[0])          # the header stays
+        self.assertNotIn('module_5.py', tools[0])
+        self.assertIn(NOTES['navigation'], tools[0])
+        self.assertIn(NOTES['stale'], tools[1])                              # a.py was edited later
+        self.assertEqual(tools[2], read_b)                                   # b.py may still be edited from
+        self.assertIn('exited with status 1', tools[3])
+        self.assertIn(NOTES['command'], tools[3])
+        self.assertEqual(tools[4:], [wrap_untrusted('edited'), run])         # the newest rounds stay whole
+        for t in tools:
+            self.assertTrue(t.startswith('UNTRUSTED') and t.endswith('<<<END WORKSPACE DATA>>>'))
+
+    def test_a_trim_must_pay_for_the_prompt_it_makes_the_server_reprocess(self):
+        big = wrap_untrusted('read_file a.py lines 1-400 of 400.\n' + 'line of code\n' * 400)
+        tail = wrap_untrusted('read_file b.py lines 1-400 of 400.\n' + 'other code here\n' * 2000)
+        base = [{'role': 'user', 'content': 'go'}] + _round('read_file', {'path': 'a.py'}, big)
+        cheap = base + _round('read_file', {'path': 'a.py'}, big)
+        costly = base + _round('read_file', {'path': 'b.py'}, tail) + _round('read_file', {'path': 'a.py'}, big)
+        self.assertGreater(trim(cheap), 0)                 # saves more than half of what follows it
+        self.assertEqual(trim(costly), 0)                  # would make far more be read again: wait
+        self.assertEqual(costly[2]['content'], big)
+        self.assertGreater(trim(costly, 0), 0)             # minimum 0 (over budget): always

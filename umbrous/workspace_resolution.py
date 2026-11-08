@@ -63,8 +63,12 @@ def discover(access, home=None):
             continue
         if any(c['root'] == real for c in candidates):
             continue
-        candidates.append({'root': real, 'name': Path(real).name,
-                           'umbrous_source': selfsource.is_umbrous_source(real)})
+        # Sent to the model on every message of a chat without a folder: the name is
+        # the path's last part, and only a true umbrous_source flag is worth sending.
+        entry = {'root': real}
+        if selfsource.is_umbrous_source(real):
+            entry['umbrous_source'] = True
+        candidates.append(entry)
         if len(candidates) == 40:
             break
     return candidates

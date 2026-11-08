@@ -52,6 +52,25 @@ def _call_key(name, args):
     return name + json.dumps(args, sort_keys=True, ensure_ascii=False)
 
 
+def _pairs(messages):
+    """[(index of a tool result, tool name, args, round number)] in order."""
+    out, pending, rnd = [], [], 0
+    for i, m in enumerate(messages):
+        if m.get('role') == 'assistant' and m.get('tool_calls'):
+            rnd += 1
+            pending = [((c.get('function') or {}).get('name'), (c.get('function') or {}).get('arguments'))
+                       for c in m['tool_calls']]
+        elif m.get('role') == 'tool' and pending:
+            name, args = pending.pop(0)
+            out.append((i, name, args if isinstance(args, dict) else {}, rnd))
+    return out
+
+
+def _ok(message):
+    content = message.get('content', '')
+    return content.startswith('UNTRUSTED') and content != SUPERSEDED
+
+
 def supersede(messages):
     """Replace a tool result in place when the identical call ran again later.
 
@@ -60,24 +79,92 @@ def supersede(messages):
     every step is the largest avoidable cost of a long task. Results that were
     refused or failed are kept, and so are results whose call changed something.
     Returns the estimated tokens saved."""
-    pairs, pending = [], []
-    for i, m in enumerate(messages):
-        if m.get('role') == 'assistant' and m.get('tool_calls'):
-            pending = [((c.get('function') or {}).get('name'), (c.get('function') or {}).get('arguments'))
-                       for c in m['tool_calls']]
-        elif m.get('role') == 'tool' and pending:
-            name, args = pending.pop(0)
-            pairs.append((i, _call_key(name, args)))
+    pairs = [(i, _call_key(name, args)) for i, name, args, _ in _pairs(messages)]
     latest = {}
     for i, key in pairs:
-        if key and messages[i].get('content', '').startswith('UNTRUSTED'):
+        if key and _ok(messages[i]):
             latest[key] = i
     saved = 0
     for i, key in pairs:
-        if key in latest and latest[key] != i and messages[i].get('content') != SUPERSEDED \
-                and messages[i].get('content', '').startswith('UNTRUSTED'):
+        if key in latest and latest[key] != i and _ok(messages[i]):
             saved += estimate_tokens(messages[i]['content']) - estimate_tokens(SUPERSEDED)
             messages[i] = dict(messages[i], content=SUPERSEDED)
+    return saved
+
+
+KEEP_ROUNDS = 2      # the newest tool rounds are always sent in full
+_HEAD = '<<<BEGIN WORKSPACE DATA>>>\n'
+_TAIL = '\n<<<END WORKSPACE DATA>>>'
+NOTES = {
+    'navigation': '[Rest omitted after later steps; call it again if you need it.]',
+    'stale': '[Content omitted: this file was changed later in this task; read it again for its current lines.]',
+    'command': '[Output omitted: a later command ran; its result and the progress record are below.]',
+}
+
+
+def _shorten(text, keep_lines, note):
+    """Keep the result's wrapper and its first lines (what was called, and what happened)."""
+    if _HEAD not in text or _TAIL not in text:
+        return None
+    pre, rest = text.split(_HEAD, 1)
+    body = rest.rsplit(_TAIL, 1)[0]
+    lines = body.split('\n')
+    if len(lines) <= keep_lines + 1:
+        return None
+    return pre + _HEAD + '\n'.join(lines[:keep_lines] + [note]) + _TAIL
+
+
+def compact_old(messages):
+    """Shorten tool results that later steps made unnecessary, keeping one-line headers.
+
+    Only results older than the newest KEEP_ROUNDS rounds, and only:
+      - listings, searches and name finds (the model has moved on; they are cheap to repeat);
+      - a read of a file that a later edit or write changed (its text is out of date);
+      - command output, once a later command ran (exit codes stay in the header and record).
+    A read the model may still edit from is kept in full. Returns the estimated tokens saved."""
+    pairs = _pairs(messages)
+    if not pairs:
+        return 0
+    newest = pairs[-1][3]
+    saved = 0
+    for i, name, args, rnd in pairs:
+        if rnd > newest - KEEP_ROUNDS or not _ok(messages[i]):
+            continue
+        later = [(n, a) for j, n, a, r in pairs if r > rnd and _ok(messages[j])]
+        short = None
+        if name in ('list_files', 'search_files', 'find_files'):
+            short = _shorten(messages[i]['content'], 1, NOTES['navigation'])
+        elif name == 'read_file' and any(n in ('edit_file', 'write_file') and a.get('path') == args.get('path')
+                                         for n, a in later):
+            short = _shorten(messages[i]['content'], 1, NOTES['stale'])
+        elif name in ('run_command', 'check_command') and any(n == 'run_command' for n, _ in later):
+            short = _shorten(messages[i]['content'], 2, NOTES['command'])
+        if short is not None and len(short) < len(messages[i]['content']):
+            saved += estimate_tokens(messages[i]['content']) - estimate_tokens(short)
+            messages[i] = dict(messages[i], content=short)
+    return saved
+
+
+TRIM_MIN = 200       # estimated tokens a trim must save at least
+
+
+def trim(messages, minimum=TRIM_MIN):
+    """Both of the above, in place, when they are worth it. Returns the tokens saved.
+
+    Changing an earlier message makes a model server with a prompt cache process
+    everything after it again. So a trim is applied only when it saves at least half
+    of what it makes the server reprocess (it pays for itself within two steps), and
+    at least `minimum`. Small savings are left to accumulate, keeping the prefix
+    stable for most steps."""
+    trial = list(messages)
+    saved = supersede(trial) + compact_old(trial)
+    if saved <= 0:
+        return 0
+    first = next(i for i, (m, t) in enumerate(zip(messages, trial)) if m is not t)
+    reprocessed = sum(estimate_tokens(m.get('content') or '') for m in trial[first:])
+    if minimum and (saved < minimum or saved * 2 < reprocessed):
+        return 0
+    messages[:] = trial
     return saved
 
 
@@ -91,7 +178,7 @@ def fit(messages, budget, record):
     cached prompt instead of reading the whole task again at every step.
     """
     out = list(messages)
-    supersede(out)
+    trim(out, 0 if cost(out + [record]) > budget else TRIM_MIN)
     while cost(out + [record]) > budget:
         starts = [i for i, m in enumerate(out) if m.get('role') == 'assistant' and m.get('tool_calls')]
         if len(starts) > 1:

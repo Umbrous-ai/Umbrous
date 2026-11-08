@@ -470,7 +470,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                                 {"role": "system", "content": brief})
                 used += estimate_tokens(brief)
         from umbrous.runloop.coding_context import fit as fit_coding, progress as coding_progress, \
-            supersede as supersede_results
+            trim as trim_results
         rounds, evidence, budget_spent = 0, [], False
         try:
             while True:
@@ -496,7 +496,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                     # The last message is the refreshed progress record, not history.
                     messages = [m for m in fitted if m is not record]
                 elif rounds:
-                    used -= supersede_results(messages)     # an identical later call makes an older result redundant
+                    used -= trim_results(messages)     # results later steps made redundant (coding_context)
                 step_text, calls, done = [], [], None
                 stream = resolved_reply if resolved_reply is not None else adapter.chat_stream(
                     model.name, request_messages, options=options, cancel=cancel, deadlines=deadlines_from(config),
