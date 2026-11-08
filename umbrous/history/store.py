@@ -181,14 +181,25 @@ class HistoryStore:
         return self.get_project(pid)
 
     # ---------------------------------------------------------------- chats
-    def create_chat(self, project_id: str, title: str = "New chat", access: Optional[str] = None) -> ChatInfo:
-        self.get_project(project_id)  # raises if it does not exist
+    def create_chat(self, project_id: Optional[str] = None, title: str = "New chat", access: Optional[str] = None) -> ChatInfo:
+        if project_id is not None:
+            self.get_project(project_id)  # explicit missing projects remain an error
         _check_access(access)
         cid = "chat_" + secrets.token_hex(12)
         now = _now()
         with self._write_lock, self._db() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if project_id is None:
+                # Create a fresh container only when sending, never restore deleted data.
+                row = c.execute("SELECT id FROM projects WHERE id = ? OR name_key = ? ORDER BY id = ? DESC LIMIT 1",
+                                (DEFAULT_PROJECT_ID, name_key("General"), DEFAULT_PROJECT_ID)).fetchone()
+                project_id = row[0] if row else DEFAULT_PROJECT_ID
+                if row is None:
+                    c.execute("INSERT INTO projects (id, name, name_key, created_at) VALUES (?, ?, ?, ?)",
+                              (project_id, "General", name_key("General"), now))
             c.execute("INSERT INTO chats (id, project_id, title, created_at, updated_at, access) VALUES (?, ?, ?, ?, ?, ?)",
                       (cid, project_id, title[:MAX_TITLE], now, now, access))
+            c.execute("COMMIT")
         return self.get_chat(cid)
 
     def set_access(self, chat_id: str, access: Optional[str]) -> ChatInfo:

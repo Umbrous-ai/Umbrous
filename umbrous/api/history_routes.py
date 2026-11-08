@@ -51,8 +51,8 @@ class HistoryRoutes:
             self._send_json(201, {"project": project.as_dict()})
             return 201, "project_created"
         if path == "/api/chats":
-            project_id = str(body.get("project_id", ""))
-            if not PROJECT_ID_RE.match(project_id):
+            project_id = body.get("project_id")
+            if project_id is not None and (not isinstance(project_id, str) or not PROJECT_ID_RE.fullmatch(project_id)):
                 self._send_json(400, {"error": "bad_project_id"})
                 return 400, "bad_project_id"
             access = body.get("access")

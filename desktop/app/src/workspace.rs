@@ -1104,7 +1104,6 @@ impl Workspace {
 
     fn can_send(&self) -> bool {
         matches!(self.phase, Phase::Ready)
-            && self.project_id.is_some()
             && self.provider_up()
             && self.model.is_some()
             && self.run.is_none()
@@ -1135,7 +1134,7 @@ impl Workspace {
         let model = self.model.clone().unwrap();
         let use_memory = self.use_memory;
         let controls = self.current_model_controls();
-        let project_id = self.project_id.clone().unwrap_or_else(|| "prj_general".into());
+        let project_id = self.project_id.clone();
         let existing = self.chat.as_ref().map(|c| c.id.clone());
         let existing_for_ui = existing.clone();
         let access = if existing.is_none() { self.pending_access.clone() } else { None };
@@ -1261,6 +1260,7 @@ impl Workspace {
                                 if let Some(run) = self.run.as_mut() {
                                     run.chat_id = c.id.clone();
                                 }
+                                self.project_id = Some(c.project_id.clone());
                                 self.chat = Some(c);
                             }
                         }
@@ -2619,7 +2619,7 @@ impl Workspace {
             notices.push(
                 ui::notice(None)
                     .child(div().flex_1().min_w_0().child(if self.project_id.is_none() {
-                        "Create a project in the sidebar to start a chat.".to_string()
+                        "Send a message to start a chat. It will be saved in General.".to_string()
                     } else { format!(
                         "New chat in {project}. Ollama models run on this Mac. ChatGPT models send the conversation and tool results to OpenAI using your subscription. Chats are saved on this Mac."
                     ) }))

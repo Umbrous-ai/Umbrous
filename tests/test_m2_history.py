@@ -36,6 +36,25 @@ class StoreTests(unittest.TestCase):
     def test_fresh_database_has_general(self):
         self.assertEqual([(p.id, p.name) for p in self.h.list_projects()], [("prj_general", "General")])
 
+    def test_chat_without_project_recreates_only_general(self):
+        with sqlite3.connect(self.path) as c:
+            c.execute("DELETE FROM projects")
+        chat = self.h.create_chat()
+        self.h.append_exchange(chat.id, "Hello without a project", "Hello", "test", "complete")
+        self.assertEqual(chat.project_id, "prj_general")
+        self.assertEqual(len(self.h.list_projects()), 1)
+        self.assertEqual(self.h.get_chat(chat.id).messages, 2)
+        self.assertEqual(self.h.create_chat().project_id, chat.project_id)
+
+    def test_chat_without_project_reuses_general_name(self):
+        with sqlite3.connect(self.path) as c:
+            c.execute("DELETE FROM projects")
+        project = self.h.create_project("GENERAL")
+        self.assertEqual(self.h.create_chat().project_id, project.id)
+        self.assertEqual(len(self.h.list_projects()), 1)
+        with self.assertRaises(HistoryError):
+            self.h.create_chat("prj_missing")
+
     def test_project_names(self):
         p = self.h.create_project("  Tax   2026 ")
         self.assertEqual(p.name, "Tax 2026")
@@ -159,6 +178,16 @@ class HistoryApiTests(unittest.TestCase):
 
     def chat_requests(self):
         return [r["body"] for r in self.fake.requests if r["path"] == "/api/chat"]
+
+    def test_create_chat_without_selecting_a_project(self):
+        with self.rt() as rt:
+            with sqlite3.connect(self.home / "umbrous.db") as c:
+                c.execute("DELETE FROM projects")
+            for body in ({}, {"project_id": None}):
+                status, _, result = rt.post_json("/api/chats", body)
+                self.assertEqual(status, 201)
+                self.assertEqual(json.loads(result)["chat"]["project_id"], "prj_general")
+            self.assertEqual(len(rt.get_json("/api/projects")[1]["projects"]), 1)
 
     def test_history_survives_a_restart_in_the_right_project(self):
         with self.rt() as rt:

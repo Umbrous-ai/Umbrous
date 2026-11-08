@@ -1,0 +1,23 @@
+wait_ready 30
+wait_models
+select_model memory-aware:3b
+delete_open project General
+delete_confirm
+expect project_count 0
+new_chat
+send Hello without a project
+wait_reply 30
+sleep 600
+expect messages 2
+expect project_count 1
+expect projects General
+expect sessions Hello without a project
+new_chat
+send Second new chat
+wait_reply 30
+sleep 600
+expect messages 2
+expect project_count 1
+expect sessions Second new chat
+record end
+quit
