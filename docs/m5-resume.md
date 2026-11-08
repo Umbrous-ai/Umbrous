@@ -118,7 +118,8 @@ Each tool in `gate/gate.py` `TOOLS` declares `retry`:
 | Class | Tools | When its outcome is unknown |
 |---|---|---|
 | `repeat` | `list_files`, `read_file`, `search_files` (all of M5's tools) | may run again under the current gate, with a **new** receipt, and a warning that the data may have changed since |
-| `verify` | none yet; every future write tool, and any tool that declares nothing | its effect must be checked first. Resume is refused (`needs_verification`) until that tool has a check |
+| `verify` | `write_file`, `edit_file` (M9), and any tool that declares nothing | its effect must be checked first. M9's write tools bring that check (their intent and the file's hash on disk, docs/m9-coding.md); any other tool's unknown outcome refuses the resume (`needs_verification`) |
+| `command` | `run_command` (M9) | its effects cannot be checked: it stays unknown, is never re-run by itself, and the resume says so |
 
 ### What a future write tool would need
 
@@ -140,7 +141,9 @@ Before any write tool is enabled, it needs, at least:
    is known and decide.
 
 None of this is promised for tools in general. Each write tool has to bring
-its own check before it can be resumed.
+its own check before it can be resumed. M9's `write_file` and `edit_file` are
+built to exactly these four points; see docs/m9-coding.md, "Continue after an
+interruption".
 
 ## Resume
 

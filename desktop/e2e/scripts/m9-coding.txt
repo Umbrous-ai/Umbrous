@@ -1,0 +1,64 @@
+# M9 in the app: "work on <folder>" and a coding task that edits, tests, fixes and finishes;
+# Stop while a command runs; the runtime killed during a command, then the task resumed.
+# Data: General with no workspace (validate-m9.sh); projects @OUT@/m9-fixture/a/proj and
+# @OUT@/m9-fixture/b/proj; Ollama: stress.py fake-coding (coder:3b, slow-coder:3b, chatty:3b).
+wait_ready 30
+wait_models
+wait_access
+expect access none
+# 1. "work on" attaches the folder with the Code profile; the task edits, tests, fixes, finishes
+select_model coder:3b
+send work on @OUT@/m9-fixture/a/proj: add a multiply function to calc.py and make the tests pass
+wait_reply 60
+expect last_meta Task completed
+expect last_meta 2 changes · 2 commands (1 not passing)
+expect last_text now passes (exit 0)
+expect notice Working in
+expect notice attached now with Code in workspace
+wait_profile workspace_code
+expect access_root m9-fixture/a/proj
+screenshot @OUT@/m9-coding.png
+record coding
+# 2. Stop while a command runs: the command is ended with the task
+new_chat
+select_model slow-coder:3b
+send Run the tests again
+wait_meta running sleep 30
+stop
+expect running false
+expect last_meta Stopped by you.
+expect last_meta Task stopped
+record stopped
+# 3. the runtime is killed while the tests run, after the edit was made (a first
+#    plain exchange gives the chat its title, so it can be opened again)
+new_chat
+select_model chatty:3b
+send Notes for project B
+wait_reply 30
+select_model slow-coder:3b
+send work on @OUT@/m9-fixture/b/proj: add multiply to calc.py and run the tests
+wait_meta running sleep 30
+screenshot @OUT@/m9-before-kill.png
+kill_backend
+wait_failed 10
+retry
+wait_ready 30
+wait_models
+# 4. after the restart: the interrupted task, with what was already changed
+new_chat
+open_chat Notes for project B
+expect interrupted add multiply to calc.py and run the tests
+expect interrupted_note Already changed (kept, not made again): calc.py
+expect interrupted_note not re-run by itself
+screenshot @OUT@/m9-interrupted.png
+record interrupted
+# 5. Resume (with the quick coder): it continues from the files as they are and finishes
+select_model coder:3b
+resume
+wait_reply 60
+expect interrupted none
+expect last_meta Task completed
+expect last_text now passes (exit 0)
+screenshot @OUT@/m9-resumed.png
+record end
+quit

@@ -26,6 +26,24 @@ read-only tools that check is unnecessary (reading again changes nothing), so
 their retry class is "repeat". A future write tool would need a way to check
 its effect before it could be resumed (docs/m5-resume.md).
 
+M9 adds tools that change things, each with its own check:
+
+  write_file / edit_file   retry class "verify". Before writing, the change
+                           recorded a `write.intent` event: the path, the
+                           file's hash before (or absent) and the hash it was
+                           about to have. Recovery reads the file now: the
+                           "after" hash means it happened (completed); the
+                           "before" hash (or still absent) means it did not
+                           (cancelled); anything else means something else
+                           changed it (unknown, code conflict: shown to you,
+                           never retried blindly). No intent means nothing
+                           was written yet. A leftover temporary file is removed.
+  run_command              retry class "command". Its effects cannot be
+                           checked afterwards: it stays unknown, is never run
+                           again by itself, and resuming says so. A command
+                           still running from the dead runtime (its process
+                           group is still there) is stopped.
+
 Resume runs the task again as a new task, from the message that was waiting
 (pending_turns), under the gate, profile, grants and approvals as they are
 NOW. Nothing is replayed: not the old tool results, not old approvals. Before
@@ -46,6 +64,11 @@ from umbrous.history.store import HistoryStore
 from umbrous.logging_setup import log_event
 from umbrous.receipts.store import ReceiptStore
 from umbrous.tasks.store import OPEN, TaskStore
+from umbrous.tools import edit
+from umbrous.tools.run import kill_group, process_alive
+
+WRITE_TOOLS = ("write_file", "edit_file")
+COMMAND_TOOLS = ("run_command", "check_command")
 
 log = logging.getLogger("umbrous.tasks")
 
@@ -64,6 +87,9 @@ REASONS = {
     "needs_verification": "An action of this task has an unknown outcome and cannot simply be repeated; its "
                           "effect must be checked first.",
 }
+CODE_RESUME_WARNING = ("Resuming runs the task again under the current settings, in the same folder. Changes that "
+                       "were made stay as they are and the model is told about them, so they are not made twice. "
+                       "Commands are not re-run by themselves.")
 
 
 def retry_class(tool: str) -> str:
@@ -79,13 +105,16 @@ def _ms_between(a: Optional[str], b: Optional[str]) -> int:
         return 0
 
 
-def recover(tasks: TaskStore, receipts: ReceiptStore, history: HistoryStore) -> List[dict]:
+def recover(tasks: TaskStore, receipts: ReceiptStore, history: HistoryStore,
+            workspace_of=lambda project_id: None) -> List[dict]:
     """Close every task left open by a stop mid-task. Run once at startup,
-    before serving (runtime.json ensures one runtime per home)."""
+    before serving (runtime.json ensures one runtime per home).
+    `workspace_of(project_id)` (M9) gives the project's folder now, for tasks
+    that did not record their own."""
     out = []
     for task_id in tasks.open_tasks():
         try:
-            out.append(_recover_one(tasks, receipts, history, task_id))
+            out.append(_recover_one(tasks, receipts, history, task_id, workspace_of))
         except Exception as exc:   # one bad record must not stop the runtime from starting
             log_event(log, "task.recover_failed", level=logging.WARNING, task_id=task_id,
                       error=exc.__class__.__name__)
@@ -95,20 +124,26 @@ def recover(tasks: TaskStore, receipts: ReceiptStore, history: HistoryStore) -> 
     return out
 
 
-def _recover_one(tasks: TaskStore, receipts: ReceiptStore, history: HistoryStore, task_id: str) -> dict:
+def _recover_one(tasks: TaskStore, receipts: ReceiptStore, history: HistoryStore, task_id: str,
+                 workspace_of=lambda project_id: None) -> dict:
     full = tasks.get(task_id)
     by_action: Dict[str, dict] = {r["action_id"]: r for r in receipts.for_task(task_id)}
     events = full["events"]
     stop = next((e for e in events if e["kind"] == "stop.requested"), None)
+    root = full["task"].get("workspace") or workspace_of(full["task"]["project_id"])
 
     for a in full["actions"]:
+        r = by_action.get(a["action_id"])
+        if a["tool"] in COMMAND_TOOLS:
+            _stop_leftover(tasks, task_id, a, events)     # even if it ended: a background one may still run
         if a["status"] not in OPEN:
             continue
-        r = by_action.get(a["action_id"])
         if r is not None:
             code = (r.get("reason") or "").split(":", 1)[0] or None
             tasks.recover_action(a["action_id"], RECEIPT_TO_ACTION[r["decision"]], code, r["receipt_id"],
                                  reconciled_from="receipt")
+        elif a["status"] == "started" and a["tool"] in WRITE_TOOLS:
+            _reconcile_write(tasks, a, events, root)
         elif a["status"] == "started":
             tasks.recover_action(a["action_id"], "unknown", INTERRUPTED, None, retry=retry_class(a["tool"]))
         else:
@@ -129,16 +164,71 @@ def _recover_one(tasks: TaskStore, receipts: ReceiptStore, history: HistoryStore
     return {"task_id": task_id, "status": status, "code": code, "reply_saved": reply_saved}
 
 
+def _intent(events: list, action_id: str, kind: str = "write.intent") -> Optional[dict]:
+    return next((e["data"] for e in events if e["kind"] == kind and e["action_id"] == action_id), None)
+
+
+def _reconcile_write(tasks: TaskStore, a: dict, events: list, root: Optional[str]) -> None:
+    """M9: settle a change that was running when the runtime stopped, from the disk."""
+    intent = _intent(events, a["action_id"])
+    if intent is None:
+        # the intent is recorded before anything is written: without it, nothing was
+        tasks.recover_action(a["action_id"], "cancelled", INTERRUPTED, None, reconciled_from="disk",
+                             outcome="not_done", retry="verify")
+        return
+    if root is None:
+        tasks.recover_action(a["action_id"], "unknown", INTERRUPTED, None, reconciled_from="disk",
+                             outcome="unchecked", retry="verify", path=intent.get("path"))
+        return
+    if intent.get("tmp"):
+        edit.remove_tmp(root, intent["tmp"])
+    state, now = edit.current_hash(root, intent.get("path") or "")
+    before, after = intent.get("before"), intent.get("after")
+    if state == "present" and now == after:
+        tasks.recover_action(a["action_id"], "completed", "ok", None, reconciled_from="disk", outcome="done",
+                             path=intent["path"], op=intent.get("op"), before=before, after=after)
+    elif (state == "present" and now == before) or (state == "absent" and before is None):
+        tasks.recover_action(a["action_id"], "cancelled", INTERRUPTED, None, reconciled_from="disk",
+                             outcome="not_done", path=intent["path"], before=before, after=after)
+    else:
+        tasks.recover_action(a["action_id"], "unknown", "conflict", None, reconciled_from="disk", outcome="conflict",
+                             path=intent.get("path"), before=before, after=after, now=now, state=state)
+
+
+def _stop_leftover(tasks: TaskStore, task_id: str, a: dict, events: list) -> None:
+    """M9: a command the dead runtime started may still be running (its own
+    process group). It belonged to an ended task: stop it, and say so."""
+    started = _intent(events, a["action_id"], "command.started")
+    pid = (started or {}).get("pid")
+    if isinstance(pid, int) and pid > 1 and process_alive(pid):
+        kill_group(pid)
+        tasks.event(task_id, "command.stopped_after_restart", a["action_id"], pid=pid)
+
+
 def rebuild_report(full: dict, by_action: Dict[str, dict], status: str, code: str, reply_saved: bool) -> dict:
     """The M4 report keys, rebuilt from the stored record instead of a live run."""
     task, actions, events = full["task"], full["actions"], full["events"]
     counts: Dict[str, int] = {}
     evidence, seen, failures = [], set(), []
     uncertainty = [STOPPED_NOTE]
+    changes, commands = [], []
+    for e in events:
+        if e["kind"] == "action.completed" and (e["data"] or {}).get("command"):
+            d = e["data"]
+            commands.append({"command": d["command"], "status": d.get("status"), "exit": d.get("exit"),
+                             "ms": d.get("ms"), "check": bool(d.get("check"))})
+        elif e["kind"] == "command.stopped_after_restart":
+            uncertainty.append(f"A command this task started was still running after the restart and was stopped "
+                               f"(process {e['data'].get('pid')}).")
     for a in actions:
         counts[a["status"]] = counts.get(a["status"], 0) + 1
         where = f"{a['tool']} {a['resource']}"
         if a["status"] == "completed":
+            rec = _reconciled(events, a["action_id"])
+            if a["tool"] in WRITE_TOOLS:
+                ch = _change_of(by_action.get(a["action_id"]), rec)
+                if ch:
+                    changes.append(ch)
             for e in (by_action.get(a["action_id"]) or {}).get("evidence") or []:
                 key = (e["kind"], e["ref"], tuple(e["lines"]) if e.get("lines") else None)
                 if key not in seen:
@@ -152,9 +242,19 @@ def rebuild_report(full: dict, by_action: Dict[str, dict], status: str, code: st
                                          if a["status"] == "unknown" and a["code"] == INTERRUPTED else
                                          "Not run: Umbrous stopped first." if a["code"] == INTERRUPTED else
                                          (by_action.get(a["action_id"]) or {}).get("reason") or a["code"])})
-        if a["status"] == "unknown":
+        rec = _reconciled(events, a["action_id"]) or {}
+        if a["status"] == "unknown" and rec.get("outcome") == "conflict":
+            uncertainty.append(f"{where}: Umbrous stopped while changing it, and the file is now neither as it was "
+                               "nor as the change would have left it (something else changed it). It was left "
+                               "alone; check it yourself.")
+        elif a["status"] == "unknown" and a["tool"] in COMMAND_TOOLS:
+            uncertainty.append(f"{where} was running when Umbrous stopped. What it did is unknown (it may have "
+                               "changed files), and it is not run again by itself.")
+        elif a["status"] == "unknown":
             uncertainty.append(f"{where} was running when Umbrous stopped and no result was recorded, so its "
                                f"outcome is unknown (retry class: {retry_class(a['tool'])}).")
+        elif rec.get("outcome") == "not_done" and a["tool"] in WRITE_TOOLS:
+            uncertainty.append(f"{where} was about to be changed when Umbrous stopped; the file shows it was not.")
     if reply_saved:
         uncertainty.append("The reply was saved before Umbrous stopped, but the task's own report was not; "
                            "this report was rebuilt from the record.")
@@ -162,13 +262,39 @@ def rebuild_report(full: dict, by_action: Dict[str, dict], status: str, code: st
         uncertainty.append("Reply text that had arrived before the stop was not saved.")
     steps = max([e["data"].get("step", 0) for e in events if e["kind"] == "step.started"] or [0])
     limits_hit = [e["data"].get("limit") for e in events if e["kind"] == "limit" and e["data"].get("limit")]
-    return {
+    extra = {}
+    if task.get("workspace"):
+        extra["workspace"] = task["workspace"]
+    if changes or commands:
+        extra.update(changes=changes[:50], commands=commands[:50])
+    return {**extra,
         "task_id": task["task_id"], "status": status, "code": code, "steps": steps, "tool_calls": len(actions),
         "actions": counts, "evidence": evidence[:50], "failures": failures, "uncertainty": uncertainty[:20],
         "limits_hit": limits_hit, "limits": task["limits"],
         "ms": _ms_between(task["created_at"], events[-1]["at"] if events else None),
         "citations_checked": 0, "recovered": True,
     }
+
+
+def _reconciled(events: list, action_id: str) -> Optional[dict]:
+    return next((e["data"] for e in events if e["kind"] == "action.reconciled" and e["action_id"] == action_id), None)
+
+
+def _change_of(receipt: Optional[dict], rec: Optional[dict]) -> Optional[dict]:
+    """A completed change, from its receipt (path, hash after, hash before) or from the disk check."""
+    if receipt:
+        ev = receipt.get("evidence") or []
+        ch = next((e for e in ev if e.get("kind") == "change"), None)
+        if ch:
+            before = next((e.get("sha256") for e in ev if e.get("kind") == "other" and
+                           (e.get("ref") or "").startswith("before:")), None)
+            return {"path": ch["ref"], "op": "replaced" if before else "created", "before": before,
+                    "after": ch.get("sha256"), "added": None, "removed": None}
+    if rec and rec.get("outcome") == "done":
+        return {"path": rec.get("path"), "op": "created" if not rec.get("before") else "replaced",
+                "before": rec.get("before"), "after": rec.get("after"), "added": None, "removed": None,
+                "recovered": True}
+    return None
 
 
 # ---------------------------------------------------------------- resuming
@@ -192,11 +318,23 @@ def resume_info(tasks: TaskStore, history: HistoryStore, task_id: str, full: Opt
     if pending is None:
         return no("reply_saved" if history.has_reply(task_id) else "message_gone")
     unknown = [a for a in full["actions"] if a["status"] == "unknown"]
-    if any(retry_class(a["tool"]) != "repeat" for a in unknown):
+    # M9: a change checked on disk (a conflict) and a command are shown, not blockers:
+    # you decide. Only an action nobody could check blocks the resume.
+    if any(retry_class(a["tool"]) not in ("repeat", "command") and a["code"] != "conflict" for a in unknown):
         return no("needs_verification")
-    return {"possible": True, "reason": None, "message": RESUME_WARNING, "text": pending.user_text,
-            "repeats": [{"tool": a["tool"], "resource": a["resource"], "status": a["status"]}
-                        for a in full["actions"] if a["status"] in ("completed", "unknown")][:20]}
+    coding = any(a["tool"] in WRITE_TOOLS + COMMAND_TOOLS for a in full["actions"])
+    out = {"possible": True, "reason": None, "message": CODE_RESUME_WARNING if coding else RESUME_WARNING,
+           "text": pending.user_text,
+           "repeats": [{"tool": a["tool"], "resource": a["resource"], "status": a["status"]}
+                       for a in full["actions"] if a["status"] in ("completed", "unknown")
+                       and a["tool"] not in WRITE_TOOLS + COMMAND_TOOLS][:20]}
+    if coding:
+        out["done"] = [{"tool": a["tool"], "resource": a["resource"]} for a in full["actions"]
+                       if a["status"] == "completed" and a["tool"] in WRITE_TOOLS][:20]
+        out["conflicts"] = [a["resource"] for a in unknown if a["code"] == "conflict"][:20]
+        out["commands_unknown"] = [a["resource"] for a in unknown if a["tool"] in COMMAND_TOOLS][:20]
+        out["workspace"] = t.get("workspace")
+    return out
 
 
 def scope_check(gate: Gate, project_id: str, full: dict, approvals: bool) -> Optional[dict]:
@@ -211,6 +349,17 @@ def scope_check(gate: Gate, project_id: str, full: dict, approvals: bool) -> Opt
         args = {} if a["resource"] in (None, ".") else {"path": a["resource"]}
         if a["tool"] == "search_files":
             args["query"] = "resume-check"     # the words are not kept; only the folder matters here
+        # M9: only the kind of action and its path matter to the check; the rest is a stand-in
+        elif a["tool"] == "find_files":
+            args["pattern"] = "resume-check"
+        elif a["tool"] == "write_file":
+            args["content"] = ""
+        elif a["tool"] == "edit_file":
+            args.update(old_text="resume-check", new_text="")
+        elif a["tool"] == "run_command":
+            args = {"command": "true"}
+        elif a["tool"] == "check_command":
+            continue
         v = gate.evaluate(project_id, Call(a["tool"], args))
         if v.outcome == ALLOW:
             continue
@@ -225,3 +374,50 @@ def scope_check(gate: Gate, project_id: str, full: dict, approvals: bool) -> Opt
                 "message": f"{a['tool']} {a['resource']} is no longer allowed ({v.reason}) The task stays "
                            "interrupted and is not replayed."}
     return None
+
+
+def resume_brief(gate: Gate, tasks: TaskStore, full: dict, root: str) -> Optional[str]:
+    """M9: what a resumed coding task is told about the interrupted attempt, from
+    the record and the disk (never from the old model text): the changes that
+    were made and whether each file is still as written, changes whose state is
+    unclear, and commands whose effects are unknown. So the model continues the
+    remaining work instead of doing the same changes again."""
+    by_action = {r["action_id"]: r for r in gate.receipts.for_task(full["task"]["task_id"])}
+    events = full["events"]
+    done, unclear, cmds_ok, cmds_unknown = [], [], [], []
+    for a in full["actions"]:
+        if a["tool"] in WRITE_TOOLS and a["status"] == "completed":
+            ch = _change_of(by_action.get(a["action_id"]), _reconciled(events, a["action_id"]))
+            if not ch or not ch.get("path"):
+                continue
+            state, now = edit.current_hash(root, ch["path"])
+            still = "still as written" if now == ch.get("after") else (
+                "since removed" if state == "absent" else "changed again since")
+            done.append(f"- {a['tool']} {ch['path']} ({ch['op']}; {still})")
+        elif a["tool"] in WRITE_TOOLS and a["status"] == "unknown":
+            unclear.append(f"- {a['tool']} {a['resource']}: interrupted, and the file now matches neither the old "
+                           "nor the new version; read it before touching it")
+        elif a["tool"] == "run_command" and a["status"] == "completed":
+            d = next((e["data"] for e in events if e["kind"] == "action.completed" and e["action_id"] == a["action_id"]),
+                     {}) or {}
+            if d.get("command"):
+                cmds_ok.append(f"- `{d['command']}`: {d.get('status')}" +
+                               (f" (exit {d.get('exit')})" if d.get("exit") is not None else ""))
+        elif a["tool"] == "run_command" and a["status"] == "unknown":
+            d = _intent(events, a["action_id"], "command.intent") or {}
+            cmds_unknown.append(f"- `{d.get('command') or '?'}`: interrupted; it may have changed files")
+    if not (done or unclear or cmds_ok or cmds_unknown):
+        return None
+    parts = ["This task was interrupted (Umbrous stopped) and is now resumed in the same folder. From the record of "
+             "the interrupted attempt and the files as they are now:"]
+    if done:
+        parts += ["Changes already made (do not make them again; read a file if you need its content):"] + done[:20]
+    if unclear:
+        parts += ["Changes whose state is unclear:"] + unclear[:10]
+    if cmds_ok:
+        parts += ["Commands that finished before the interruption (results may be stale):"] + cmds_ok[:10]
+    if cmds_unknown:
+        parts += ["Commands that were running when it stopped (do not just run them again; check the workspace "
+                  "first, and only re-run one if that is safe):"] + cmds_unknown[:10]
+    parts.append("Continue with what remains of the request. Nothing in this note is from a file or the user.")
+    return "\n".join(parts)

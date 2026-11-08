@@ -427,6 +427,75 @@ pub struct Resume {
     /// the message that was waiting, when it can be resumed
     #[serde(default)]
     pub text: Option<String>,
+    /// M9: changes the interrupted attempt made (kept, not made again)
+    #[serde(default)]
+    pub done: Vec<ResumeItem>,
+    /// M9: files changed by something else meanwhile (left alone)
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// M9: commands that were running, whose effects are unknown
+    #[serde(default)]
+    pub commands_unknown: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResumeItem {
+    #[serde(default)]
+    pub resource: String,
+}
+
+/// M9: what resuming a coding task builds on, in one line, or None.
+pub fn resume_note(r: &Resume) -> Option<String> {
+    let mut parts = Vec::new();
+    if !r.done.is_empty() {
+        parts.push(format!("Already changed (kept, not made again): {}",
+                           r.done.iter().map(|d| d.resource.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    if !r.conflicts.is_empty() {
+        parts.push(format!("Changed by something else meanwhile (left alone): {}", r.conflicts.join(", ")));
+    }
+    if !r.commands_unknown.is_empty() {
+        parts.push("A command was running and may have changed files; it is not re-run by itself".into());
+    }
+    if parts.is_empty() { None } else { Some(parts.join(". ") + ".") }
+}
+
+/// M9: what a running step is doing, for the reply's meta line while it runs.
+pub fn step_label(tool: &str, args: &Value) -> String {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).filter(|p| !p.is_empty());
+    let path = s("path").unwrap_or(".");
+    let what = match tool {
+        "read_file" => format!("reading {path}"),
+        "list_files" => format!("listing {path}"),
+        "search_files" => format!("searching {path}"),
+        "find_files" => format!("finding files named {}", s("pattern").unwrap_or("?")),
+        "write_file" => format!("writing {path}"),
+        "edit_file" => format!("editing {path}"),
+        "run_command" => format!("running {}", s("command").map(|c| c.split_whitespace().collect::<Vec<_>>().join(" "))
+                                                   .unwrap_or_else(|| "a command".into())),
+        "check_command" => "checking a command".into(),
+        _ => "running a tool".into(),
+    };
+    what.chars().take(80).collect()
+}
+
+/// M9: the folder a task works in, from the start event's tools, for a notice:
+/// shown when "work on <folder>" attached it, or when it is Umbrous's own source.
+pub fn folder_note(tools: &Value) -> Option<String> {
+    let root = tools.get("root").and_then(Value::as_str)?;
+    let attached = tools.pointer("/selected/attached").and_then(Value::as_bool).unwrap_or(false);
+    let own = tools.get("self_source").and_then(Value::as_bool).unwrap_or(false);
+    if !attached && !own {
+        return None;
+    }
+    let mut s = format!("Working in {root}");
+    if attached {
+        s.push_str(" (attached now with Code in workspace: Umbrous may edit files and run commands there, as you, without a sandbox)");
+    }
+    if own {
+        s.push_str(". This is Umbrous's own source: changes take effect only after a rebuild and restart");
+    }
+    Some(s + ".")
 }
 
 /// One line summing up a task report (M4), for the reply's meta line, and
@@ -458,6 +527,16 @@ pub fn report_line(rep: &Value) -> Option<(String, bool)> {
             "task_time" => "time limit reached".into(),
             other => format!("{other} limit reached"),
         });
+    }
+    // M9: what a coding task changed and ran
+    let changes = len("changes");
+    let cmds: Vec<&Value> = rep.get("commands").and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default();
+    if changes > 0 || !cmds.is_empty() {
+        let bad = cmds.iter().filter(|c| c.get("status").and_then(Value::as_str) != Some("exited")
+                                       || c.get("exit").and_then(Value::as_i64) != Some(0)).count();
+        parts.push(format!("{changes} change{}", if changes == 1 { "" } else { "s" }));
+        parts.push(format!("{} command{}{}", cmds.len(), if cmds.len() == 1 { "" } else { "s" },
+                           if bad > 0 { format!(" ({bad} not passing)") } else { String::new() }));
     }
     let unc = len("uncertainty");
     if unc > 0 {
@@ -500,6 +579,9 @@ pub struct Models {
 pub struct AccessWorkspace {
     pub name: String,
     pub profile: String,
+    /// M9: the folder, shown in Access and checked by the e2e driver
+    #[serde(default)]
+    pub root: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -524,6 +606,35 @@ pub struct Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_line_counts_changes_and_commands() {
+        let rep = json!({"status": "completed", "steps": 7, "tool_calls": 6, "actions": {"completed": 6},
+                         "changes": [{"path": "calc.py"}, {"path": "calc.py"}],
+                         "commands": [{"status": "exited", "exit": 1}, {"status": "exited", "exit": 0}]});
+        assert_eq!(report_line(&rep).unwrap().0,
+                   "Task completed · 7 steps · 6 of 6 actions completed · 2 changes · 2 commands (1 not passing)");
+        let rep = json!({"status": "completed", "steps": 2, "tool_calls": 1, "actions": {"completed": 1},
+                         "changes": [], "commands": [{"status": "timed_out", "exit": null}]});
+        assert_eq!(report_line(&rep).unwrap().0,
+                   "Task completed · 2 steps · 1 of 1 actions completed · 0 changes · 1 command (1 not passing)");
+    }
+
+    #[test]
+    fn step_labels_and_folder_notes() {
+        assert_eq!(step_label("edit_file", &json!({"path": "calc.py"})), "editing calc.py");
+        assert_eq!(step_label("run_command", &json!({"command": "python3  -m\nunittest"})), "running python3 -m unittest");
+        assert_eq!(step_label("read_file", &json!({})), "reading .");
+        assert_eq!(step_label("nope", &json!({})), "running a tool");
+        assert_eq!(folder_note(&json!({"root": "/p", "selected": {"attached": false}, "self_source": false})), None);
+        assert!(folder_note(&json!({"root": "/p", "selected": {"attached": true}})).unwrap().starts_with("Working in /p (attached now"));
+        assert!(folder_note(&json!({"root": "/u", "self_source": true})).unwrap().contains("rebuild and restart"));
+        let r: Resume = serde_json::from_value(json!({"possible": true, "done": [{"tool": "edit_file", "resource": "calc.py"}],
+                                                      "commands_unknown": ["."]})).unwrap();
+        assert_eq!(resume_note(&r).unwrap(), "Already changed (kept, not made again): calc.py. A command was running and may have changed files; it is not re-run by itself.");
+        let plain: Resume = serde_json::from_value(json!({"possible": true})).unwrap();
+        assert_eq!(resume_note(&plain), None);
+    }
 
     #[test]
     fn report_line_sums_up_a_task() {

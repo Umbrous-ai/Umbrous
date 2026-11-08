@@ -43,6 +43,9 @@ pass)     printf '{"expect":"x","ok":true}\n{"record":"end"}\n' > "$OUT"
           fi
           if [ "$name" = m8-reset ]; then  # play the M8 run: two chats, a mixed reset, a fresh chat
             PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-reset "$H/umbrous.db" "${RESET:-good}"
+          fi
+          if [ "$name" = m9-coding ]; then  # play the M9 run: coding, Stop, killed and resumed
+            PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-coding "$H/umbrous.db" "${CODING:-good}"
           fi;;
 assert)   printf '{"expect":"x","ok":true}\n{"step":"expect y","error":"got z"}\n' > "$OUT";;
 noend)    printf '{"expect":"x","ok":true}\n' > "$OUT";;
@@ -231,9 +234,36 @@ class NativeValidationExitStatus(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("FAIL no reset.done in the log", r.stdout)
 
+    # ---- validate-m9.sh
+    def test_m9_only_a_clean_complete_run_passes(self):
+        r = self.run_script("validate-m9.sh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("m9-coding: PASS", r.stdout)
+        for mode, why in (("assert", "a step failed"), ("noend", "did not reach its end"),
+                          ("none", "no results"), ("panic", "m9-coding: the app panicked"),
+                          ("openfail", "could not be launched")):
+            r = self.run_script("validate-m9.sh", mode)
+            self.assertEqual(r.returncode, 1, (mode, r.stdout))
+            self.assertIn(why, r.stdout, mode)
+            self.assertIn("m9-coding: FAIL", r.stdout, mode)
+
+    def test_m9_checks_the_projects_and_the_records(self):
+        for kind, why in (("duplicated", "FAIL project"), ("unfixed", "FAIL project"), ("tmp-left", "FAIL project"),
+                          ("redone", "FAIL task records"), ("command-ok", "FAIL task records"),
+                          ("not-stopped", "FAIL task records")):
+            r = self.run_script("validate-m9.sh", CODING=kind)
+            self.assertEqual(r.returncode, 1, (kind, r.stdout + r.stderr))
+            self.assertIn(why, r.stdout, kind)
+            self.assertIn("m9-coding: FAIL", r.stdout, kind)
+
+    def test_native_fails_on_an_m9_failure(self):
+        r = self.run_script("validate-native.sh", "assert", bad="m9-coding")
+        self.assertEqual(r.returncode, 1, r.stdout[-2000:])
+        self.assertIn("FAIL validate-m9.sh", r.stdout)
+
     def test_usage_errors(self):
         for script in ("validate-m3.sh", "validate-m4.sh", "validate-m5.sh", "validate-m6.sh", "validate-m7.sh",
-                       "validate-m8.sh", "validate-native.sh"):
+                       "validate-m8.sh", "validate-m9.sh", "validate-native.sh"):
             self.assertEqual(self.run_script(script, args=[]).returncode, 2, script)
 
     # ---- validate-native.sh, the whole run
@@ -534,8 +564,71 @@ def seed_reset(db_path: str, kind: str) -> None:
     sys.exit(0)
 
 
+def seed_coding(db_path: str, kind: str) -> None:
+    """What the M9 scenario leaves: both projects fixed (one multiply each), and
+    the task records of coding, Stop, the killed task and its resume. Any other
+    `kind` breaks one thing for the checks to catch."""
+    import sys
+    import time
+    from tests.test_m9_coding import FIXED
+    from umbrous.persistence import db
+    from umbrous.receipts.model import new_action_id, new_task_id
+    from umbrous.tasks.store import TaskStore
+    path = Path(db_path)
+    work = path.parent.parent
+    for name in ("a", "b"):
+        calc = work / "m9-fixture" / name / "proj" / "calc.py"
+        text = FIXED
+        if name == "b" and kind == "duplicated":
+            text = FIXED + "\n\ndef multiply(a, b):\n    return a * b\n"
+        if name == "b" and kind == "unfixed":
+            text = FIXED.replace("a * b", "a + b")
+        calc.write_text(text)
+        if name == "b" and kind == "tmp-left":
+            (calc.parent / ".umbrous-tmp-0011aabb").write_text(text)
+    db.connect(path).close()
+    store = TaskStore(path)
+    b = os.path.realpath(work / "m9-fixture" / "b" / "proj")
+    ids = []
+    for status, code, ws in (("completed", None, os.path.realpath(work / "m9-fixture" / "a" / "proj")),
+                             ("cancelled", "cancelled", None), ("unknown", "interrupted", b), ("completed", None, b)):
+        tid = new_task_id()
+        ids.append(tid)
+        store.create(tid, "prj_general", None, "coder:3b", {}, workspace=ws)
+        store.set_status(tid, "started")
+        if status == "unknown":
+            store.recover_task(tid, "unknown", "interrupted")
+        else:
+            store.set_status(tid, status, code)
+        time.sleep(0.01)
+    cut, resumed = ids[2], ids[3]
+    e, r = new_action_id(), new_action_id()
+    store.add_action(cut, e, 1, "edit_file", "calc.py")
+    store.action_status(e, "started")
+    store.event(cut, "write.intent", e, path="calc.py")
+    store.action_status(e, "completed", "ok")
+    store.add_action(cut, r, 2, "run_command", ".")
+    store.action_status(r, "started")
+    if kind != "command-ok":
+        store.recover_action(r, "unknown", "interrupted")
+    else:
+        store.action_status(r, "completed", "ok")
+    if kind != "not-stopped":
+        store.event(cut, "command.stopped_after_restart", r, pid=4242)
+    for n in range(2 if kind == "redone" else 1):
+        a = new_action_id()
+        store.add_action(resumed, a, 1 + n, "edit_file", "calc.py")
+        store.event(resumed, "write.intent", a, path="calc.py")
+    store.artifact(resumed, "report", {"changes": [{"path": "calc.py", "op": "edited"}],
+                                       "commands": [{"command": "python3 -B -m unittest -q test_calc", "exit": 1},
+                                                    {"command": "python3 -B -m unittest -q test_calc", "exit": 0}]})
+    sys.exit(0)
+
+
 if __name__ == "__main__":
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "seed-coding":
+        seed_coding(sys.argv[2], sys.argv[3])
     if len(sys.argv) > 1 and sys.argv[1] == "seed-tasks":
         seed_tasks(sys.argv[2], sys.argv[3])
     if len(sys.argv) > 1 and sys.argv[1] == "seed-resume":

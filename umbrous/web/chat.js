@@ -346,8 +346,11 @@
   // you here, runs it, and writes a receipt. Everything below shows what the
   // gate did; nothing in the page can run a tool itself. File names and search
   // words come from the model or your files, so they are shown as text only.
-  const TOOL_ICON = { list_files: 'folder', read_file: 'doc', search_files: 'search' };
-  const ACTION_TOOL = { 'fs.list': 'list_files', 'fs.read': 'read_file', 'fs.search': 'search_files' };
+  const TOOL_ICON = { list_files: 'folder', read_file: 'doc', search_files: 'search', find_files: 'search',
+    write_file: 'pen', edit_file: 'pen', run_command: 'terminal', check_command: 'terminal' };
+  const ACTION_TOOL = { 'fs.list': 'list_files', 'fs.read': 'read_file', 'fs.search': 'search_files',
+    'fs.find': 'find_files', 'fs.write': 'write_file', 'fs.edit': 'edit_file', 'cmd.run': 'run_command',
+    'cmd.check': 'check_command' };
   const DECISION_WORD = { denied: 'Blocked', failed: 'Failed', uncertain: 'Unclear', cancelled: 'Not run' };
   function clip(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
   function stepLabel(tool, args) {
@@ -355,6 +358,12 @@
     if (tool === 'read_file') return 'Read ' + clip(args.path || '?', 80) + (args.start_line ? ' from line ' + args.start_line : '');
     if (tool === 'list_files') return 'List ' + clip(args.path || 'the workspace folder', 80);
     if (tool === 'search_files') return 'Search for “' + clip(args.query || '', 60) + '”' + (args.path ? ' in ' + clip(args.path, 60) : '');
+    // M9
+    if (tool === 'find_files') return 'Find files named “' + clip(args.pattern || '', 60) + '”' + (args.path ? ' in ' + clip(args.path, 60) : '');
+    if (tool === 'write_file') return (args.expected_sha256 ? 'Replace ' : 'Write ') + clip(args.path || '?', 80);
+    if (tool === 'edit_file') return 'Edit ' + clip(args.path || '?', 80);
+    if (tool === 'run_command') return 'Run ' + clip(String(args.command || '?').replace(/\s+/g, ' '), 100) + (args.background ? ' (in the background)' : '');
+    if (tool === 'check_command') return (args.stop ? 'Stop command ' : 'Check command ') + clip(args.id || '?', 20);
     return 'Unknown tool ' + clip(tool || '?', 40);
   }
   function stepRow(tool, label) {
@@ -372,6 +381,35 @@
     }
     const word = DECISION_WORD[decision];
     row.querySelector('.why').textContent = '· ' + clip([word ? word + ': ' + summary : summary, notice].filter(Boolean).join(' '), 200);
+  }
+  // M9: a change's diff or a command's output, folded under its step. Text only.
+  function stepDetail(row, ev) {
+    if (!ev.detail) return;
+    const o = ev.observed || {};
+    const d = document.createElement('details');
+    d.className = 'step-detail';
+    const sum = el('summary', '', o.command ? 'Output' + (o.exit != null ? ' (exit ' + o.exit + ')' : '') : 'Changes');
+    d.appendChild(sum);
+    const pre = el('pre', o.command ? 'out' : 'diff');
+    if (o.command) pre.textContent = ev.detail;
+    else ev.detail.split('\n').forEach((line, i) => {
+      if (i) pre.appendChild(document.createTextNode('\n'));
+      const c = line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'del' : '';
+      pre.appendChild(c ? el('span', c, line) : document.createTextNode(line));
+    });
+    d.appendChild(pre);
+    row.after(d);
+  }
+  function folderLine(tools) {
+    if (!tools || !tools.root) return null;
+    const line = el('div', 'notice small folder-line');
+    line.appendChild(icon('folder'));
+    line.appendChild(document.createTextNode(' ' + (tools.coding ? 'Working in ' : 'Reading in ')));
+    line.appendChild(el('code', '', tools.root));
+    const sel = tools.selected;
+    if (sel && sel.attached) line.appendChild(document.createTextNode(' (attached now, with the Code in workspace profile: it may edit files and run commands here)'));
+    if (tools.self_source) line.appendChild(document.createTextNode(' · This is Umbrous’s own source: changes take effect only after a rebuild and restart.'));
+    return line;
   }
   function sourcesLine(evidence) {
     const files = [];
@@ -394,7 +432,9 @@
   function approvalCard(ev) {
     const card = el('div', 'approval');
     card.dataset.approvalId = ev.approval_id;
-    card.appendChild(el('div', 'ttl', 'Allow this read?'));
+    const kind = /^cmd\./.test(ev.action) ? 'command' : /^fs\.(write|edit)$/.test(ev.action) ? 'change' : 'read';
+    card.appendChild(el('div', 'ttl', kind === 'command' ? 'Run this command?' : kind === 'change' ? 'Allow this change?' : 'Allow this read?'));
+    if (kind === 'command') card.appendChild(el('div', 'acc-note', 'It runs as you, in the workspace folder, and is not sandboxed: it can do anything you can.'));
     const what = el('div', '', 'The model wants to ' + stepLabel(ev.tool, ev.args).replace(/^./, (c) => c.toLowerCase()) + '. ');
     card.appendChild(what);
     const scope = el('div', '');
@@ -423,7 +463,9 @@
       acts.appendChild(b);
     };
     btn('Approve once', 'once', 'Approved once, for exactly this request.', 'primary');
-    btn('Allow ' + (ev.action === 'fs.read' ? 'reads' : ev.action === 'fs.list' ? 'listing' : 'searches') + ' in this project', 'grant',
+    const GRANT_WORD = { 'fs.read': 'reads', 'fs.list': 'listing', 'fs.search': 'searches', 'fs.find': 'finding files',
+      'fs.write': 'writing files', 'fs.edit': 'edits', 'cmd.run': 'commands', 'cmd.check': 'command checks' };
+    btn('Allow ' + (GRANT_WORD[ev.action] || 'this') + ' in this project', 'grant',
         'Allowed for this project until you revoke it in Details › Access.');
     btn('Deny', 'deny', 'Denied. The model was told it may not do this.');
     card.append(acts, status);
@@ -462,6 +504,18 @@
       if (items.length > 8) d.appendChild(el('div', 'tr-item', `and ${items.length - 8} more (see Trace)`));
       box.appendChild(d);
     };
+    // M9: what a coding task changed and ran
+    const ch = rep.changes || [], cm = rep.commands || [];
+    if (ch.length || cm.length) {
+      const failed = cm.filter((c) => c.status !== 'exited' || c.exit !== 0).length;
+      head.firstChild.textContent += ' · ' + ch.length + (ch.length === 1 ? ' change' : ' changes') + ' · ' +
+        cm.length + (cm.length === 1 ? ' command' : ' commands') + (failed ? ' (' + failed + ' not passing)' : '');
+    }
+    list('Changed', ch.map((c) => `${c.op} ${c.path}` + (c.added != null ? ` (+${c.added} −${c.removed})` : '') +
+      (c.recovered ? ' (found on disk after a restart)' : '')), 'chg');
+    list('Ran', cm.map((c) => `${c.command} · ` + (c.status === 'exited' ? 'exit ' + c.exit : c.status.replace(/_/g, ' ')) +
+      (c.ms != null ? ` (${(c.ms / 1000).toFixed(1)}s)` : '')), 'cmd');
+    if (rep.workspace) box.appendChild(el('div', 'tr-item', 'Folder: ' + rep.workspace));
     list('Did not complete', (rep.failures || []).map((f) => `${f.tool} ${f.resource}: ${f.status} (${f.code}) ${f.message || ''}`), 'fail');
     list('Not fully checked', rep.uncertainty || [], 'unc');
     if (rep.status === 'completed' && !(rep.failures || []).length && !(rep.uncertainty || []).length)
@@ -617,7 +671,10 @@
     }
     box.appendChild(err);
     box.appendChild(el('div', 'acc-note', 'Always blocked: ' + v.always_blocked));
-    box.appendChild(el('div', 'acc-note', 'Read-only. This is a permission check inside Umbrous, not an operating-system sandbox.'));
+    const coding = ws && /^(workspace_code|code_ask_commands)$/.test(ws.profile);
+    box.appendChild(el('div', 'acc-note', coding
+      ? 'Files here can be changed, and commands run as you, in this folder. Paths are checked by Umbrous, but commands are not sandboxed by the operating system: a command can do anything you can.'
+      : 'Read-only. This is a permission check inside Umbrous, not an operating-system sandbox.'));
   }
 
   // ---------- M6: memory ----------
@@ -1135,6 +1192,11 @@
     head.appendChild(b);
     reply.appendChild(head);
     reply.appendChild(el('div', 'reply-meta', task.resume.message));
+    const rs = task.resume;   // M9: what resuming a coding task will build on
+    if (rs.workspace) reply.appendChild(el('div', 'reply-meta', 'Folder: ' + rs.workspace));
+    if ((rs.done || []).length) reply.appendChild(el('div', 'reply-meta', 'Already changed (kept, not made again): ' + rs.done.map((d) => d.resource).join(', ')));
+    if ((rs.conflicts || []).length) reply.appendChild(el('div', 'reply-meta warn', 'Changed by something else meanwhile (left alone): ' + rs.conflicts.join(', ')));
+    if ((rs.commands_unknown || []).length) reply.appendChild(el('div', 'reply-meta warn', 'A command was running and may have changed files; it is not re-run by itself.'));
     const tr = taskReport(task.report);
     if (tr) reply.appendChild(tr);
     t.append(u, reply);
@@ -1280,6 +1342,9 @@
             showContext(ev.context);
             const notes = ev.context.notices.slice();
             if (ev.tools && ev.tools.off_reason) notes.push(ev.tools.off_reason);
+            const fl = folderLine(ev.tools);   // M9: the folder this task works in
+            if (fl) reply.insertBefore(fl, ctxNote);
+            if (ev.tools && ev.tools.selected && ev.tools.selected.attached) loadAccess();
             if (ev.memory) {
               showMemoryUsed(ev.memory);
               memEl = memoryLine(ev.memory.used.map((m) => m.id));
@@ -1303,7 +1368,7 @@
           } else if (ev.type === 'tool_result') {
             closeApprovals(steps, 'Answered.');
             const row = pending.shift();
-            if (row) { settleStep(row, ev.decision, ev.summary || ev.message, ev.notice); row.title = ev.receipt_id; }
+            if (row) { settleStep(row, ev.decision, ev.summary || ev.message, ev.notice); row.title = ev.receipt_id; stepDetail(row, ev); }
             meta.textContent = selected + ' is answering…';
           } else if (ev.type === 'delta') {
             answer.appendChild(document.createTextNode(ev.text));

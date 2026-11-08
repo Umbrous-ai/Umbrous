@@ -267,6 +267,24 @@ MIGRATIONS = (
     );
     CREATE INDEX memory_candidates_by_project ON memory_candidates (project_id, status, created_at);
     """,
+    # version 9 (M9): the folder a task worked in, so resuming it can check the
+    # project still uses that folder before anything runs again; and the two
+    # coding profiles. SQLite cannot change a CHECK in place, so the small
+    # workspaces table is rebuilt with its rows copied unchanged.
+    """
+    ALTER TABLE tasks ADD COLUMN workspace TEXT;
+    CREATE TABLE workspaces_m9 (
+        project_id  TEXT PRIMARY KEY REFERENCES projects(id),
+        root        TEXT NOT NULL,
+        profile     TEXT NOT NULL CHECK (profile IN ('workspace_read', 'ask_before_read',
+                                                     'workspace_code', 'code_ask_commands')),
+        attached_at TEXT NOT NULL
+    );
+    INSERT INTO workspaces_m9 (project_id, root, profile, attached_at)
+        SELECT project_id, root, profile, attached_at FROM workspaces;
+    DROP TABLE workspaces;
+    ALTER TABLE workspaces_m9 RENAME TO workspaces;
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

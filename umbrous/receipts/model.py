@@ -22,7 +22,8 @@ from umbrous.receipts.redaction import Redactor, default_redactor
 
 FORMAT_VERSION = 1
 DECISIONS = ("allowed", "denied", "failed", "uncertain")
-EVIDENCE_KINDS = ("file", "directory", "search", "url", "tool_result", "other")
+EVIDENCE_KINDS = ("file", "directory", "search", "url", "tool_result", "other",
+                  "change", "command")   # M9: a file changed (path, hash after); a command run (its text, redacted)
 
 # Small limits on every free-text field. They are there to make it awkward to
 # smuggle content (a file body, a prompt) into a receipt by accident.

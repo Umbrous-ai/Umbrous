@@ -67,7 +67,7 @@ MAX_LIST = 20
 
 class TaskRun:
     def __init__(self, store: Optional[TaskStore], task_id: str, project_id: Optional[str], chat_id: Optional[str],
-                 model: str, limits: Dict[str, int]) -> None:
+                 model: str, limits: Dict[str, int], workspace: Optional[str] = None) -> None:
         self.store = store
         self.task_id = task_id
         self.limits = dict(limits)
@@ -91,7 +91,12 @@ class TaskRun:
         # M7: what Observe + Verify suggested for memory (ids, stores, kinds,
         # counts dropped; never the text). Set before finish().
         self.memory_suggestions: Optional[dict] = None
-        self._safe(store.create if store else None, task_id, project_id, chat_id, model, self.limits)
+        # M9: what the task changed and ran, from the tools' own results (never the model's text).
+        self.workspace = workspace
+        self.changes: List[dict] = []
+        self.commands: List[dict] = []
+        self.notes_end: List[str] = []       # said after the checks below (self-source, stopped commands)
+        self._safe(store.create if store else None, task_id, project_id, chat_id, model, self.limits, workspace)
         self._safe(store.set_status if store else None, task_id, "started")
 
     def _safe(self, fn, *args, **kw) -> None:
@@ -139,6 +144,17 @@ class TaskRun:
         self.actions[action_id] = {"tool": tool_s, "resource": resource, "status": "requested", "step": self.step}
         self._safe(self.store and self.store.add_action, self.task_id, action_id, self.step, tool_s, resource)
 
+    def intent(self, action_id: str, data: dict) -> None:
+        """M9: record what a change or command is about to do, BEFORE it is done.
+        Not `_safe`: if this cannot be recorded, the tool must not act (it raises)."""
+        if self.store is None:
+            return
+        kind = "command.intent" if data.get("op") == "command" else "write.intent"
+        self.store.event(self.task_id, kind, action_id, **data)
+
+    def command_started(self, action_id: str, data: dict) -> None:
+        self._safe(self.store and self.store.event, self.task_id, "command.started", action_id, **data)
+
     def action_started(self, action_id: str) -> None:
         self.actions[action_id]["status"] = "started"
         self._safe(self.store and self.store.action_status, action_id, "started")
@@ -155,6 +171,19 @@ class TaskRun:
         where = f"{a['tool']} {a['resource']}"
         place = "the workspace folder" if a["resource"] == "." else a["resource"]
         if status == "completed":
+            o9 = observed or {}
+            if o9.get("op") and o9.get("path"):
+                if len(self.changes) < 100:
+                    self.changes.append({"action_id": action_id, "path": o9["path"], "op": o9["op"],
+                                         "before": o9.get("before"), "after": o9.get("after"),
+                                         "added": o9.get("added", 0), "removed": o9.get("removed", 0),
+                                         "step": a["step"]})
+            elif o9.get("command"):
+                if len(self.commands) < 100:
+                    self.commands.append({"action_id": action_id, "command": o9["command"], "status": o9.get("status"),
+                                          "exit": o9.get("exit"), "ms": o9.get("ms"), "cmd_id": o9.get("cmd_id"),
+                                          "check": bool(o9.get("check")), "step": a["step"],
+                                          "after_change": len(self.changes)})
             self.evidence.extend(evidence)
             for e in evidence:
                 if e.get("kind") != "file":
@@ -227,8 +256,31 @@ class TaskRun:
             else:
                 self.note(f"{path} is unchanged since the interrupted attempt read it.")
 
+    def check_work(self) -> None:
+        """M9: what the record says about the work, so the report never takes the
+        model's word for it: a command whose last run failed, changes made after
+        the last command, changes never checked by any command."""
+        real = [c for c in self.commands if c["status"] in ("exited", "timed_out", "stopped")]
+        last: Dict[str, dict] = {}
+        for c in real:
+            last[c["command"]] = c
+        for cmd, c in list(last.items())[:10]:
+            if c["status"] == "exited" and c["exit"] not in (0, None):
+                self.note(f"The last run of `{cmd[:80]}` exited with status {c['exit']}.")
+            elif c["status"] == "timed_out":
+                self.note(f"`{cmd[:80]}` did not finish within its time limit and was stopped.")
+        changed = [x for x in self.changes if x["op"] in ("created", "replaced", "edited")]
+        if changed and not real:
+            self.note(f"{len(changed)} file change(s) were made, and no command was run to check them.")
+        elif changed and real and max(c["after_change"] for c in real) < len(self.changes):
+            later = len(self.changes) - max(c["after_change"] for c in real)
+            self.note(f"{later} change(s) were made after the last command, so no command checked them.")
+        for n in self.notes_end:
+            self.note(n)
+
     def finish(self, status: str, code: Optional[str], answer: str = "") -> dict:
         self.compare_with_previous()
+        self.check_work()
         if status == "completed":
             self.verify(answer)
         report = {
@@ -239,6 +291,13 @@ class TaskRun:
         }
         if self.resume_of:
             report["resume_of"] = self.resume_of
+        if self.workspace:
+            report["workspace"] = self.workspace
+        if self.changes or self.commands:
+            report["changes"] = [{k: c[k] for k in ("path", "op", "before", "after", "added", "removed")}
+                                 for c in self.changes][:50]
+            report["commands"] = [{k: c[k] for k in ("command", "status", "exit", "ms", "check")}
+                                  for c in self.commands][:50]
         if self.memory_suggestions is not None:
             report["memory_candidates"] = self.memory_suggestions
             self._safe(self.store and self.store.event, self.task_id, "memory.suggested",

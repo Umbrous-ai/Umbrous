@@ -1,11 +1,12 @@
 # Umbrous
 
-A local-first agent harness. Status: **M8, selective start-fresh reset: choose chats and memory, see exactly what goes and what stays, and only that is deleted** (built on M6's memory and M7's write review; this completes the controlled-memory stage of the milestone plan).
+A local-first agent harness. Status: **M9, coding in a project folder: Umbrous edits files, runs the project's commands, fixes what fails, and continues an interrupted coding task without losing or repeating its changes** (built on M5's recovery; commands run as you and are not sandboxed, see docs/m9-coding.md).
 
 ```sh
 bin/umbrous          # start the local runtime and open the app (Python 3.9+, no dependencies)
 bin/umbrous models   # installed Ollama models, tool-call labels, exposure check
 bin/umbrous workspace PROJECT FOLDER   # give a project's chats read-only access to one folder
+bin/umbrous workspace PROJECT FOLDER --profile workspace_code   # or let them edit files and run commands there (M9)
 bin/umbrous receipts --last 10         # what tools did
 bin/umbrous tasks --last 10            # tasks: steps, actions, how each ended (--task ID for the trace)
 bin/umbrous memory                     # personal and project memory (add, edit, delete)
@@ -24,6 +25,7 @@ desktop/scripts/build-native.sh   # build dist/Umbrous.app and its .dmg (docs/de
 - [docs/m6-memory.md](docs/m6-memory.md): personal and project memory, retrieval vs training, project isolation, why deleting memory does not rewrite old chats
 - [docs/m7-review.md](docs/m7-review.md): suggestions after a task, the review queue, provenance (your words vs the reply), accept, edit, reject, duplicates
 - [docs/m8-reset.md](docs/m8-reset.md): Start fresh: preview, cancel, a changed preview, what stays (task records, receipts, backups), derived caches
+- [docs/m9-coding.md](docs/m9-coding.md): coding in a folder: "work on /path", the edit and command tools, conflicts, the coding loop and report, recovery and resume of changes and commands, working on Umbrous itself, what is not sandboxed
 - [docs/desktop.md](docs/desktop.md): Umbrous.app for macOS (native GPUI interface, bundled Python): build, validation, measurements, limits
 - [docs/receipts.md](docs/receipts.md): receipt format and redaction rules
 - [prototypes/](prototypes/): the front-end prototype the app is built on

@@ -350,6 +350,70 @@ def suggest_answer(messages: list) -> str:
     return json.dumps({"candidates": out})
 
 
+CODER_TEST = "python3 -B -m unittest -q test_calc"   # -B: no stale .pyc when an edit keeps the size
+
+
+def _steps(messages: list) -> list:
+    """The tool calls of a conversation with their results: [(name, args, result text)]."""
+    out, pending = [], []
+    for x in messages:
+        if x.get("role") == "assistant" and x.get("tool_calls"):
+            pending = [(c["function"]["name"], c["function"].get("arguments") or {}) for c in x["tool_calls"]]
+        elif x.get("role") == "tool" and pending:
+            name, args = pending.pop(0)
+            out.append((name, args, x.get("content") or ""))
+    return out
+
+
+def coder(test_command: str = CODER_TEST) -> Callable[[list], dict]:
+    """M9: a stand-in for a coding model, for the demo and tests. Asked to add a
+    multiply function to calc.py (the fixture from tests/test_m9_coding.py), it
+    looks around, reads calc.py, adds multiply with a deliberate bug, runs the
+    tests, reads the failure, fixes the bug, runs them again and reports. It
+    decides each step from what the tools returned, not from a fixed script,
+    so after an interruption it continues from the files as they are."""
+    def agent(messages):
+        steps = _steps(messages)
+        no_tools = messages and messages[-1].get("content") == "__no_tools__"
+        names = [n for n, _, _ in steps]
+        if no_tools:
+            return {"content": "I could not finish: no tools are available."}
+        if "find_files" not in names:
+            return {"tool_calls": [("find_files", {"pattern": "*.py"})]}
+        reads = [r for n, a, r in steps if n == "read_file" and a.get("path") == "calc.py"]
+        if not reads:
+            return {"tool_calls": [("read_file", {"path": "calc.py"})]}
+        if not reads[-1].startswith("UNTRUSTED"):
+            return {"content": f"I could not read calc.py: {reads[-1]}"}
+        text = "\n".join(re.sub(r"^\d+: ", "", l) for l in data_lines(reads[-1]))
+        edits = [(a, r) for n, a, r in steps if n == "edit_file"]
+        runs = [(i, r) for i, (n, _, r) in enumerate(steps) if n == "run_command"]
+        last_edit = max([i for i, (n, _, _) in enumerate(steps) if n == "edit_file"] or [-1])
+        has_multiply = "def multiply" in text or any(r.startswith("UNTRUSTED") and "def multiply" in a["new_text"]
+                                                     for a, r in edits)
+        if not has_multiply:
+            return {"tool_calls": [("edit_file", {"path": "calc.py", "old_text": "# TODO: multiply\n",
+                                                   "new_text": "def multiply(a, b):\n    return a + b\n"})]}
+        for a, r in edits:
+            if not r.startswith("UNTRUSTED"):
+                return {"content": f"I could not change calc.py: {r}"}
+        if not runs or runs[-1][0] < last_edit:
+            return {"tool_calls": [("run_command", {"command": test_command, "timeout_s": 60})]}
+        last = runs[-1][1]
+        if "exited with status 0" in last:
+            changed = sorted({a["path"] for a, r in edits})
+            return {"content": f"Done. I added multiply to calc.py and fixed a bug in it; `{test_command}` now "
+                               f"passes (exit 0). Changed: {', '.join(changed) or 'nothing in this attempt'}."}
+        fixed = any("a * b" in a["new_text"] for a, _ in edits)
+        if not fixed and "def multiply(a, b):\n    return a + b" in text + "".join(a["new_text"] for a, _ in edits):
+            return {"tool_calls": [("edit_file", {"path": "calc.py",
+                                                   "old_text": "def multiply(a, b):\n    return a + b",
+                                                   "new_text": "def multiply(a, b):\n    return a * b"})]}
+        tail = " | ".join(l for l in data_lines(last) if l.strip())[-300:]
+        return {"content": f"Blocked: the tests still fail after my fix. Last output: {tail}"}
+    return agent
+
+
 def demo_models() -> List[FakeModel]:
     """The models the browser check and the demo use."""
     return [
@@ -369,6 +433,8 @@ def demo_models() -> List[FakeModel]:
         FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer),
         # M7: a task that names its memory, then suggests things to remember (suggest_answer).
         FakeModel("memory-notes:3b", chunk_delay=0.02, agent=notes_agent),
+        # M9: edits calc.py, runs the tests, reads the failure, fixes it and finishes.
+        FakeModel("coder:3b", chunk_delay=0.01, agent=coder()),
     ]
 
 

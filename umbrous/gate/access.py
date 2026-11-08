@@ -26,21 +26,47 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
-CAPABILITIES = ("fs.list", "fs.read", "fs.search")
+CAPABILITIES = ("fs.list", "fs.read", "fs.search", "fs.find", "fs.write", "fs.edit", "cmd.run", "cmd.check")
 ALLOW, ASK, BLOCK = "allow", "ask", "block"
+READS = ("fs.list", "fs.read", "fs.search", "fs.find")
+WRITES = ("fs.write", "fs.edit")
+COMMANDS = ("cmd.run", "cmd.check")
+
+
+def _rules(reads: str, writes: str, commands: str) -> Dict[str, str]:
+    # checking or stopping a command this task already started needs no second approval
+    return dict({a: reads for a in READS}, **{a: writes for a in WRITES}, **{"cmd.run": commands},
+                **{"cmd.check": BLOCK if commands == BLOCK else ALLOW})
+
 
 PROFILES: Dict[str, dict] = {
     "workspace_read": {
         "label": "Workspace read",
-        "description": "List, read and search files inside the workspace without asking.",
-        "rules": {"fs.list": ALLOW, "fs.read": ALLOW, "fs.search": ALLOW},
+        "description": "List, read and search files inside the workspace without asking. No changes, no commands.",
+        "rules": _rules(ALLOW, BLOCK, BLOCK),
     },
     "ask_before_read": {
         "label": "Ask before read",
-        "description": "Ask before every list, read or search (approve once, or allow for this project).",
-        "rules": {"fs.list": ASK, "fs.read": ASK, "fs.search": ASK},
+        "description": "Ask before every list, read or search (approve once, or allow for this project). "
+                       "No changes, no commands.",
+        "rules": _rules(ASK, BLOCK, BLOCK),
+    },
+    # M9: coding. Chosen by you: in Access, with `bin/umbrous workspace --profile`, or by naming
+    # the folder in a message ("work on /path/to/project"). Commands run as you: not a sandbox.
+    "workspace_code": {
+        "label": "Code in workspace",
+        "description": "Read, create and edit files inside the workspace, and run commands in it, without asking. "
+                       "Commands run as you, with your permissions: this is not a sandbox.",
+        "rules": _rules(ALLOW, ALLOW, ALLOW),
+    },
+    "code_ask_commands": {
+        "label": "Code, ask before commands",
+        "description": "Read, create and edit files inside the workspace without asking; ask before each command "
+                       "(approve once, or allow for this project).",
+        "rules": _rules(ALLOW, ALLOW, ASK),
     },
 }
+CODING_PROFILES = ("workspace_code", "code_ask_commands")
 DEFAULT_PROFILE = "workspace_read"
 
 

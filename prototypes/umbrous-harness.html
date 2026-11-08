@@ -150,6 +150,13 @@ textarea:focus-visible,input:focus-visible{outline:none}
 .task-report .tr-title{color:var(--text-default);margin-top:6px}
 .task-report .tr-list.fail .tr-item{color:var(--warning)}
 .task-report .tr-item{padding-left:10px}
+.step-detail{margin:0 0 4px 22px;font-size:var(--fs-12);color:var(--text-subtle)}
+.step-detail summary{cursor:pointer}
+.step-detail pre{max-height:240px;overflow:auto;background:var(--bg-subtle,rgba(127,127,127,.08));padding:6px 8px;border-radius:6px;white-space:pre-wrap;word-break:break-word;margin:4px 0}
+.step-detail .add{color:var(--success,#2e7d32)}
+.step-detail .del{color:var(--warning)}
+.folder-line{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.folder-line .i{width:13px;height:13px}
 .linkish{background:none;border:0;padding:0;font:inherit;color:var(--text-default);text-decoration:underline;cursor:pointer}
 .trace-list{list-style:none;margin:6px 0;padding:0;font-size:var(--fs-12)}
 .trace-ev{padding:2px 0;color:var(--text-subtle)}.trace-ev .k{color:var(--text-default)}

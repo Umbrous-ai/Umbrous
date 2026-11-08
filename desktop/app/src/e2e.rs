@@ -358,6 +358,12 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             // until the last reply's meta line contains the text (e.g. a running step)
             wait_until(cx, window, 60, "meta", |ws| ws.msgs.last().map(|m| m.meta.contains(arg)).unwrap_or(false)).await?;
         }
+        "wait_profile" => {
+            // until the selected project's access shows this profile (M9: "work on <folder>" attached one)
+            let want = arg.to_string();
+            wait_until(cx, window, 15, "profile", move |ws| ws.access.as_ref().and_then(|a| a.workspace.as_ref())
+                .map(|w| w.profile == want).unwrap_or(false)).await?;
+        }
         "wait_idle" => {
             wait_until(cx, window, arg.parse().unwrap_or(60), "no reply running", |ws| !ws.is_running()).await?;
         }
@@ -378,6 +384,9 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "sessions" | "sessions_lack" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),
                 "opening" => ws.opening_title().unwrap_or_else(|| "none".into()),
                 "interrupted" => ws.interrupted.as_ref().map(|i| i.text.clone()).unwrap_or_else(|| "none".into()),
+                "interrupted_note" => ws.interrupted.as_ref().map(|i| i.note.clone()).unwrap_or_else(|| "none".into()),
+                "notice" => ws.notice.as_ref().map(|n| n.0.clone()).unwrap_or_else(|| "none".into()),
+                "access_root" => ws.access.as_ref().and_then(|a| a.workspace.as_ref()).map(|w| w.root.clone()).unwrap_or_else(|| "none".into()),
                 "last_text_lacks" => (!ws.msgs.last().map(|m| m.text.contains(val)).unwrap_or(false)).to_string(),
                 "reply_metas" => ws.msgs.iter().filter(|m| m.role == Role::Assistant).map(|m| m.meta.clone()).collect::<Vec<_>>().join(" | "),
                 "memory" => memory_texts(ws).join(" | "),
@@ -408,6 +417,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "candidates" => got.is_empty(),
                 "last_text_lacks" => got == "true",
                 "interrupted" if val != "none" => got.contains(val),
+                "interrupted_note" | "notice" | "access_root" if val != "none" => got.contains(val),
                 "no_text" | "user_meta_empty" => got == "true",
                 "last_text_len_over" => got == "true",
                 _ => got == val,

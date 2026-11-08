@@ -39,6 +39,8 @@ _ALLOWED_KEYS = {
     "memory_max_items", "memory_tokens",
     # M7: suggestions for memory after a task
     "memory_suggestions",
+    # M9: coding tasks (a profile that may change files or run commands)
+    "code_task_timeout_s", "code_max_steps", "code_max_tool_calls", "command_timeout_s", "command_timeout_max_s",
 }
 # Integer settings: (minimum, maximum)
 _INT_RANGES = {
@@ -54,6 +56,11 @@ _INT_RANGES = {
     "tool_timeout_s": (1, 3600),
     "memory_max_items": (0, 50),
     "memory_tokens": (0, 8192),
+    "code_task_timeout_s": (1, 86_400),
+    "code_max_steps": (1, 200),
+    "code_max_tool_calls": (1, 1000),
+    "command_timeout_s": (1, 86_400),
+    "command_timeout_max_s": (1, 86_400),
 }
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 
@@ -89,6 +96,14 @@ class Config:
     # M7: after a task, ask the model for things worth remembering; you review
     # each one before anything is written. See docs/m7-review.md.
     memory_suggestions: bool = True
+    # M9: limits for a coding task (the project's profile may change files or
+    # run commands). The same mechanism as task_*; larger, because inspecting,
+    # editing, testing and fixing takes more steps. See docs/m9-coding.md.
+    code_task_timeout_s: int = 3600        # the whole coding task
+    code_max_steps: int = 40               # model steps that may ask for tools
+    code_max_tool_calls: int = 120         # tool calls in the whole task
+    command_timeout_s: int = 120           # a command's default time limit (run_command timeout_s)
+    command_timeout_max_s: int = 1800      # the longest a command may be given (a full build)
 
     @property
     def db_path(self) -> Path:

@@ -273,7 +273,9 @@ class ToolChatTests(unittest.TestCase):
         with self.rt() as rt:
             rt.post_json("/api/models/probe", {"model": "reader:3b"})
             ev = rt.chat(rt.new_chat(), "reader:3b", "read notes/plan.md")
-            self.assertEqual(ev[0]["tools"], {"on": False, "workspace": None, "profile": None, "approvals": False})
+            self.assertEqual({k: ev[0]["tools"][k] for k in ("on", "workspace", "profile", "approvals", "coding", "tools")},
+                         {"on": False, "workspace": None, "profile": None, "approvals": False, "coding": False,
+                          "tools": []})
 
     def test_hostile_file_cannot_expand_access(self):
         with self.rt() as rt:

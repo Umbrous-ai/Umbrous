@@ -86,6 +86,7 @@ from umbrous.memory.store import Memory, MemoryError_
 from umbrous.receipts.store import ReceiptStore
 from umbrous.reset import Reset, ResetError
 from umbrous.runloop.chat import ChatLocks, RunRegistry, run_chat
+from umbrous.tools.run import CommandRegistry
 from umbrous.tasks.recover import recover, resume_info
 from umbrous.tasks.store import TaskStore
 
@@ -176,6 +177,7 @@ class Runtime:
         self.reset = Reset(config.db_path)
         self.chat_locks = ChatLocks()
         self.runs = RunRegistry()
+        self.commands = CommandRegistry()    # M9: commands tasks are running
         self.exposure: Optional[ExposureReport] = None
         self.recovered: list = []      # M5: tasks closed at startup (set by make_server)
         self._ollama_cache = (0.0, None)
@@ -665,7 +667,7 @@ class Handler(BaseHTTPRequestHandler):
                           str(body.get("model", "")), body.get("message"), gate=rt.gate,
                           approvals=body.get("approvals") is True, tasks=rt.tasks,
                           resume_task=body.get("resume_task") if "resume_task" in body else None,
-                          memory=rt.memory, use_memory=body.get("use_memory") is not False, review=rt.review)
+                          memory=rt.memory, use_memory=body.get("use_memory") is not False, review=rt.review, commands=rt.commands)
         self.send_response(200)
         for k, v in BASE_HEADERS.items():
             self.send_header(k, v)
@@ -719,6 +721,9 @@ def make_server(config: Config, schema_version: int, launches: int,
     policy = policy_factory(bound_port)
     runtime = Runtime(config, policy, schema_version, launches, router=router)
     # M5: close tasks a previous run stopped in the middle of, before serving.
-    runtime.recovered = recover(runtime.tasks, runtime.receipts, runtime.history)
+    def workspace_of(project_id: str):
+        ws = runtime.access.workspace(project_id)
+        return ws.root if ws else None
+    runtime.recovered = recover(runtime.tasks, runtime.receipts, runtime.history, workspace_of)
     server.RequestHandlerClass = type("BoundHandler", (Handler,), {"runtime": runtime})
     return server, runtime

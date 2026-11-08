@@ -615,7 +615,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_ws = sub.add_parser("workspace", help="show or set a project's workspace folder and access profile")
     p_ws.add_argument("project", nargs="?", help="project name or id (omit to list all)")
     p_ws.add_argument("root", nargs="?", help="folder to attach")
-    p_ws.add_argument("--profile", choices=["workspace_read", "ask_before_read"])
+    p_ws.add_argument("--profile", choices=["workspace_read", "ask_before_read", "workspace_code", "code_ask_commands"])
     p_ws.add_argument("--detach", action="store_true", help="forget the folder and revoke its grants")
     p_rc = sub.add_parser("receipts", help="show tool receipts")
     p_rc.add_argument("--chat", help="all receipts of one chat (chat_…)")

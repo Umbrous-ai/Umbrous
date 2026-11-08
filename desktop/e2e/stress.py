@@ -6,6 +6,8 @@
     python3 desktop/e2e/stress.py fake-workspace PORT     a fake Ollama whose model reads files with tools (M3)
     python3 desktop/e2e/stress.py seed-workspace DIR      a test workspace (DIR/ws) and an outside secret (M3)
     python3 desktop/e2e/stress.py fake-tasks PORT         a fake Ollama with multi-step, slow and endless task models (M4)
+    python3 desktop/e2e/stress.py seed-coding-project DIR a small Python project (DIR/proj) with a failing test to fix (M9)
+    python3 desktop/e2e/stress.py fake-coding PORT        a fake Ollama with a coding model and a slow one (M9)
     python3 desktop/e2e/stress.py fake-memory PORT        a fake Ollama whose memory-aware:3b repeats the memory it was given (M6)
     python3 desktop/e2e/stress.py fake-review PORT        a fake Ollama whose memory-notes:3b runs a task and suggests memory (M7)
     python3 desktop/e2e/stress.py seed-review-workspace DIR   the M3 fixture plus a file that claims something about you (M7)
@@ -112,10 +114,26 @@ def task_models():
     return [multi, slow, endless]
 
 
+def coding_models():
+    """M9: the coder (edits calc.py, runs the tests, fixes the failure) and a
+    slow one whose test command first sleeps 30 s (to press Stop, or kill the
+    runtime, while a command runs)."""
+    from tests.fake_ollama import CODER_TEST, FakeModel, coder
+    return [FakeModel("coder:3b", chunk_delay=0.01, agent=coder()),
+            FakeModel("slow-coder:3b", chunk_delay=0.01, agent=coder("sleep 30; " + CODER_TEST)),
+            FakeModel("chatty:3b", tools="unsupported", chunk_delay=0.01, reply="Noted.")]
+
+
+def seed_coding_project(base: Path) -> None:
+    from tests.test_m9_coding import make_project
+    base.mkdir(parents=True, exist_ok=True)
+    print(make_project(base))
+
+
 def fake_ollama(port: int, empty: bool = False, workspace: bool = False, tasks: bool = False,
-                memory: bool = False, review: bool = False) -> None:
+                memory: bool = False, review: bool = False, coding: bool = False) -> None:
     from tests.fake_ollama import FakeModel, FakeOllama, memory_answer, notes_agent, workspace_agent
-    models = [FakeModel("memory-notes:3b", chunk_delay=0.02, agent=notes_agent)] if review else [FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer),
+    models = coding_models() if coding else [FakeModel("memory-notes:3b", chunk_delay=0.02, agent=notes_agent)] if review else [FakeModel("memory-aware:3b", tools="unsupported", chunk_delay=0.02, answer=memory_answer),
               FakeModel("memory-dies:3b", tools="unsupported", behavior="die_midstream", chunk_delay=0.02,
                         answer=memory_answer)] if memory else \
         task_models() if tasks else [FakeModel("workspace-reader:3b", agent=workspace_agent, chunk_delay=0.02)] if workspace else [] if empty else [
@@ -133,6 +151,8 @@ if __name__ == "__main__":
         seed_reference(Path(sys.argv[2]))
     elif sys.argv[1] == "seed-workspace":
         seed_workspace(Path(sys.argv[2]))
+    elif sys.argv[1] == "seed-coding-project":
+        seed_coding_project(Path(sys.argv[2]))
     elif sys.argv[1] == "seed-review-workspace":
         seed_review_workspace(Path(sys.argv[2]))
     elif sys.argv[1] == "seed":
@@ -140,4 +160,4 @@ if __name__ == "__main__":
     else:
         fake_ollama(int(sys.argv[2]), empty=sys.argv[1] == "fake-empty", workspace=sys.argv[1] == "fake-workspace",
                     tasks=sys.argv[1] == "fake-tasks", memory=sys.argv[1] == "fake-memory",
-                    review=sys.argv[1] == "fake-review")
+                    review=sys.argv[1] == "fake-review", coding=sys.argv[1] == "fake-coding")

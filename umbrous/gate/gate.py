@@ -25,19 +25,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
-from umbrous.gate.access import ALLOW, ASK, BLOCK, PROFILES, AccessStore, Workspace
+from umbrous.gate.access import ALLOW, ASK, BLOCK, COMMANDS, PROFILES, WRITES, AccessStore, Workspace
 from umbrous.receipts.model import EvidenceRef, Receipt, new_action_id
+from umbrous.receipts.redaction import default_redactor
 from umbrous.receipts.store import ReceiptStore
-from umbrous.tools import fs
+from umbrous.tools import edit, fs
+from umbrous.tools.run import CommandRegistry
 
 MAX_PATH = 1024
 MAX_QUERY = 200
+MAX_COMMAND = 4_000
+MAX_OLD_TEXT = 64 * 1024
 
 # What the model sees. Names use underscores (Ollama function names); each
 # maps to a capability in receipts and profiles.
@@ -76,14 +81,92 @@ TOOLS: Dict[str, dict] = {
             "path": (str, False, "Folder to search in, relative to the workspace root. Default: the root."),
         },
     },
+    # M9: coding tools (docs/m9-coding.md). Offered only when the profile does not block them.
+    "find_files": {
+        "retry": "repeat",
+        "action": "fs.find",
+        "description": "Find files and folders by name: a glob such as *.py, test_*.py or src/*/main.rs, or part "
+                       "of a name. Case-insensitive.",
+        "params": {
+            "pattern": (str, True, "The name pattern."),
+            "path": (str, False, "Folder to look in, relative to the workspace root. Default: the root."),
+        },
+    },
+    "write_file": {
+        # verify: after a crash its effect is checked on disk (tasks/recover.py), never repeated blindly
+        "retry": "verify",
+        "action": "fs.write",
+        "description": "Create a new file, or replace a whole existing file. An existing file must have been read "
+                       "(or written) in this task first and be unchanged since, otherwise this is refused as a "
+                       "conflict. Prefer edit_file for small changes.",
+        "params": {
+            "path": (str, True, "File path relative to the workspace root. Missing folders are created."),
+            "content": (str, True, "The complete new content of the file."),
+            "expected_sha256": (str, False, "The file's current SHA-256, if known. Default: as last read or "
+                                            "written in this task."),
+        },
+    },
+    "edit_file": {
+        "retry": "verify",
+        "action": "fs.edit",
+        "description": "Change part of an existing file: replace old_text, which must occur exactly once, with "
+                       "new_text. Copy old_text exactly from the file, with enough lines to be unique.",
+        "params": {
+            "path": (str, True, "File path relative to the workspace root."),
+            "old_text": (str, True, "The exact text to replace (it must occur once)."),
+            "new_text": (str, True, "The text to put in its place."),
+            "expected_sha256": (str, False, "The file's current SHA-256, if known. Default: as last read or "
+                                            "written in this task, when it was."),
+        },
+    },
+    "run_command": {
+        # command: its effects cannot be checked afterwards; after a crash it is never re-run by itself
+        "retry": "command",
+        "action": "cmd.run",
+        "description": "Run a shell command in the workspace folder (build, test, inspect). Returns the exit "
+                       "status, stdout and stderr (long output is shortened). Runs until it exits or timeout_s; "
+                       "with background=true a command still running then keeps running, and check_command "
+                       "reports on it later.",
+        "params": {
+            "command": (str, True, "The command line, run with /bin/sh in the workspace folder."),
+            "timeout_s": (int, False, "Seconds to wait for it (default 120)."),
+            "background": (bool, False, "Keep it running after timeout_s instead of stopping it."),
+        },
+    },
+    "check_command": {
+        "retry": "repeat",
+        "action": "cmd.check",
+        "description": "Check on a command started with background=true: wait up to wait_s for it, then report "
+                       "its status and output so far. stop=true ends it.",
+        "params": {
+            "id": (str, True, "The command id run_command returned (cmd_...)."),
+            "wait_s": (int, False, "Seconds to wait for it to finish (default 10, at most 120)."),
+            "stop": (bool, False, "Stop the command."),
+        },
+    },
 }
+READ_TOOLS = ("list_files", "read_file", "search_files", "find_files")
 
 
-def ollama_tools() -> List[dict]:
-    """The tool definitions sent to Ollama."""
+def offered(profile: str) -> List[str]:
+    """M9: the tools a profile does not block outright (the gate still decides each call)."""
+    rules = PROFILES.get(profile, {}).get("rules", {})
+    return [n for n, t in TOOLS.items() if rules.get(t["action"], BLOCK) != BLOCK]
+
+
+def can_change(profile: str) -> bool:
+    rules = PROFILES.get(profile, {}).get("rules", {})
+    return any(rules.get(a, BLOCK) != BLOCK for a in WRITES + COMMANDS)
+
+
+def ollama_tools(names: Optional[List[str]] = None) -> List[dict]:
+    """The tool definitions sent to Ollama (M9: only `names`, by default the M3 read tools)."""
     out = []
     for name, t in TOOLS.items():
-        props = {p: {"type": "integer" if typ is int else "string", "description": d}
+        if name not in (names if names is not None else READ_TOOLS[:3]):
+            continue
+        kinds = {int: "integer", bool: "boolean", str: "string"}
+        props = {p: {"type": kinds[typ], "description": d}
                  for p, (typ, _req, d) in t["params"].items()}
         out.append({"type": "function", "function": {
             "name": name, "description": t["description"],
@@ -98,6 +181,27 @@ def ollama_tools() -> List[dict]:
 APPROVAL_UNAVAILABLE = ("This project uses Ask before read, and this app cannot show approval requests yet, "
                         "so the read was refused. Switch the project to Workspace read to let chats read "
                         "ordinary files in its folder, or answer approvals in the browser page.")
+COMMAND_APPROVAL_UNAVAILABLE = ("This project asks before each command, and this app cannot show approval requests "
+                                "yet, so the command was refused. Answer approvals in the browser page, or switch "
+                                "the project to Code in workspace.")
+
+
+def approval_unavailable(action: str) -> str:
+    return COMMAND_APPROVAL_UNAVAILABLE if action in COMMANDS else APPROVAL_UNAVAILABLE
+
+
+@dataclass
+class ToolContext:
+    """M9: what one task's tool calls share. `seen` is the hash of each file as
+    this task last read or wrote it: a change to an existing file must start
+    from that version (a conflict otherwise). `intent` records a change before
+    it is made and must raise if it cannot. `commands` runs commands."""
+    seen: Dict[str, str] = field(default_factory=dict)
+    intent: Callable[[dict], None] = lambda data: None
+    commands: Optional[CommandRegistry] = None
+    command_started: Callable[[dict], None] = lambda data: None
+    command_timeout_s: int = 120
+    command_timeout_max_s: int = 1800
 
 
 @dataclass
@@ -136,7 +240,11 @@ class Outcome:
     action_id: str = ""
     # M4: what the tool itself reported about completeness (for Observe + Verify):
     # truncated, timed_out, skipped, lines_total, partial. No content.
+    # M9: a change (op, path, before, after, added, removed) or a command
+    # (command, status, exit, ms, cmd_id).
     observed: dict = field(default_factory=dict)
+    # M9: a bounded diff or command output for the page, live only (never stored)
+    detail: str = ""
 
 
 class GateError(Exception):
@@ -246,6 +354,10 @@ class Gate:
             v = call.args[name]
             if typ is int and isinstance(v, str) and v.strip().isdigit():
                 v = int(v)  # small models often quote numbers
+            if typ is bool and isinstance(v, str) and v.strip().lower() in ("true", "false"):
+                v = v.strip().lower() == "true"
+            if typ is bool and not isinstance(v, bool):
+                return Verdict(BLOCK, "malformed", f"{name!r} must be true or false.", action), action, {}
             if typ is int and (isinstance(v, bool) or not isinstance(v, int)):
                 return Verdict(BLOCK, "malformed", f"{name!r} must be a whole number.", action), action, {}
             if typ is str and not isinstance(v, str):
@@ -253,9 +365,26 @@ class Gate:
             clean[name] = v
         if "query" in clean and not (0 < len(clean["query"].strip()) <= MAX_QUERY and "\x00" not in clean["query"]):
             return Verdict(BLOCK, "malformed", f"The search text must be 1 to {MAX_QUERY} characters.", action), action, {}
-        for k in ("start_line", "max_lines"):
+        for k in ("start_line", "max_lines", "timeout_s"):
             if k in clean and not (1 <= clean[k] <= 1_000_000):
                 return Verdict(BLOCK, "malformed", f"{k!r} is out of range.", action), action, {}
+        if "wait_s" in clean and not (0 <= clean["wait_s"] <= 120):
+            return Verdict(BLOCK, "malformed", "'wait_s' must be 0 to 120.", action), action, {}
+        if "pattern" in clean and not (0 < len(clean["pattern"].strip()) <= MAX_QUERY and "\x00" not in clean["pattern"]):
+            return Verdict(BLOCK, "malformed", f"The pattern must be 1 to {MAX_QUERY} characters.", action), action, {}
+        if "command" in clean and not (0 < len(clean["command"].strip()) <= MAX_COMMAND and "\x00" not in clean["command"]):
+            return Verdict(BLOCK, "malformed", f"The command must be 1 to {MAX_COMMAND:,} characters.", action), action, {}
+        if "content" in clean and len(clean["content"].encode("utf-8", "replace")) > edit.MAX_WRITE_BYTES:
+            return Verdict(BLOCK, "malformed", f"The content is over the {edit.MAX_WRITE_BYTES:,} byte limit.",
+                           action), action, {}
+        if "old_text" in clean and not (0 < len(clean["old_text"]) <= MAX_OLD_TEXT):
+            return Verdict(BLOCK, "malformed", "old_text must not be empty.", action), action, {}
+        if "expected_sha256" in clean and not re.fullmatch(r"[0-9a-f]{64}", clean["expected_sha256"].strip().lower()):
+            return Verdict(BLOCK, "malformed", "expected_sha256 must be 64 hex characters.", action), action, {}
+        if "id" in clean and not re.fullmatch(r"cmd_[0-9a-f]{12}", clean["id"]):
+            return Verdict(BLOCK, "malformed", "id must be a command id from run_command (cmd_...).", action), action, {}
+        if any(isinstance(clean.get(k), str) and "\x00" in clean[k] for k in ("content", "old_text", "new_text")):
+            return Verdict(BLOCK, "malformed", "Text with NUL characters cannot be written.", action), action, {}
         return None, action, clean
 
     def evaluate(self, project_id: str, call: Call, approval_id: Optional[str] = None) -> Verdict:
@@ -290,7 +419,7 @@ class Gate:
         # Before asking you, make sure the target is not something that would be
         # refused anyway (a symlink, a hard link, a pipe): no card for those.
         try:
-            fs.precheck(ws.root, parts, want_file=(action == "fs.read"))
+            fs.precheck(ws.root, parts, want_file=(action in ("fs.read", "fs.write", "fs.edit")) and bool(parts))
         except fs.FsError as exc:
             if exc.code in ("symlink", "hard_link", "not_regular", "permission", "workspace_missing",
                             "workspace_unavailable"):
@@ -302,7 +431,7 @@ class Gate:
             ask: Optional[Callable[[Verdict, str], None]] = None,
             cancelled: Callable[[], bool] = lambda: False,
             approval_timeout: Optional[float] = None, action_id: Optional[str] = None,
-            observer: Optional[Callable[[str], None]] = None) -> Outcome:
+            observer: Optional[Callable[[str], None]] = None, ctx: Optional[ToolContext] = None) -> Outcome:
         """Decide, maybe ask, execute only on ALLOW, and write the receipt.
 
         M4: `action_id` lets the task record and the receipt share one id.
@@ -315,7 +444,7 @@ class Gate:
         if verdict.outcome == ASK:
             if ask is None:
                 return self._finish(task_id, action_id, project_id, chat_id, verdict, started, "denied",
-                                    "approval_unavailable", APPROVAL_UNAVAILABLE)
+                                    "approval_unavailable", approval_unavailable(verdict.action))
             approval_id = self.approvals.request(verdict.binding, project_id, verdict.action)
             ask(verdict, approval_id)
             choice = self.approvals.wait(approval_id, cancelled, approval_timeout)
@@ -348,7 +477,8 @@ class Gate:
                                 "cancelled", "Stopped before the tool ran.")
         if observer:
             observer("started")
-        return self._execute(task_id, action_id, project_id, chat_id, verdict, started, cancelled)
+        return self._execute(task_id, action_id, project_id, chat_id, verdict, started, cancelled,
+                             ctx if ctx is not None else ToolContext())
 
     def refuse(self, task_id: str, project_id: str, chat_id: Optional[str], call: Call, code: str, message: str,
                action_id: Optional[str] = None) -> Outcome:
@@ -357,12 +487,32 @@ class Gate:
         return self._finish(task_id, action_id or new_action_id(), project_id, chat_id, v, _now(), "denied", code, message)
 
     def _execute(self, task_id, action_id, project_id, chat_id, v: Verdict, started,
-                 cancelled: Callable[[], bool] = lambda: False) -> Outcome:
+                 cancelled: Callable[[], bool] = lambda: False, ctx: Optional[ToolContext] = None) -> Outcome:
         ws: Workspace = self.access.workspace(project_id)
         a = v.clean_args
+        ctx = ctx if ctx is not None else ToolContext()
         observed: dict = {}
+        detail = ""
         try:
-            if v.action == "fs.read":
+            if v.action in ("fs.write", "fs.edit"):
+                return self._change(task_id, action_id, project_id, chat_id, v, started, ws, ctx)
+            if v.action in ("cmd.run", "cmd.check"):
+                return self._command(task_id, action_id, project_id, chat_id, v, started, ws, ctx, cancelled)
+            if v.action == "fs.find":
+                r = edit.find(ws.root, v.parts, a["pattern"], cancelled=cancelled)
+                if r.cancelled:
+                    return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", "cancelled",
+                                        "Stopped while finding files.")
+                lines = [f"{kind:8} {p}" + (f"  ({size:,} bytes)" if size is not None else "")
+                         for p, kind, size in r.matches]
+                note = " Results were cut off at the limit." if r.truncated else ""
+                body = (f"find_files {r.pattern!r} in {r.path}: {len(r.matches)} match(es) among {r.scanned} "
+                        f"name(s).{note}\n" + ("\n".join(lines) or "(no matches)"))
+                summary = f"Found {len(r.matches)} name(s) matching {r.pattern[:40]}"
+                qhash = hashlib.sha256(r.pattern.encode()).hexdigest()[:12]
+                ev = [EvidenceRef("search", f"{r.path} names#{qhash}")]
+                observed = {"truncated": r.truncated, "timed_out": r.timed_out}
+            elif v.action == "fs.read":
                 r = fs.read_file(ws.root, v.parts, a.get("start_line", 1), min(a.get("max_lines", 400), 400))
                 numbered = "\n".join(f"{r.first_line + i}: {line}" for i, line in enumerate(r.text.split("\n"))) \
                     if r.text else "(empty)"
@@ -374,6 +524,8 @@ class Gate:
                 ev = [EvidenceRef("file", r.path, r.sha256, r.size_bytes,
                                   (r.first_line, r.last_line) if r.last_line >= r.first_line else None)]
                 observed = {"lines_total": r.total_lines, "partial": r.truncated or r.first_line > 1}
+                ctx.seen[r.path] = r.sha256     # M9: a change to this file starts from this version
+                body = body.replace(f"read_file {r.path} lines", f"read_file {r.path} (sha256 {r.sha256}) lines", 1)
             elif v.action == "fs.list":
                 r = fs.list_dir(ws.root, v.parts)
                 lines = [f"{kind:8} {name}" + (f"  ({size:,} bytes)" if size is not None else "")
@@ -418,6 +570,116 @@ class Gate:
         out = self._finish(task_id, action_id, project_id, chat_id, v, started, "allowed", "ok",
                            v.reason, model_text=model_text, summary=summary, evidence=ev)
         out.observed = observed
+        out.detail = detail
+        return out
+
+    # ---------------------------------------------------------------- M9: changes
+    def _change(self, task_id, action_id, project_id, chat_id, v: Verdict, started, ws: Workspace,
+                ctx: ToolContext) -> Outcome:
+        a = v.clean_args
+        path = "/".join(v.parts)
+        expect = (a.get("expected_sha256") or "").strip().lower() or ctx.seen.get(path)
+        try:
+            if v.action == "fs.write":
+                content = a["content"]
+                r = edit.change(ws.root, v.parts, lambda old: (content, "replaced"), expect,
+                                create_only=expect is None, intent=ctx.intent)
+            else:
+                r = edit.change(ws.root, v.parts, edit.edit_compute(a["old_text"], a["new_text"], path), expect,
+                                create_only=False, intent=ctx.intent)
+        except edit.Conflict as exc:
+            return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", exc.code, exc.message)
+        except fs.FsError as exc:
+            security = exc.code in ("symlink", "hard_link", "not_regular", "permission")
+            return self._finish(task_id, action_id, project_id, chat_id, v, started,
+                                "denied" if security else "failed", exc.code, exc.message)
+        except Exception as exc:   # e.g. the intent could not be recorded: nothing was written
+            return self._finish(task_id, action_id, project_id, chat_id, v, started, "uncertain", "tool_crashed",
+                                f"The change failed unexpectedly ({exc.__class__.__name__}).")
+        ctx.seen[r.path] = r.after
+        words = {"created": "Created", "replaced": "Replaced", "edited": "Edited", "unchanged": "Unchanged",
+                 "already_applied": "Already applied"}
+        lines = r.diff.count("\n") + 1 if r.diff else 0
+        summary = f"{words[r.op]} {r.path}" + (f" (+{r.added} −{r.removed})" if r.op in ("created", "replaced", "edited")
+                                               else "")
+        note = {"unchanged": " The content was already exactly this; nothing was written.",
+                "already_applied": " old_text is no longer there and new_text is, so the edit was already made "
+                                   "(for example before an interruption); nothing was written."}.get(r.op, "")
+        body = (f"{v.action.replace('fs.', '')}_file {r.path}: {r.op}.{note} Now {r.size:,} bytes, "
+                f"sha256 {r.after}.\n" + (r.diff if lines else ""))
+        ev = [EvidenceRef("change", r.path, r.after, r.size)]
+        if r.before:
+            ev.append(EvidenceRef("other", f"before:{r.path}", r.before))
+        out = self._finish(task_id, action_id, project_id, chat_id, v, started, "allowed", "ok", v.reason,
+                           model_text=wrap_untrusted(body), summary=summary, evidence=ev)
+        out.observed = {"op": r.op, "path": r.path, "before": r.before, "after": r.after,
+                        "added": r.added, "removed": r.removed}
+        out.detail = r.diff
+        return out
+
+    # ---------------------------------------------------------------- M9: commands
+    def _command(self, task_id, action_id, project_id, chat_id, v: Verdict, started, ws: Workspace,
+                 ctx: ToolContext, cancelled: Callable[[], bool]) -> Outcome:
+        a = v.clean_args
+        reg = ctx.commands
+        if reg is None:
+            return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", "no_commands",
+                                "Commands cannot run here.")
+        if v.action == "cmd.run":
+            timeout = min(a.get("timeout_s", ctx.command_timeout_s), ctx.command_timeout_max_s)
+            shown = clip_command(a["command"])
+            try:
+                ctx.intent({"op": "command", "command": shown})     # recorded before it starts
+            except Exception as exc:
+                return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", "not_recorded",
+                                    f"The command was not started: its intent could not be recorded "
+                                    f"({exc.__class__.__name__}).")
+            try:
+                c = reg.start(task_id, a["command"], ws.root,
+                              started=lambda pid: ctx.command_started({"pid": pid, "command": shown}))
+            except OSError as exc:
+                return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", "start_failed",
+                                    f"The command could not be started ({exc.strerror or exc.__class__.__name__}).")
+            state = reg.wait(c, timeout, cancelled)
+            if state == "running" and not a.get("background"):
+                reg.stop(c, "time_limit")
+                state = "timed_out"
+            if state != "running":
+                reg.forget(c)
+        else:
+            c = reg.get(a["id"], task_id)
+            if c is None:
+                return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", "no_such_command",
+                                    "There is no command with that id in this task (it ended with its task, or "
+                                    "Umbrous restarted since).")
+            shown = clip_command(c.command)
+            if a.get("stop"):
+                reg.stop(c, "stop")
+                state = "stopped"
+            else:
+                state = reg.wait(c, a.get("wait_s", 10), cancelled)
+            if state != "running":
+                reg.forget(c)
+        r = reg.result(c, state)
+        if state == "cancelled":
+            return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", "cancelled",
+                                f"Stopped by you after {r.ms / 1000:.1f} s; the command was ended.")
+        status = {"exited": f"exited with status {r.exit_code}", "running": f"still running after {r.ms / 1000:.1f} s "
+                  f"(id {r.cmd_id}; check it with check_command)", "timed_out": f"did not finish within its time "
+                  f"limit and was stopped after {r.ms / 1000:.1f} s", "stopped": "was stopped"}[state]
+        took = f" after {r.ms / 1000:.1f} s" if state == "exited" else ""
+        body = (f"{'run_command' if v.action == 'cmd.run' else 'check_command'}: {shown}\n{status}{took}\n"
+                f"--- stdout ({r.stdout_bytes:,} bytes) ---\n{r.stdout.rstrip()}\n"
+                f"--- stderr ({r.stderr_bytes:,} bytes) ---\n{r.stderr.rstrip()}")
+        word = {"exited": f"exit {r.exit_code}", "running": "running", "timed_out": "timed out", "stopped": "stopped"}[state]
+        summary = f"Ran {shown[:60]} · {word}" + (f" ({r.ms / 1000:.1f}s)" if state != "running" else "")
+        digest = hashlib.sha256((r.stdout + "\0" + r.stderr).encode("utf-8", "replace")).hexdigest()
+        ev = [EvidenceRef("command", shown[:200] or "?", digest, r.stdout_bytes + r.stderr_bytes)]
+        out = self._finish(task_id, action_id, project_id, chat_id, v, started, "allowed", "ok",
+                           f"{v.reason} {word}.", model_text=wrap_untrusted(body), summary=summary, evidence=ev)
+        out.observed = {"command": shown, "status": state, "exit": r.exit_code, "ms": r.ms, "cmd_id": r.cmd_id,
+                        "check": v.action == "cmd.check"}
+        out.detail = (r.stdout.rstrip() + ("\n" if r.stdout.strip() and r.stderr.strip() else "") + r.stderr.rstrip())[-6000:]
         return out
 
     def _finish(self, task_id, action_id, project_id, chat_id, v: Verdict, started, decision, code, message,
@@ -432,6 +694,13 @@ class Gate:
             model_text = f"TOOL ERROR ({decision}, {code}): {message}"
         return Outcome(decision=decision, code=code, message=message, model_text=model_text,
                        summary=summary or message, evidence=record["evidence"], receipt=record, action_id=action_id)
+
+
+def clip_command(command: str) -> str:
+    """A command as it may be shown and stored: one line, redacted, at most 200 characters."""
+    one = " ".join(command.split())
+    one = default_redactor.redact_obj(one)
+    return one if len(one) <= 200 else one[:199] + "…"
 
 
 def wrap_untrusted(body: str) -> str:

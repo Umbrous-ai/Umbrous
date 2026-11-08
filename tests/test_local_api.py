@@ -56,8 +56,8 @@ class LocalApiTests(unittest.TestCase):
         status, body = self.rt.json("GET", "/api/health", token=self.token, headers={"Origin": self.rt.origin})
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ok")
-        self.assertEqual(body["milestone"], "M8")
-        self.assertEqual(body["schema_version"], 8)
+        self.assertEqual(body["milestone"], "M9")
+        self.assertEqual(body["schema_version"], 9)
         self.assertEqual(body["bind"], self.rt.host)
         self.assertGreaterEqual(body["launches"], 1)
 

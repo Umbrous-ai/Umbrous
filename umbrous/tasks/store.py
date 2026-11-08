@@ -95,11 +95,14 @@ class TaskStore:
             conn.close()
 
     # ---------------------------------------------------------------- writing
-    def create(self, task_id: str, project_id: Optional[str], chat_id: Optional[str], model: str, limits: dict) -> None:
+    def create(self, task_id: str, project_id: Optional[str], chat_id: Optional[str], model: str, limits: dict,
+               workspace: Optional[str] = None) -> None:
+        """`workspace` (M9): the folder the task works in (a path of yours, not content)."""
         now = _now()
         with self._lock, self._db() as c:
-            c.execute("INSERT INTO tasks (task_id, project_id, chat_id, model, status, created_at, limits) "
-                      "VALUES (?, ?, ?, ?, 'requested', ?, ?)", (task_id, project_id, chat_id, model, now, json.dumps(limits)))
+            c.execute("INSERT INTO tasks (task_id, project_id, chat_id, model, status, created_at, limits, workspace) "
+                      "VALUES (?, ?, ?, ?, 'requested', ?, ?, ?)",
+                      (task_id, project_id, chat_id, model, now, json.dumps(limits), workspace))
             self._event(c, task_id, "task.requested", None, {"model": model, "limits": limits}, now)
 
     def set_status(self, task_id: str, status: str, code: Optional[str] = None, **data) -> None:
@@ -210,8 +213,8 @@ class TaskStore:
     # ---------------------------------------------------------------- reading
     def get(self, task_id: str) -> Optional[dict]:
         with self._db() as c:
-            t = c.execute("SELECT task_id, project_id, chat_id, model, status, code, created_at, started_at, ended_at, limits "
-                          "FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            t = c.execute("SELECT task_id, project_id, chat_id, model, status, code, created_at, started_at, ended_at, limits, "
+                          "workspace FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
             if t is None:
                 return None
             actions = c.execute("SELECT action_id, step, tool, resource, status, code, receipt_id, requested_at, ended_at "
@@ -223,7 +226,7 @@ class TaskStore:
             artifacts = c.execute("SELECT artifact_id, kind, created_at, sha256, body FROM task_artifacts WHERE task_id = ? "
                                   "ORDER BY created_at", (task_id,)).fetchall()
         keys = ("task_id", "project_id", "chat_id", "model", "status", "code", "created_at", "started_at", "ended_at")
-        task = dict(zip(keys, t[:9]), limits=json.loads(t[9]))
+        task = dict(zip(keys, t[:9]), limits=json.loads(t[9]), workspace=t[10])
         report = next((json.loads(a[4]) for a in artifacts if a[1] == "report"), None)
         return {
             "task": task,

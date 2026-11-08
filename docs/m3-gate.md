@@ -25,7 +25,7 @@ bin/umbrous test                   # 189 tests; no Ollama needed
 | Word | Means |
 |---|---|
 | **Workspace** | The one folder a project's chats may read. One per project, or none. Without one, chats get no tools at all |
-| **Profile** | The project's rule for reads. **Workspace read** (the default) allows list, read and search. **Ask before read** asks you each time, in the browser page only (see The desktop app) |
+| **Profile** | The project's rule for reads. **Workspace read** (the default) allows list, read and search. **Ask before read** asks you each time, in the browser page only (see The desktop app). M9 adds two profiles that can also edit files and run commands, **Code in workspace** and **Code, ask before commands** (docs/m9-coding.md) |
 | **Approve once** | Allows exactly one request: the same action, arguments, project and policy version. It is used up when it runs |
 | **Grant** | "Allow reads in this project". Kept until you revoke it, or until the workspace or profile changes |
 | **Hard block** | Refused under every profile, and you are never asked: paths outside the workspace, symbolic links, hard-linked files, special files, and excluded names (`.env`, keys, credentials, `.git`, `.ssh`, …) |

@@ -136,10 +136,12 @@ pub struct Workspace {
     project_input: Option<Entity<Composer>>,
     project_error: Option<String>,
     run: Option<Run>,
-    notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
+    pub(crate) notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
     /// M5: the open chat's last task, if the runtime was stopped in the middle
     /// of it and it can be resumed: shown as a notice with a Resume button.
     pub interrupted: Option<Interrupted>,
+    /// M9: a reply attached a folder ("work on <folder>"): reload Access when it ends
+    load_access_after_stream: bool,
     /// The selected project's workspace access (M3). This app cannot show approval
     /// requests yet, so a project on Ask before read gets an explanation and an
     /// explicit switch, never a silent change or a request left waiting.
@@ -318,6 +320,7 @@ impl Workspace {
             run: None,
             notice: None,
             interrupted: None,
+            load_access_after_stream: false,
             access: None,
             memory: None,
             memory_seq: 0,
@@ -822,6 +825,16 @@ impl Workspace {
             .unwrap_or(false)
     }
 
+    /// M9: the selected project asks before each command, which this app cannot show
+    pub fn asks_before_commands(&self) -> bool {
+        self.access
+            .as_ref()
+            .filter(|a| self.project_id.as_deref() == Some(a.project_id.as_str()))
+            .and_then(|a| a.workspace.as_ref())
+            .map(|w| w.profile == "code_ask_commands")
+            .unwrap_or(false)
+    }
+
     /// The explicit way out of Ask before read in this app: you press the button,
     /// the runtime changes the profile, and the notice goes away once it has.
     pub fn switch_to_workspace_read(&mut self, cx: &mut Context<Self>) {
@@ -933,7 +946,10 @@ impl Workspace {
                             task_id: x.task_id.clone(),
                             text: r.text.clone().unwrap_or_default(),
                             report: x.report.as_ref().and_then(api::report_line).map(|(l, _)| l).unwrap_or_default(),
-                            note: r.message.clone(),
+                            note: match api::resume_note(r) {   // M9: what was already changed
+                                Some(extra) => format!("{} {extra}", r.message),
+                                None => r.message.clone(),
+                            },
                         })
                     });
                     {
@@ -1248,6 +1264,13 @@ impl Workspace {
                             if let (Some(est), Some(win)) = (c["estimated_tokens"].as_u64(), c["window"].as_u64()) {
                                 self.context = Some((est, win));
                             }
+                            // M9: "work on <folder>" attached a folder, or it is Umbrous's own source
+                            if let Some(note) = api::folder_note(&ev["tools"]) {
+                                self.notice = Some((note, MetaKind::Warn, false));
+                            }
+                            if ev.pointer("/tools/selected/attached").and_then(Value::as_bool).unwrap_or(false) {
+                                self.load_access_after_stream = true;
+                            }
                         }
                         "delta" => msg.text.push_str(ev.get("text").and_then(Value::as_str).unwrap_or("")),
                         // M7: the reply is saved; the task looks for things to remember
@@ -1286,14 +1309,7 @@ impl Workspace {
                             // M4: say which step is running, so Stop has something to interrupt that you can see
                             let step = ev.get("step").and_then(Value::as_u64).unwrap_or(0);
                             let tool = ev.get("tool").and_then(Value::as_str).unwrap_or("a tool");
-                            let path = ev["args"].get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).unwrap_or(".");
-                            let what = match tool {
-                                "read_file" => format!("reading {path}"),
-                                "list_files" => format!("listing {path}"),
-                                "search_files" => format!("searching {path}"),
-                                _ => "running a tool".into(),
-                            };
-                            msg.meta = format!("Step {step}: {}…", what.chars().take(80).collect::<String>());
+                            msg.meta = format!("Step {step}: {}…", api::step_label(tool, &ev["args"]));
                         }
                         "error" => {
                             let code = ev.get("code").and_then(Value::as_str).unwrap_or("error");
@@ -1368,6 +1384,9 @@ impl Workspace {
         self.refresh_msg_rows(ix, usize::MAX); // only the meta row changes here; blocks change after parsing
         if refresh_lists {
             self.load_projects(None, cx);
+        }
+        if std::mem::take(&mut self.load_access_after_stream) {
+            self.load_access(cx);
         }
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.perf.apply_ms_max = self.perf.apply_ms_max.max(ms);
@@ -2455,6 +2474,16 @@ impl Workspace {
                             .child("Switch to Workspace read")
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.switch_to_workspace_read(cx))),
                     )
+                    .into_any_element(),
+            );
+        }
+        if self.asks_before_commands() {
+            let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
+            notices.push(
+                ui::notice(Some(ui::NoticeKind::Warn))
+                    .child(div().flex_1().min_w_0().child(format!(
+                        "{project} uses Code, ask before commands. This app cannot show approval requests yet, so each command is refused right away; reading and editing files still work. Answer command requests in the browser page, or choose Code in workspace there (Details › Access)."
+                    )))
                     .into_any_element(),
             );
         }
