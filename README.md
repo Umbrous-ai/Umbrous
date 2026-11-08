@@ -4,8 +4,71 @@ A local-first agent harness. Status: **M9, coding in a project folder: Umbrous e
 
 Use local Ollama models or connect your ChatGPT subscription through the official Codex CLI. Choose a model, its advertised reasoning level, and Standard or Fast in the model menu. ChatGPT is an explicit cloud choice: conversation context, selected memories, and approved tool results are sent to OpenAI. See [ChatGPT setup and limits](docs/chatgpt-provider.md).
 
+## Open the macOS app
+
+If you already built Umbrous, run these commands from the repository folder:
+
 ```sh
-bin/umbrous          # start the local runtime and open the app (Python 3.9+, no dependencies)
+open dist/Umbrous.app
+```
+
+Or open `dist/Umbrous.app` in Finder. The app starts its bundled runtime automatically; you do not need to run a separate Umbrous server.
+
+To install it in Applications, open `dist/Umbrous_0.2.0_aarch64.dmg`, drag **Umbrous** into **Applications**, then open it from Applications or Spotlight. Once installed, you can also launch it with:
+
+```sh
+open -a Umbrous
+```
+
+### Build it for the first time
+
+The native app requires an **Apple Silicon Mac with macOS 12 or newer**. To build it, install the Xcode Command Line Tools (`xcode-select --install`), Rust through `rustup`, and `uv`. Make sure `cargo` and `uv` are available in your terminal.
+
+```sh
+git clone https://github.com/Umbrous-ai/Umbrous.git
+cd Umbrous
+desktop/scripts/build-native.sh
+open dist/Umbrous.app
+```
+
+If you already have the repository, use its folder instead of cloning it again. The build creates the app and installer in `dist/` and bundles Python for you. See [the desktop build guide](docs/desktop.md#build) for details.
+
+### Start your first chat
+
+1. **Choose a model.** For local models, start Ollama and install a model with `ollama pull qwen2.5:3b`, then select it in Umbrous's model menu. For ChatGPT, choose **Connect ChatGPT**, complete sign-in, refresh the models, and select one. See [ChatGPT setup](docs/chatgpt-provider.md#setup) for the Codex CLI requirement and provider limits.
+2. **Send a message.** Open a new chat, type in the composer, and press Enter.
+3. **To work with files**, open the shield pill on the composer's left, choose an access level, and pick your project folder when prompted. **Read only** allows reading; **Workspace write** also allows edits and asks before commands; **Full access** also runs commands without asking and requires confirmation. Commands run as you and are not sandboxed.
+4. If the shield says **no tools**, open its menu and click **Check tools**. After the model passes, send your task. Answer command approval cards with **Approve once**, **Allow in this project**, or **Deny**.
+
+Quit with **⌘Q** when finished. Your chats are saved for the next launch.
+
+### Update your local app
+
+Quit Umbrous, then run these commands from the repository folder:
+
+```sh
+git switch main
+git pull --ff-only
+desktop/scripts/build-native.sh
+open dist/Umbrous.app
+```
+
+If you launch Umbrous from Applications, replace that installed copy using the newly built `.dmg`. Pulling source changes alone does not update the installed app.
+
+## Run the browser interface
+
+With Python 3.9 or newer, run this from the repository folder:
+
+```sh
+bin/umbrous
+```
+
+This starts the local runtime and opens the browser interface. Keep the terminal running; press **Ctrl+C** there to stop it. Use the same model setup described above.
+
+## Command-line reference
+
+```sh
+bin/umbrous          # start the runtime and open the browser interface (Python 3.9+, no dependencies)
 bin/umbrous models   # available models, tool-call labels, local exposure check
 bin/umbrous workspace PROJECT FOLDER   # give a project's chats read-only access to one folder
 bin/umbrous workspace PROJECT FOLDER --profile workspace_code   # or let them edit files and run commands there (M9)
