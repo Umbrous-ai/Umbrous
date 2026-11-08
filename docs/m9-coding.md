@@ -164,8 +164,15 @@ Text files only (UTF-8, at most 256 KB written).
   and the report says so. That includes a command whose shell has already
   exited but left something behind (`sleep 60 &`): its result says that
   processes it started are still running, and they are stopped with the task.
-  (While a group has a member its id cannot go to another process, so the
-  group stopped is still the command's.)
+- **Whose group it is.** A group is named by its leader's process id, and an
+  id can be reused once its process is gone and reaped. So a command's leader
+  is a small supervisor, not the shell: it runs the shell in the group, reports
+  its exit status, and then stays until the task lets it go. Umbrous reaps the
+  supervisor only after it has finished signalling the group, and never signals
+  a group after that. So for as long as Umbrous may signal a group, its id
+  cannot belong to any other process, even when everything the command started
+  has already exited. If the runtime dies, the supervisor sees it and stops the
+  group itself (SIGTERM, then SIGKILL 0.3 s later).
 
 ## The coding loop
 
@@ -221,8 +228,8 @@ A temporary file left by the interrupted write is removed.
 Its effects cannot be checked afterwards: it may have changed files before it
 was cut off. So it stays **unknown**, is never run again by itself, and the
 report and the Resume notice say so. If its process group is still alive
-(the runtime died, the command did not), it is stopped and that is recorded
-(`command.stopped_after_restart`) — but only when the process is shown to be
+(the runtime died, the command's supervisor did not get to stop it), it is
+stopped and that is recorded (`command.stopped_after_restart`) — but only when the process is shown to be
 the very one that was started. A process id can be reused after a restart or
 a reboot, so `command.started` records the leader's identity: the boot it ran
 in (`/proc/sys/kernel/random/boot_id`, or macOS's `kern.boottime`) and its
@@ -230,7 +237,9 @@ start time (`/proc/<pid>/stat`, or `ps -o lstart`). Recovery signals the group
 only when the process with that id is still a group leader in the same boot
 with the same start time. Otherwise (another process, another boot, or no
 identity recorded) nothing is signalled, `command.not_signalled` is recorded,
-and the report says the process was left alone for you to check.
+and the report says the process was left alone for you to check. Usually the
+supervisor has already stopped the group when the runtime went away; then the
+process is gone and `command.gone_after_restart` is recorded.
 
 ### Resume
 
@@ -352,16 +361,16 @@ what changed.
 
 | Test | Checks |
 |---|---|
-| `test_m9_coding.ToolTests` (24) | create (and missing folders), create refuses to overwrite, targeted edit after a read, edit without a read, no match, ambiguous, already applied, whole-file replace and unchanged, a newer edit is a conflict, a conflict at the last moment, atomic write keeping the mode, no intent means no write, boundaries (outside, absolute, `.env`, `.git`, keys, symlinks, hard links), find; commands: success, failure, cwd and no session token, timeout, background check and stop, a finished background command, Stop under 2 s, ending the task stops its commands, ending the task stops what a finished command left running (`sleep 60 & echo $!`), a command that left nothing is forgotten, bounded and redacted output, the added tool folders on PATH; a version remembered under one spelling is checked through another on a case-insensitive disk (skipped on a case-sensitive one) |
+| `test_m9_coding.ToolTests` (26) | create (and missing folders), create refuses to overwrite, targeted edit after a read, edit without a read, no match, ambiguous, already applied, whole-file replace and unchanged, a newer edit is a conflict, a conflict at the last moment, atomic write keeping the mode, no intent means no write, boundaries (outside, absolute, `.env`, `.git`, keys, symlinks, hard links), find; commands: success, failure, cwd and no session token, timeout, background check and stop, a finished background command, Stop under 2 s, ending the task stops its commands, ending the task stops what a finished command left running (`sleep 60 & echo $!`), a command that left nothing is forgotten, a group stays owned (its id taken) after everything in it exits until the task ends and is never signalled once released, the supervisor stops the group when the runtime goes away, bounded and redacted output, the added tool folders on PATH; a version remembered under one spelling is checked through another on a case-insensitive disk (skipped on a case-sensitive one) |
 | `ProfileTests` (2) | what each of the four profiles allows, and which tools each offers |
 | `LoopTests` (6) | a whole task: find, read, edit, test (exit 1), fix, test (exit 0), report; the notes when the last check failed or none ran; "work on" attaches with the Code profile and an attached folder keeps its profile; a refused folder never reaches the model; Stop during a command; Umbrous's own source |
 | `NamedFolderTests` | which messages name a folder, including quoted paths with spaces |
 | `RecoveryTests` (10) | a crash before the intent, after the intent and before the write (temp file removed), after the write, and with the file changed by someone else; an interrupted command (unknown, its process stopped); a reused process id (other start time, other boot, no identity) is not signalled; resume tells the model what was done and does not redo it; resume re-checks changes and commands under the current profile; another folder refuses it |
-| `CrashTests` | the real runtime killed with SIGKILL while the tests run; restarted: the edit completed, the command unknown and its process stopped; resumed: no repeat of the first edit, the fix made, the tests pass, no temp file |
+| `CrashTests` | the real runtime killed with SIGKILL while the tests run; restarted: the edit completed, the command unknown and its process stopped (by its supervisor or by recovery); resumed: no repeat of the first edit, the fix made, the tests pass, no temp file |
 | `test_browser_m9` | in Chromium: "work on" attaches and shows the folder; step labels, diffs and command output; the report's Changed and Ran; under *Code, ask before commands* the command waits for approval (with the not-sandboxed note) and runs after Approve once |
 | `test_validate_scripts` (M9 cases) | `validate-m9.sh` fails on any app failure and on a duplicated or unfixed edit, a temp file left, an edit made again, a command marked completed, a left-over process not stopped |
 | `api.rs` `report_line_counts_changes_and_commands`, `step_labels_and_folder_notes`, `stop_reads_on_to_the_last_event` | the app's report line, step labels, folder notice and resume note; after Stop the app reads every event up to the last (`done` or `error`), through a batch of cancelled results and tool calls, so the report is shown |
-| `tests/prove_m9.py` | 14 mutations (15 on a case-insensitive disk), each removing one behaviour above (the hash check, the last check before the rename, create-only, already applied, intent before the write, Stop reaching a command, dropping the session token, the disk check after a crash, stopping a left-over command, the resume note, the permission re-check for commands, the "no command checked this" note, stopping what a finished command left in its group, the identity check before signalling after a restart, and on macOS remembering a version under the disk's own spelling); each makes its guarding tests fail |
+| `tests/prove_m9.py` | 17 mutations (18 on a case-insensitive disk), each removing one behaviour above (the hash check, the last check before the rename, create-only, already applied, intent before the write, Stop reaching a command, dropping the session token, the disk check after a crash, stopping a left-over command, the resume note, the permission re-check for commands, the "no command checked this" note, stopping what a finished command left in its group, never signalling a released group, keeping a group owned until the task ends, the supervisor stopping the group when the runtime goes away, the identity check before signalling after a restart, and on macOS remembering a version under the disk's own spelling); each makes its guarding tests fail |
 
 ## Not in M9
 
@@ -380,9 +389,10 @@ what changed.
 - **Commands across a restart.** A background command's id ends with the task
   or the runtime. A process a command moved into its own session or group (a
   daemon, `setsid`, `nohup … &` with its own group) is not stopped with it.
-  After a crash, a group whose leader (the shell) had already exited is not
-  stopped either: without the leader its identity cannot be shown, so it is
-  left alone rather than risk signalling an unrelated process.
+  If the runtime and the supervisor are both killed at once (SIGKILL to the
+  whole process tree), what the command started is not stopped by the
+  supervisor, and recovery leaves it alone: without its leader, it cannot be
+  shown to be the command's.
 - **Approval of commands in Umbrous.app.** Only the browser page can ask.
 - **How well a real local model codes.** The loop, limits, checks and
   recovery are tested with a scripted model; a small local model may still

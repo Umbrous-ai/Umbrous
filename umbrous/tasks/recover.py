@@ -200,7 +200,11 @@ def _stop_leftover(tasks: TaskStore, task_id: str, a: dict, events: list) -> Non
     process group). It belonged to an ended task: stop it, and say so."""
     started = _intent(events, a["action_id"], "command.started") or {}
     pid = started.get("pid")
-    if not (isinstance(pid, int) and pid > 1 and process_alive(pid)):
+    if not (isinstance(pid, int) and pid > 1):
+        return
+    if not process_alive(pid):
+        # usual: its supervisor stopped the group when the runtime went away
+        tasks.event(task_id, "command.gone_after_restart", a["action_id"], pid=pid)
         return
     # The id alone proves nothing: after a restart (or a reboot) it may belong to
     # an unrelated process. Signal it only when it is still the very process that

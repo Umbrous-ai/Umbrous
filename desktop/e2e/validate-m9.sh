@@ -66,7 +66,8 @@ assert rows[2][3] == rows[3][3] == os.path.realpath(sys.argv[2]), rows
 acts = dict(c.execute("SELECT tool, status FROM task_actions WHERE task_id = ? AND tool IN ('edit_file', 'run_command')", (cut,)).fetchall())
 assert acts == {"edit_file": "completed", "run_command": "unknown"}, acts
 kinds = [k for (k,) in c.execute("SELECT kind FROM task_events WHERE task_id = ?", (cut,))]
-assert "command.stopped_after_restart" in kinds and "write.intent" in kinds, kinds
+# the command ended with the runtime (its supervisor stopped its group) or recovery stopped it
+assert ("command.gone_after_restart" in kinds or "command.stopped_after_restart" in kinds) and "write.intent" in kinds, kinds
 redo = c.execute("SELECT COUNT(*) FROM task_actions a JOIN task_events e ON e.action_id = a.action_id "
                  "WHERE a.task_id = ? AND e.kind = 'write.intent'", (resumed,)).fetchone()[0]
 report = json.loads(c.execute("SELECT body FROM task_artifacts WHERE task_id = ? AND kind = 'report'", (resumed,)).fetchone()[0])

@@ -37,7 +37,7 @@ from umbrous.persistence import db
 from umbrous.receipts.model import new_action_id, new_task_id
 from umbrous.receipts.store import ReceiptStore
 from umbrous.tools import edit
-from umbrous.tools.run import CommandRegistry, identity, process_alive
+from umbrous.tools.run import CommandRegistry, _running_members, identity, process_alive
 
 CALC = "def add(a, b):\n    return a + b\n\n\n# TODO: multiply\n"
 TESTS = ("import unittest\nfrom calc import add, multiply\n\n\nclass T(unittest.TestCase):\n"
@@ -322,6 +322,43 @@ class ToolTests(unittest.TestCase):
         while _exists(child) and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertFalse(_exists(child), "the child outlived its task")
+
+    def test_a_group_is_owned_until_it_is_released_and_never_signalled_after(self):
+        # the shell exits, then what it left exits too: the group is empty, but its id
+        # stays taken (by the supervisor) until the task ends, so it cannot be reused
+        out = self.call("run_command", command="sleep 1.5 >/dev/null 2>&1 & echo started")
+        c = self.commands.get(out.observed["cmd_id"], self.task)
+        self.assertIsNotNone(c, "a command that left a process behind stays registered")
+        self.assertTrue(c.lingering())
+        deadline = time.monotonic() + 5
+        while c.lingering() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(c.lingering())
+        self.assertEqual(os.getpgid(c.pid), c.pid)        # the id is still the command's group
+        self.assertFalse(c.released)
+        self.commands.end_task(self.task)
+        self.assertTrue(c.released)
+        self.assertFalse(process_alive(c.pid))
+        # once released (reaped), the id may belong to anything: it is never signalled again
+        sent = []
+        real = os.killpg
+        os.killpg = lambda pgid, sig: sent.append((pgid, sig))
+        try:
+            self.commands.stop(c, "stop")
+            self.commands._kill_owned(c)
+        finally:
+            os.killpg = real
+        self.assertEqual(sent, [])
+
+    def test_the_group_is_stopped_if_the_runtime_goes_away(self):
+        out = self.call("run_command", command="sleep 60", timeout_s=1, background=True)
+        c = self.commands.get(out.observed["cmd_id"], self.task)
+        os.close(c.ctl)                                   # as when the runtime dies: no "let go"
+        c.ctl = os.open(os.devnull, os.O_WRONLY)          # (so cleanup has something to close)
+        deadline = time.monotonic() + 3
+        while _running_members(c.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(_running_members(c.pid), [], "the command outlived the runtime")
 
     def test_a_command_that_left_nothing_running_is_forgotten(self):
         self.call("run_command", command="true")
@@ -727,7 +764,9 @@ class CrashTests(unittest.TestCase):
             t = c.call("GET", f"/api/tasks/{task_id}")[1]
             st = {a["tool"]: a["status"] for a in t["actions"]}
             self.assertEqual((st["edit_file"], st["run_command"]), ("completed", "unknown"))
-            self.assertIn("command.stopped_after_restart", [e["kind"] for e in t["events"]])
+            # gone with the runtime (its supervisor stopped it) or stopped by recovery
+            kinds = {e["kind"] for e in t["events"]}
+            self.assertTrue(kinds & {"command.gone_after_restart", "command.stopped_after_restart"}, kinds)
             self.assertTrue(t["resume"]["possible"], t["resume"])
             ev = c.stream({"chat_id": cid, "model": "coder:3b", "resume_task": task_id})
             self.assertEqual(ev[-1]["type"], "done", ev[-3:])
