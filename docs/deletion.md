@@ -51,3 +51,19 @@ by a result dialog. A second review is needed only if the contents actually chan
   double-click suppression, automatic dismissal, archived chats, project removal,
   empty state, and creating another project. Checks the database and source file
   independently after the app exits.
+
+## Starting work after removing a project
+
+Deleting a project removes its folder connection, not its source files. A new
+chat can resolve a work request from the conversation without requiring a path:
+verified models can select among existing workspace folders and repositories
+within three directory levels of `~/workspace`, `~/code`, `~/src`, `~/Projects`,
+and `~/Developer` (bounded to 300 entries and 40 candidates). A locally built
+app also recognizes its surrounding Umbrous source repository. Discovery lists
+folder names and paths; it does not read repository contents.
+
+The resolver can select only an inventory entry. An unambiguous implementation
+request attaches that folder with Workspace write and continues the same turn;
+commands still require approval. Existing connected workspaces retain their
+access settings. Missing or ambiguous targets produce a specific question.
+Ordinary chat does not attach a folder.

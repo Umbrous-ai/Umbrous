@@ -69,7 +69,7 @@ from umbrous.model.base import CancelToken, Cancelled, ChatDelta, ChatDone, Chat
 from umbrous.model.router import ModelRouter
 from umbrous.model.settings import GenerationSettings
 from umbrous.receipts.model import new_action_id, new_task_id
-from umbrous import selfsource
+from umbrous import selfsource, workspace_resolution
 from umbrous.tasks.recover import resume_brief, resume_info, scope_check
 from umbrous.tasks.run import TaskRun
 from umbrous.tasks.store import TaskStore
@@ -284,6 +284,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
 
     try:
         selected: Optional[dict] = None
+        resolved_reply = None
         if old is None and gate is not None and named_folder(message):
             # M9: "work on /path": that folder becomes the project's workspace for this
             # task and the ones after it. A folder you already attached keeps the
@@ -309,6 +310,31 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             # M3: tools are offered only when the chat's project has a workspace
             # AND this exact model (by digest) passed the tool-call probe.
             ws = gate.access.workspace(chat_info.project_id) if gate else None
+            mem = select(memory, chat_info.project_id, message, max_items=config.memory_max_items,
+                         max_tokens=config.memory_tokens, enabled=bool(use_memory)) if memory else Selection(enabled=False)
+            if ws is None and gate is not None and old is None and router.tool_capable(model.name):
+                yield {"type": "workspace_resolving", "run_id": run_id}
+                candidates = workspace_resolution.discover(gate.access)
+                resolution_plan = assemble(config.system_prompt + "\n\n" + workspace_resolution.instructions(candidates),
+                    history.turns(chat_id), message,
+                    recent_turns=config.recent_turns, context_tokens=config.context_tokens,
+                    reply_tokens=config.reply_tokens, model_context=model.context_length, memory_block=mem.block)
+                choice, resolved_reply = workspace_resolution.resolve(
+                    adapter, model.name, resolution_plan, candidates,
+                    {"num_ctx": resolution_plan.window, "num_predict": resolution_plan.reply_tokens, **generation_options},
+                    cancel, deadlines_from(config))
+                if cancel.cancelled:
+                    raise Cancelled("Stopped.")
+                if choice is not None:
+                    root, intent = choice
+                    # Revalidate after inference; model output is only an inventory index.
+                    if gate.access.workspace(chat_info.project_id) is not None:
+                        raise AccessError("The project's folder changed while resolving this request. Please try again.",
+                                          "workspace_changed")
+                    ws = gate.access.attach(chat_info.project_id, root,
+                        "code_ask_commands" if intent == "edit" else "workspace_read")
+                    selected = {"root": ws.root, "attached": True, "previous": None, "inferred": True}
+                    log_event(log, "workspace.resolved", chat_id=chat_id)
             tools_on = bool(ws) and router.tool_capable(model.name)
             # the chat's own access (chosen in the composer) wins over the project's profile
             profile = (chat_info.access or ws.profile) if ws else None
@@ -320,15 +346,13 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                 TOOL_PROMPT.format(name=ws.name) if tools_on else NO_WORKSPACE_PROMPT if ws is None else "")
             turns = history.turns(chat_id)
             # M6: read memory now, from the tables (no cache), for this project only.
-            mem = select(memory, chat_info.project_id, message, max_items=config.memory_max_items,
-                         max_tokens=config.memory_tokens, enabled=bool(use_memory)) if memory else Selection(enabled=False)
-            plan = assemble(system, turns, message, recent_turns=config.recent_turns,
+            plan = resolution_plan if resolved_reply is not None else assemble(system, turns, message, recent_turns=config.recent_turns,
                             context_tokens=config.context_tokens, reply_tokens=config.reply_tokens,
                             model_context=model.context_length, memory_block=mem.block)
             if not plan.memory_included and mem.items:
                 mem.left_out, mem.items = mem.candidates, []
             memory_used = mem.ids
-        except (ModelError, MessageTooLong) as exc:
+        except (ModelError, MessageTooLong, AccessError) as exc:
             outcome = exc.code
             yield {"type": "error", "code": exc.code, "message": exc.message, "partial": False}
             return
@@ -464,9 +488,11 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                 if trun:
                     trun.step_started(offer)
                 step_text, calls, done = [], [], None
-                for piece in adapter.chat_stream(model.name, messages, options=options, cancel=cancel,
-                                                        deadlines=deadlines_from(config),
-                                                        tools=ollama_tools(tool_names) if offer else None):
+                stream = resolved_reply if resolved_reply is not None else adapter.chat_stream(
+                    model.name, messages, options=options, cancel=cancel, deadlines=deadlines_from(config),
+                    tools=ollama_tools(tool_names) if offer else None)
+                resolved_reply = None
+                for piece in stream:
                     if isinstance(piece, ChatDelta):
                         text_parts.append(piece.text)
                         step_text.append(piece.text)

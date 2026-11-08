@@ -313,14 +313,15 @@ class ToolChatTests(unittest.TestCase):
         with self.rt() as rt:
             rt.post_json("/api/models/probe", {"model": "reader:3b"})
             ev = rt.chat(rt.new_chat(), "reader:3b", "read notes/plan.md")
+            self.assertEqual(ev.pop(0)["type"], "workspace_resolving")
             self.assertEqual({k: ev[0]["tools"][k] for k in ("on", "workspace", "profile", "approvals", "coding", "tools")},
                          {"on": False, "workspace": None, "profile": None, "approvals": False, "coding": False,
                           "tools": []})
             system = self.ollama_chat_bodies()[-1]["messages"][0]["content"]
-            self.assertIn("no workspace folder attached", system)
-            self.assertIn("choose Workspace write", system)
-            self.assertIn("source repository", system)
-            self.assertNotIn("tools", self.ollama_chat_bodies()[-1])
+            self.assertIn("WORKSPACE RESOLUTION", system)
+            self.assertEqual([t["function"]["name"] for t in self.ollama_chat_bodies()[-1]["tools"]],
+                             ["select_workspace"])
+            self.assertFalse(ev[0]["tools"]["on"])
 
     def test_hostile_file_cannot_expand_access(self):
         with self.rt() as rt:

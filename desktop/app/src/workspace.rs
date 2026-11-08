@@ -1255,6 +1255,12 @@ impl Workspace {
                     let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
                     let Some(msg) = self.msgs.get_mut(ix) else { return };
                     match ty {
+                        "workspace_resolving" => {
+                            if let Some(run) = self.run.as_mut() {
+                                run.run_id = ev.get("run_id").and_then(Value::as_str).map(str::to_string);
+                            }
+                            msg.meta = "Finding the right workspace…".into();
+                        }
                         "chat_created" => {
                             if let Ok(c) = serde_json::from_value::<api::ChatInfo>(ev["chat"].clone()) {
                                 if let Some(run) = self.run.as_mut() {
@@ -2629,7 +2635,7 @@ impl Workspace {
         if !archived && self.project_id.is_some() && self.access.as_ref().map(|a| a.workspace.is_none()).unwrap_or(false) {
             notices.push(
                 ui::notice(None)
-                    .child(div().flex_1().min_w_0().child("Chat only — no folder connected. To edit code, connect its source folder. Workspace write allows edits and asks before commands."))
+                    .child(div().flex_1().min_w_0().child("No folder selected yet. Tell me which project to work on and I’ll look for it, or connect a folder."))
                     .child(ui::pill("connect-workspace").child("Connect folder")
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.choose_level("code_ask_commands", cx))))
                     .into_any_element(),
