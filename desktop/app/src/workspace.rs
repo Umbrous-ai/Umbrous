@@ -127,6 +127,11 @@ pub struct Workspace {
     pub chats: Vec<api::ChatInfo>,
     archived: Vec<api::ChatInfo>,
     show_archived: bool,
+    chat_menu: Option<String>,
+    settings_open: bool,
+    settings_archived: Option<Vec<api::ChatInfo>>,
+    settings_error: Option<String>,
+    settings_seq: u64,
     pub chat: Option<api::ChatInfo>,
     pub msgs: Vec<Msg>,
     pub list: ListState,
@@ -328,6 +333,11 @@ impl Workspace {
             chats: vec![],
             archived: vec![],
             show_archived: false,
+            chat_menu: None,
+            settings_open: false,
+            settings_archived: None,
+            settings_error: None,
+            settings_seq: 0,
             chat: None,
             msgs: vec![],
             list,
@@ -630,11 +640,16 @@ impl Workspace {
     /// on the open chat, which ticks it and asks for the preview at once.
     pub fn open_reset(&mut self, chat: Option<String>, cx: &mut Context<Self>) {
         let Some(pid) = self.project_id.clone() else { return };
+        self.open_reset_in_project(chat, pid, cx);
+    }
+
+    fn open_reset_in_project(&mut self, chat: Option<String>, pid: String, cx: &mut Context<Self>) {
+        self.chat_menu = None;
         self.options_menu = false;
         self.details = true;
         let mut ui = ResetUi { preview_on_load: chat.is_some(), ..Default::default() };
         ui.choice.project_id = pid.clone();
-        ui.choice.start_fresh = true;
+        ui.choice.start_fresh = chat.is_none();
         if let Some(c) = chat {
             ui.choice.chats.insert(c);
         }
@@ -785,6 +800,7 @@ impl Workspace {
                         this.new_chat(cx);
                     }
                     this.load_projects(None, cx);
+                    if this.settings_open { this.load_settings_archived(cx); }
                 }
                 return;
             }
@@ -802,6 +818,7 @@ impl Workspace {
                         this.new_chat(cx);
                     }
                     this.load_projects(None, cx);
+                    if this.settings_open { this.load_settings_archived(cx); }
                 }
                 Err(e) => match e.preview.and_then(|p| serde_json::from_value::<api::ResetPreview>(p).ok()) {
                     Some(p) => {
@@ -855,6 +872,7 @@ impl Workspace {
     pub fn select_project(&mut self, id: String, cx: &mut Context<Self>) {
         if self.project_id.as_deref() != Some(&id) {
             self.project_id = Some(id);
+            self.chat_menu = None;
             self.show_archived = false;
             self.access = None;
             self.access_error = None;
@@ -1002,11 +1020,16 @@ impl Workspace {
 
     pub fn set_archived(&mut self, archive: bool, cx: &mut Context<Self>) {
         let Some(chat) = self.chat.clone() else { return };
+        self.set_chat_archived(chat.id, archive, cx);
+    }
+
+    fn set_chat_archived(&mut self, id: String, archive: bool, cx: &mut Context<Self>) {
         self.options_menu = false;
-        if archive && self.run.is_some() {
+        self.chat_menu = None;
+        if archive && self.run.as_ref().map(|r| r.chat_id == id).unwrap_or(false) {
             self.stop_reply(cx); // the reply is saved first; the runtime refuses archive while it runs
         }
-        let path = format!("/api/chats/{}/{}", chat.id, if archive { "archive" } else { "unarchive" });
+        let path = format!("/api/chats/{}/{}", id, if archive { "archive" } else { "unarchive" });
         self.api_call(
             cx,
             move |api| {
@@ -1027,6 +1050,7 @@ impl Workspace {
                         this.composer.update(cx, |c, cx| c.set_disabled(archived, cx));
                     }
                     this.load_projects(None, cx);
+                    if this.settings_open { this.load_settings_archived(cx); }
                 }
                 Err(e) => this.notice = Some((e.message, MetaKind::Bad, false)),
             },
@@ -1537,6 +1561,12 @@ impl Workspace {
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         if self.full_access_confirm.is_some() {
             self.full_access_confirm = None;
+        } else if self.reset.is_some() {
+            self.close_reset(cx);
+        } else if self.chat_menu.is_some() {
+            self.chat_menu = None;
+        } else if self.settings_open {
+            self.settings_open = false;
         } else if self.model_menu || self.access_menu || self.options_menu || self.project_input.is_some() || self.card_menu
             || self.memory_input.is_some() || self.memory_armed.is_some() {
             self.memory_input = None;
@@ -1674,7 +1704,7 @@ impl Workspace {
             };
             sessions = sessions.child(div().text_size(fs_12()).text_color(text_subtle()).px(px(10.)).py(px(4.)).child(text));
         }
-        for c in self.chats.iter().chain(self.archived.iter()) {
+        for c in self.chats.iter().chain(self.archived.iter().filter(|_| self.show_archived)) {
             let id = c.id.clone();
             let is_current = current.as_deref() == Some(&c.id);
             let streaming = self.run.as_ref().map(|r| r.chat_id == c.id).unwrap_or(false);
@@ -1688,7 +1718,31 @@ impl Workspace {
             if !c.archived {
                 row = if streaming { row.child(ui::dot(accent())) } else { row.child(ui::nav_count(ago(&c.updated_at))) };
             }
-            sessions = sessions.child(row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_chat(id.clone(), cx))));
+            let menu_id = id.clone();
+            let archive_id = id.clone();
+            let delete_id = id.clone();
+            let pid = c.project_id.clone();
+            let archived = c.archived;
+            row = row.child(div().id(SharedString::from(format!("chat-menu-{}", c.id)))
+                .size(px(28.)).flex_none().flex().items_center().justify_center().rounded(px(R_6))
+                .hover(|s| s.bg(bg_hover())).child(ui::icon("more").text_color(text_default()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.chat_menu = if this.chat_menu.as_ref() == Some(&menu_id) { None } else { Some(menu_id.clone()) };
+                    cx.notify();
+                })));
+            sessions = sessions.child(row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.chat_menu = None;
+                this.open_chat(id.clone(), cx);
+            })));
+            if self.chat_menu.as_ref() == Some(&c.id) {
+                sessions = sessions.child(div().p(px(6.)).rounded(px(R_8)).bg(bg_raised()).flex().flex_col()
+                    .child(ui::nav(SharedString::from(format!("archive-{}", c.id)), false)
+                        .child(if archived { "Restore chat" } else { "Archive chat" })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))))
+                    .child(ui::nav(SharedString::from(format!("delete-{}", c.id)), false).text_color(danger()).child("Delete chat…")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_reset_in_project(Some(delete_id.clone()), pid.clone(), cx)))));
+            }
         }
         if self.show_archived || archived_count > 0 {
             // `.nav.toggle-archived`
@@ -1835,6 +1889,13 @@ impl Workspace {
                     })))
                     .when(sessions_open, |d| d.child(sessions)),
             )
+            .child(ui::nav("settings", false).child("Settings")
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.settings_open = true;
+                    this.chat_menu = None;
+                    this.load_settings_archived(cx);
+                    cx.notify();
+                })))
             .into_any_element()
     }
 
@@ -1902,6 +1963,72 @@ impl Workspace {
                 cx.notify();
             })))
             .into_any_element()
+    }
+
+    fn load_settings_archived(&mut self, cx: &mut Context<Self>) {
+        self.settings_error = None;
+        self.settings_seq += 1;
+        let seq = self.settings_seq;
+        self.api_call(cx, |api| {
+            let projects = api.get::<api::Projects>("/api/projects")?;
+            let mut chats = Vec::new();
+            for project in projects.projects {
+                chats.extend(api.get::<api::Chats>(&format!("/api/chats?project_id={}&archived=1", project.id))?.chats);
+            }
+            Ok(chats)
+        }, move |this, result, _| {
+            if this.settings_seq != seq { return; }
+            match result {
+                Ok(chats) => this.settings_archived = Some(chats),
+                Err(error) => this.settings_error = Some(error.message),
+            }
+        });
+    }
+
+    fn render_settings(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use theme::*;
+        if !self.settings_open { return None; }
+        let mut list = div().id("archived-settings-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap(px(6.));
+        if let Some(error) = &self.settings_error {
+            list = list.child(div().text_color(danger()).child(error.clone()));
+        } else if let Some(chats) = &self.settings_archived {
+            if chats.is_empty() { list = list.child("No archived chats."); }
+            for chat in chats {
+                let restore_id = chat.id.clone();
+                let delete_id = chat.id.clone();
+                let pid = chat.project_id.clone();
+                let project = self.projects.iter().find(|p| p.id == pid).map(|p| p.name.clone()).unwrap_or_default();
+                list = list.child(div().flex().items_center().gap(px(8.)).py(px(8.)).border_b_1().border_color(border())
+                    .child(div().flex_1().min_w_0().child(ui::nav_title(chat.title.clone()))
+                        .child(div().text_size(fs_12()).text_color(text_subtle()).child(project)))
+                    .child(ui::nav(SharedString::from(format!("settings-restore-{}", chat.id)), false).w(px(76.)).child("Restore")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_chat_archived(restore_id.clone(), false, cx))))
+                    .child(ui::nav(SharedString::from(format!("settings-delete-{}", chat.id)), false).w(px(76.)).text_color(danger()).child("Delete…")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_reset_in_project(Some(delete_id.clone()), pid.clone(), cx)))));
+            }
+        } else { list = list.child("Loading archived chats…"); }
+        Some(div().id("settings-overlay").absolute().inset_0().flex().items_center().justify_center().bg(gpui::rgba(0x0000_0099))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().w(px(620.)).max_w_full().h(px(480.)).max_h_full().p(px(20.)).rounded(px(R_12))
+                .bg(bg_raised()).border_1().border_color(border_strong()).shadow_lg().flex().flex_col().gap(px(16.))
+                .child(div().flex().items_center().justify_between().child(div().text_size(fs_16()).text_color(text_strong()).child("Settings"))
+                    .child(ui::icon_btn("settings-close", "x", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.settings_open = false;
+                        cx.notify();
+                    }))))
+                .child(ui::nav("settings-archived-tab", true).child("Archived chats"))
+                .child(list)).into_any_element())
+    }
+
+    fn render_reset_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use theme::*;
+        self.reset.as_ref()?;
+        let content = self.render_reset(cx);
+        Some(div().id("reset-overlay").absolute().inset_0().flex().items_center().justify_center().bg(gpui::rgba(0x0000_0099))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().id("reset-dialog").w(px(520.)).max_w_full().max_h_full().overflow_y_scroll().py(px(16.))
+                .rounded(px(R_12)).bg(bg_raised()).border_1().border_color(border_strong()).shadow_lg()
+                .child(content)).into_any_element())
     }
 
     /// `.opt-menu`: top 48, right 48, min 220, raised, strong border, radius 12.
@@ -2085,7 +2212,7 @@ impl Workspace {
                 })),
         );
         if self.reset.is_some() {
-            return col.child(self.render_reset(cx)).into_any_element();
+            return col.into_any_element();
         }
         let Some(view) = self.memory.clone() else {
             return col.child(note(self.memory_error.clone().unwrap_or_else(|| "Loading…".into()))).into_any_element();
@@ -2757,7 +2884,9 @@ impl Render for Workspace {
                 .when(self.details && wide, |d| d.child(self.render_right_panel(cx)))
         };
         let confirm = self.render_full_access_confirm(cx);
-        let el = root.relative().child(app).children(confirm);
+        let settings = self.render_settings(cx);
+        let reset = self.render_reset_dialog(cx);
+        let el = root.relative().child(app).children(settings).children(reset).children(confirm);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.perf.render_count += 1;
         self.perf.render_ms_total += ms;
