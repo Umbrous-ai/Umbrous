@@ -86,6 +86,8 @@ pub struct ResetUi {
     pub working: bool,
     /// Options › Delete chat…: preview as soon as the chat list is in
     preview_on_load: bool,
+    /// bumped by every preview and tick change; an older preview reply is dropped
+    seq: u64,
 }
 
 /// One tick box in Start fresh.
@@ -638,11 +640,25 @@ impl Workspace {
             ResetTick::Project(id) => flip(&mut c.project, id),
             ResetTick::StartFresh => c.start_fresh = !c.start_fresh,
         }
-        // a different choice needs its own preview
+        // a different choice needs its own preview; one still loading is dropped
+        ui.seq += 1;
+        ui.working = false;
         ui.preview = None;
         ui.warning = None;
         ui.error = None;
         ui.done = None;
+        cx.notify();
+    }
+
+    /// Back to the ticks: the preview is dropped, so Delete needs a new one.
+    pub fn change_reset_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(ui) = self.reset.as_mut() else { return };
+        if ui.working {
+            return;
+        }
+        ui.preview = None;
+        ui.warning = None;
+        ui.error = None;
         cx.notify();
     }
 
@@ -659,9 +675,14 @@ impl Workspace {
         ui.warning = None;
         ui.done = None;
         let sel = ui.choice.selection();
+        ui.seq += 1;
+        let asked = ui.seq;
         self.api_call(cx, move |api| api.post::<api::ResetPreview>("/api/reset/preview", json!({"selection": sel})),
             move |this, r, _| {
                 let Some(ui) = this.reset.as_mut() else { return };
+                if ui.seq != asked {
+                    return; // the ticks changed while it loaded: that preview is not for them
+                }
                 ui.working = false;
                 match r {
                     Ok(p) => ui.preview = Some(p),
@@ -2228,47 +2249,53 @@ impl Workspace {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_reset(what.clone(), cx)))
         };
         let c = &ui.choice;
-        col = col.child(head(format!("Chats in {project}")));
-        match &ui.chats {
-            None => col = col.child(note("Loading…".into())),
-            Some(chats) if chats.is_empty() => col = col.child(note("No chats.".into())),
-            Some(chats) => {
-                col = col.child(tick("reset-all-chats".into(), format!("All chats in {project} ({}, archived too)", chats.len()),
-                                     c.all_chats, false, ResetTick::AllChats, cx));
-                for ch in chats {
-                    let label = if ch.archived { format!("{} (archived)", ch.title) } else { ch.title.clone() };
-                    col = col.child(tick(format!("reset-chat-{}", ch.id), label, c.chats.contains(&ch.id), true,
-                                         ResetTick::Chat(ch.id.clone()), cx));
+        if ui.preview.is_some() {
+            // The ticks fold away while a preview is shown, so its Delete stays
+            // in view and nothing can be ticked behind it. Changing the
+            // selection drops the preview; a new one is needed to delete.
+            col = col.child(div().px(px(20.)).pt(px(4.)).child(Self::small_button("reset-change", "Change selection".into(), false)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.change_reset_selection(cx)))));
+        } else {
+            col = col.child(head(format!("Chats in {project}")));
+            match &ui.chats {
+                None => col = col.child(note("Loading…".into())),
+                Some(chats) if chats.is_empty() => col = col.child(note("No chats.".into())),
+                Some(chats) => {
+                    col = col.child(tick("reset-all-chats".into(), format!("All chats in {project} ({}, archived too)", chats.len()),
+                                         c.all_chats, false, ResetTick::AllChats, cx));
+                    for ch in chats {
+                        let label = if ch.archived { format!("{} (archived)", ch.title) } else { ch.title.clone() };
+                        col = col.child(tick(format!("reset-chat-{}", ch.id), label, c.chats.contains(&ch.id), true,
+                                             ResetTick::Chat(ch.id.clone()), cx));
+                    }
                 }
             }
-        }
-        if let Some(view) = self.memory.clone().filter(|v| v.project_id.as_deref() == Some(c.project_id.as_str())) {
-            col = col.child(head("Personal memory".into()));
-            if view.personal.is_empty() {
-                col = col.child(note("Nothing saved.".into()));
-            } else {
-                col = col.child(tick("reset-all-personal".into(), format!("All personal memory ({}, every project)", view.personal.len()),
-                                     c.all_personal, false, ResetTick::AllPersonal, cx));
+            if let Some(view) = self.memory.clone().filter(|v| v.project_id.as_deref() == Some(c.project_id.as_str())) {
+                col = col.child(head("Personal memory".into()));
+                if view.personal.is_empty() {
+                    col = col.child(note("Nothing saved.".into()));
+                } else {
+                    col = col.child(tick("reset-all-personal".into(), format!("All personal memory ({}, every project)", view.personal.len()),
+                                         c.all_personal, false, ResetTick::AllPersonal, cx));
+                }
+                for m in &view.personal {
+                    col = col.child(tick(format!("reset-p-{}", m.id), m.text.clone(), c.personal.contains(&m.id), true,
+                                         ResetTick::Personal(m.id.clone()), cx));
+                }
+                col = col.child(head(format!("Memory of {project}")));
+                if view.project.is_empty() {
+                    col = col.child(note("Nothing saved.".into()));
+                } else {
+                    col = col.child(tick("reset-all-project".into(), format!("All of {project}'s memory ({})", view.project.len()),
+                                         c.all_project, false, ResetTick::AllProject, cx));
+                }
+                for m in &view.project {
+                    col = col.child(tick(format!("reset-m-{}", m.id), m.text.clone(), c.project.contains(&m.id), true,
+                                         ResetTick::Project(m.id.clone()), cx));
+                }
             }
-            for m in &view.personal {
-                col = col.child(tick(format!("reset-p-{}", m.id), m.text.clone(), c.personal.contains(&m.id), true,
-                                     ResetTick::Personal(m.id.clone()), cx));
-            }
-            col = col.child(head(format!("Memory of {project}")));
-            if view.project.is_empty() {
-                col = col.child(note("Nothing saved.".into()));
-            } else {
-                col = col.child(tick("reset-all-project".into(), format!("All of {project}'s memory ({})", view.project.len()),
-                                     c.all_project, false, ResetTick::AllProject, cx));
-            }
-            for m in &view.project {
-                col = col.child(tick(format!("reset-m-{}", m.id), m.text.clone(), c.project.contains(&m.id), true,
-                                     ResetTick::Project(m.id.clone()), cx));
-            }
-        }
-        col = col.child(div().pt(px(8.)).child(tick("reset-fresh".into(), "Start a new chat afterwards".into(), c.start_fresh, false,
-                                                     ResetTick::StartFresh, cx)));
-        if ui.preview.is_none() {
+            col = col.child(div().pt(px(8.)).child(tick("reset-fresh".into(), "Start a new chat afterwards".into(), c.start_fresh, false,
+                                                         ResetTick::StartFresh, cx)));
             col = col.child(div().px(px(20.)).pt(px(6.)).child(Self::small_button("reset-preview", "Preview".into(), false)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.preview_reset(cx)))));
         }

@@ -864,6 +864,15 @@
   // that preview. Cancel sends nothing. The runtime refuses a preview that no
   // longer matches (preview_changed) and sends the new one to check instead.
   let resetOpen = false, resetPreselect = null;
+  // Bumped on every tick change, open and close: a preview, or a reply to a
+  // preview or delete, from an older generation is thrown away, so Delete can
+  // only ever send the selection that is ticked now and was previewed.
+  let resetGen = 0;
+  function invalidateReset() {
+    resetGen++;
+    const out = $('#reset-preview');
+    if (out) out.textContent = '';
+  }
   function renderResetEntry() {
     const sec = $('#reset'), box = $('#reset-body');
     if (!sec || !box) return;
@@ -879,6 +888,7 @@
     box.appendChild(r);
   }
   async function openReset(preselectChat) {
+    resetGen++;
     resetOpen = true;
     resetPreselect = preselectChat;
     $('#reset').hidden = false;
@@ -896,7 +906,7 @@
     renderResetPicker(want, active.chats.concat(archived.chats), mem);
     if (preselectChat) previewReset();
   }
-  function closeReset() { resetOpen = false; resetPreselect = null; renderResetEntry(); }
+  function closeReset() { resetGen++; resetOpen = false; resetPreselect = null; renderResetEntry(); }
   function pick(label, value, group, checked, sub) {
     const lab = el('label', 'reset-pick' + (sub ? ' sub' : ''));
     const cb = el('input');
@@ -939,6 +949,7 @@
     const out = el('div');
     out.id = 'reset-preview';
     box.appendChild(out);
+    box.addEventListener('change', (e) => { if (e.target.matches('input[data-group]')) invalidateReset(); });
   }
   function resetSelection() {
     const box = $('#reset-body');
@@ -954,14 +965,16 @@
     const err = $('#reset-err'), out = $('#reset-preview');
     err.hidden = true;
     out.textContent = '';
+    const gen = ++resetGen;
     const sel = resetSelection();
     let pv;
     try { pv = await getJson('/api/reset/preview', { json: { selection: sel } }); }
-    catch (e) { err.textContent = e.message; err.hidden = false; return; }
-    showResetPreview(sel, pv, null);
+    catch (e) { if (gen === resetGen) { err.textContent = e.message; err.hidden = false; } return; }
+    if (gen !== resetGen) return; // the ticks changed while it loaded
+    showResetPreview(sel, pv, null, gen);
   }
   const RESET_WORD = { chat: 'chat', personal: 'personal memory', project: 'project memory', suggestion: 'waiting suggestion' };
-  function showResetPreview(sel, pv, warning) {
+  function showResetPreview(sel, pv, warning, gen) {
     const out = $('#reset-preview');
     out.textContent = '';
     const box = el('div', 'reset-preview');
@@ -990,7 +1003,7 @@
     const err = el('div', 'acc-err');
     err.hidden = true;
     const r = el('div', 'acc-row');
-    const go = memButton(`Delete ${n} item${n === 1 ? '' : 's'}`, () => confirmReset(sel, pv.preview_id, err), 'danger');
+    const go = memButton(`Delete ${n} item${n === 1 ? '' : 's'}`, () => confirmReset(sel, pv.preview_id, err, gen), 'danger');
     go.dataset.act = 'reset-confirm';
     if (pv.blocked.length) {
       go.disabled = true;
@@ -1001,13 +1014,18 @@
     r.append(go, cancel);
     box.append(err, r);
     out.appendChild(box);
+    // a long list can push Delete below the edge; bring it into view
+    if (r.scrollIntoView) r.scrollIntoView({ block: 'nearest' });
   }
-  async function confirmReset(sel, previewId, err) {
+  async function confirmReset(sel, previewId, err, gen) {
+    // belt and braces: the preview is cleared on any tick change, but never
+    // send a selection that differs from the ticks shown now
+    if (gen !== resetGen || JSON.stringify(sel) !== JSON.stringify(resetSelection())) { invalidateReset(); return; }
     const r = await api.fetch('/api/reset', { json: { selection: sel, preview_id: previewId } });
     let j = null;
     try { j = await r.json(); } catch (_) { j = null; }
     if (r.status === 409 && j && j.preview) {
-      showResetPreview(sel, j.preview, j.message);
+      if (gen === resetGen) showResetPreview(sel, j.preview, j.message, gen);
       return;
     }
     if (!r.ok) { err.textContent = (j && (j.message || j.error)) || 'HTTP ' + r.status; err.hidden = false; return; }

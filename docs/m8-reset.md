@@ -23,7 +23,7 @@ bin/umbrous                                   # Details › Start fresh…, or O
 bin/umbrous reset --chat chat_… --personal mem_…          # preview: the exact items and what stays
 bin/umbrous reset --all-chats General --project-memory General --personal all
 bin/umbrous reset --chat chat_… --confirm rst_…           # delete exactly that preview (quit the app first)
-bin/umbrous test                              # 328 tests; no Ollama needed
+bin/umbrous test                              # 329 tests; no Ollama needed
 ```
 
 In the browser page: Details › **Start fresh** lists this project's chats
@@ -41,7 +41,7 @@ Options › **Delete chat…**, the same steps (below).
 |---|---|
 | **Selection** | What you ticked. Each part names one store: `chats` (ids), `chats_in` (all chats of one project, archived too), `personal` (`"all"` or ids), `project` (`{project id: "all" or ids}`). There is no key for "everything" |
 | **Preview** | The runtime's answer for a selection: the exact items (chats with their message counts, memory items with their text, suggestions waiting from those chats), counts, what stays, and a **preview id**. Making one changes nothing |
-| **Preview id** | `rst_` + a fingerprint of the selection and of each item's state (a chat's message count, last message, archive state and pending turn; a memory item's text, kind, scope and edit time). Same state, same id |
+| **Preview id** | `rst_` + a fingerprint of the selection and of each item's state (a chat's message count, last message, archive state and pending turn; a memory item's text, kind, scope and edit time; a waiting suggestion's text, quote, kind, store, scope and edit mark). Same state, same id |
 | **Confirm** | `POST /api/reset {selection, preview_id}`: deletes exactly that preview, or nothing |
 | **Changed preview** | Anything that would make the id differ: a new message in a selected chat, a new chat or item now matched by "all", an edit, an archive, an item already gone. Confirm is refused and the new preview comes back to be checked |
 | **What stays** (`kept`) | Records that refer to the selection but are not part of it, with counts, shown in every preview and every result |
@@ -85,6 +85,13 @@ So "All personal memory" means the items you saw, not whatever matches at the
 moment of the click. If a new item appears in between, you see it before it
 can go. Two confirms at the same time delete once; the second gets
 `preview_changed` (tested with two threads).
+
+The page and the app also never let a preview outlive its selection. Any
+change to the ticks clears the preview and its Delete, and a preview answer
+that arrives after the ticks changed is thrown away, so Delete only ever
+sends the selection that is ticked now. In the app the ticks fold away while
+a preview is shown ("Change selection" brings them back and drops the
+preview), which also keeps Delete in view; the page scrolls Delete into view.
 
 ## What stays, and why the result says so
 
@@ -226,10 +233,10 @@ no longer count as a change. Put it back.
 | Test | Checks |
 |---|---|
 | `test_m8_reset.PreviewTests` (4) | the exact items and counts; a preview stores nothing and is stable; all chats of one project includes archived ones and no others; no implicit delete-all and every bad selection; what stays (task records and receipts, memory from the chat, review history, replies using the memory) |
-| `ConfirmTests` (10) | cancel is a no-op; a mixed selection deletes exactly the preview (a diff of every table); reset memory never enters a fresh context; five kinds of change need revalidation and nothing is deleted; an item gone since the preview; a wrong or foreign preview id; a busy chat refuses the whole reset and the lock is forgotten after; a chat takes its pending turn and waiting suggestions only; the freed space holds no trace; two confirms at once delete once |
+| `ConfirmTests` (11) | cancel is a no-op; a mixed selection deletes exactly the preview (a diff of every table); reset memory never enters a fresh context; five kinds of change need revalidation and nothing is deleted; a waiting suggestion edited in review (text, kind, store) needs revalidation; an item gone since the preview; a wrong or foreign preview id; a busy chat refuses the whole reset and the lock is forgotten after; a chat takes its pending turn and waiting suggestions only; the freed space holds no trace; two confirms at once delete once |
 | `ApiTests` (2) | preview, cancel, confirm, a fresh chat's prompt lacks the reset text, the log has no text; a changed preview over HTTP, errors, 405, the session credential |
 | `CliTests` (2) | preview then `--confirm`; refused while the runtime runs |
-| `test_browser_m8` | Delete chat… previews the open chat; Cancel sends nothing; a changed preview is shown, not silently widened; confirm, new chat, the next prompt lacks the reset memory |
+| `test_browser_m8` | Delete chat… previews the open chat; Cancel sends nothing; unticking after a preview removes its Delete, and a preview answer for older ticks is discarded; a changed preview is shown, not silently widened; confirm, new chat, the next prompt lacks the reset memory |
 | `test_validate_scripts` (M8 cases) | `validate-m8.sh` fails on any app failure and on wrong records: nothing deleted, too much deleted, memory left, text left in the freed space, the fresh reply given reset memory, memory text in a log, no `reset.done` |
 | `api.rs` `reset_choice_names_each_store_and_never_everything`, `reset_preview_and_result_parse` | the app's selection and its reading of previews and results |
 | `test_browser_m2` | Options now offers **Delete chat…** (it opens the preview; it deletes nothing itself) |

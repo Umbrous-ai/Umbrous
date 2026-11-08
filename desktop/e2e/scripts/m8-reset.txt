@@ -34,6 +34,12 @@ record cancelled
 # 2. a mixed selection, previewed
 reset_open
 reset_tick chat What do you remember
+reset_preview
+expect reset preview 1 items
+# unticking after a preview drops it, so its Delete cannot send the old choice
+reset_tick chat What do you remember
+expect reset open
+reset_tick chat What do you remember
 reset_tick personal ZEBRA-SHIP-731
 reset_tick all_project
 reset_preview

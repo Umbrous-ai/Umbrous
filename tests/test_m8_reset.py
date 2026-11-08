@@ -24,6 +24,7 @@ from tests.fake_ollama import FakeModel, FakeOllama, notes_agent
 from tests.helpers import RunningRuntime
 from umbrous.history.store import HistoryStore
 from umbrous.memory.retrieve import select
+from umbrous.memory.review import Review
 from umbrous.memory.store import Memory
 from umbrous.persistence import db
 from umbrous.reset import Reset, ResetError
@@ -74,6 +75,13 @@ class Base(unittest.TestCase):
 
     def ids(self, preview, kind=None):
         return [i["id"] for i in preview["items"] if kind in (None, i["type"])]
+
+    def add_candidate(self, cid, chat, status):
+        self.sql("INSERT INTO memory_candidates (id, project_id, chat_id, task_id, store, kind, text, quote, "
+                 "text_hash, scope, basis, evidence, status, created_at) VALUES (?, ?, ?, 'tsk_1', 'project', "
+                 "'lesson', ?, ?, 'h', ?, 'message', '[]', ?, 'now')",
+                 (cid, self.a, chat, "Lesson MARKCAND" if status == "pending" else "",
+                  "quote MARKCAND" if status == "pending" else "", json.dumps(self.a), status))
 
 
 class PreviewTests(Base):
@@ -133,13 +141,6 @@ class PreviewTests(Base):
                                 "replies_using_memory": 1})
         self.assertIn("purge tasks", next(k["text"] for k in pv["kept"] if k["what"] == "task_records"))
 
-    def add_candidate(self, cid, chat, status):
-        self.sql("INSERT INTO memory_candidates (id, project_id, chat_id, task_id, store, kind, text, quote, "
-                 "text_hash, scope, basis, evidence, status, created_at) VALUES (?, ?, ?, 'tsk_1', 'project', "
-                 "'lesson', ?, ?, 'h', ?, 'message', '[]', ?, 'now')",
-                 (cid, self.a, chat, "Lesson MARKCAND" if status == "pending" else "",
-                  "quote MARKCAND" if status == "pending" else "", json.dumps(self.a), status))
-
 
 class ConfirmTests(Base):
     def test_cancel_is_a_no_op(self):
@@ -197,6 +198,27 @@ class ConfirmTests(Base):
                 new = e.exception.preview
                 self.assertNotEqual(new["preview_id"], pv["preview_id"])
                 self.rs.confirm(sel, new["preview_id"])                # the new preview, confirmed, works
+
+    def test_an_edited_waiting_suggestion_needs_revalidation(self):
+        # Codex: a suggestion edited in review after the preview (text, kind,
+        # store or scope) must make the old preview stale, like a memory edit
+        review = Review(self.path, self.mem)
+        edits = {"text": {"text": "Lesson MARKCAND edited"}, "kind": {"kind": "decision"},
+                 "store": {"store": "personal", "scope": "all"}}
+        for n, (name, kw) in enumerate(edits.items()):
+            with self.subTest(name):
+                cand = f"cand_{n:016d}"
+                self.add_candidate(cand, self.a2, "pending")
+                sel = {"chats": [self.a2]}
+                pv = self.rs.preview(sel)
+                self.assertIn(cand, self.ids(pv, "suggestion"))
+                review.edit(cand, **kw)
+                before = self.dump()
+                with self.assertRaises(ResetError) as e:
+                    self.rs.confirm(sel, pv["preview_id"])
+                self.assertEqual(e.exception.code, "preview_changed")
+                self.assertEqual(self.dump(), before)
+                self.sql("DELETE FROM memory_candidates WHERE id = ?", (cand,))
 
     def test_an_item_gone_since_the_preview_is_refused(self):
         sel = {"chats": [self.a1, self.a2]}

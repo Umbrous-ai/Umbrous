@@ -55,6 +55,7 @@ class BrowserResetTests(unittest.TestCase):
         self.assertIn("What stays", out["chatPreview"])
         self.assertIn("Time Machine", out["chatPreview"])
         self.assertEqual(out["afterCancel"], {"posts": ["/api/reset/preview"], "chat": 200})
+        self.assertEqual((out["afterUntick"], out["afterStale"]), (0, 0))  # no Delete for a changed selection
         self.assertEqual(out["firstItems"], 2)                       # the chat and one personal item
         self.assertIn("changed since the preview", out["changed"])
         self.assertEqual(out["changedItems"], 3)                     # the new item is shown, not silently deleted

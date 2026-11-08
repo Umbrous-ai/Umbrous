@@ -176,7 +176,8 @@ class Reset:
 
         marks = ",".join("?" * len(chat_ids))
         suggestions = c.execute(
-            f"SELECT id, chat_id, store, kind, created_at FROM memory_candidates WHERE status = 'pending' "
+            f"SELECT id, chat_id, store, kind, created_at, text, quote, scope, edited FROM memory_candidates "
+            f"WHERE status = 'pending' "
             f"AND chat_id IN ({marks}) ORDER BY rowid", chat_ids).fetchall() if chat_ids else []
 
         items: List[dict] = []
@@ -196,9 +197,10 @@ class Reset:
         for mid, kind, text, _, updated, pid in project:
             items.append({"type": "project", "id": mid, "kind": kind, "text": text, "project_id": pid,
                           "project": projects.get(pid, pid), "_fp": [kind, text, updated]})
-        for sid, cid, store, kind, created in suggestions:
+        for sid, cid, store, kind, created, text, quote, scope, edited in suggestions:
+            # every field review can change, so an edit after the preview is caught
             items.append({"type": "suggestion", "id": sid, "chat_id": cid, "store": store, "kind": kind,
-                          "_fp": [created]})
+                          "_fp": [created, store, kind, text, quote, scope, edited]})
 
         fp = hashlib.sha256(json.dumps([sel, [(i["type"], i["id"], i["_fp"]) for i in items]],
                                        sort_keys=True).encode()).hexdigest()

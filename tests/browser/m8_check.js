@@ -35,7 +35,24 @@ const out = {};
   // A new preview: the chat and all personal memory
   await page.click('#reset-body [data-act="reset-open"]');
   await page.waitForSelector('#reset-body input[data-group="chats"]');
-  await page.check(`#reset-body input[data-group="chats"][value="${goneId}"]`);
+  const chatBox = `#reset-body input[data-group="chats"][value="${goneId}"]`;
+  // Codex P1: preview a chat, then untick it; the preview and its Delete go
+  await page.check(chatBox);
+  await page.click('#reset-body [data-act="reset-preview"]');
+  await page.waitForSelector('#reset-preview [data-act="reset-confirm"]');
+  await page.uncheck(chatBox);
+  out.afterUntick = await page.$$eval('#reset-preview [data-act="reset-confirm"]', (r) => r.length);
+  // a preview answer that arrives after the ticks changed is thrown away
+  let release;
+  const held = new Promise((r) => { release = r; });
+  await page.route('**/api/reset/preview', async (route) => { await held; await route.continue(); });
+  await page.check(chatBox);
+  await page.click('#reset-body [data-act="reset-preview"]');   // asks for the chat alone
+  await page.check('#reset-body input[data-group="personal"]');  // the ticks change while it loads
+  release();
+  await page.waitForTimeout(400);
+  await page.unroute('**/api/reset/preview');
+  out.afterStale = await page.$$eval('#reset-preview [data-act="reset-confirm"]', (r) => r.length);
   await page.check('#reset-body input[data-group="personal"]');
   await page.click('#reset-body [data-act="reset-preview"]');
   await page.waitForSelector('#reset-preview .reset-preview');
