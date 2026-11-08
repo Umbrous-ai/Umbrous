@@ -12,6 +12,7 @@ from tests.fake_ollama import FakeModel, FakeOllama
 from tests.helpers import RunningRuntime
 from umbrous.history.store import HistoryError, HistoryStore, make_title
 from umbrous.persistence import db
+from tests.helpers import project_fixture_db
 
 
 def row_counts(path):
@@ -27,30 +28,33 @@ class StoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "u.db"
-        db.connect(self.path).close()
+        project_fixture_db(self.path).close()
         self.h = HistoryStore(self.path)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_fresh_database_has_general(self):
-        self.assertEqual([(p.id, p.name) for p in self.h.list_projects()], [("prj_general", "General")])
+    def test_fresh_database_has_no_projects(self):
+        fresh = Path(self.tmp.name) / "fresh.db"
+        db.connect(fresh).close()
+        self.assertEqual(HistoryStore(fresh).list_projects(), [])
 
-    def test_chat_without_project_recreates_only_general(self):
+    def test_chat_without_project_has_isolated_scope(self):
         with sqlite3.connect(self.path) as c:
             c.execute("DELETE FROM projects")
         chat = self.h.create_chat()
         self.h.append_exchange(chat.id, "Hello without a project", "Hello", "test", "complete")
-        self.assertEqual(chat.project_id, "prj_general")
-        self.assertEqual(len(self.h.list_projects()), 1)
+        self.assertTrue(chat.project_id.startswith("prj_session_"))
+        self.assertEqual(self.h.list_projects(), [])
         self.assertEqual(self.h.get_chat(chat.id).messages, 2)
-        self.assertEqual(self.h.create_chat().project_id, chat.project_id)
+        self.assertNotEqual(self.h.create_chat().project_id, chat.project_id)
+        self.assertEqual(len(self.h.list_chats()), 2)
 
-    def test_chat_without_project_reuses_general_name(self):
+    def test_chat_without_project_does_not_reuse_general(self):
         with sqlite3.connect(self.path) as c:
             c.execute("DELETE FROM projects")
         project = self.h.create_project("GENERAL")
-        self.assertEqual(self.h.create_chat().project_id, project.id)
+        self.assertNotEqual(self.h.create_chat().project_id, project.id)
         self.assertEqual(len(self.h.list_projects()), 1)
         with self.assertRaises(HistoryError):
             self.h.create_chat("prj_missing")
@@ -151,12 +155,12 @@ class StoreTests(unittest.TestCase):
         db.record_launch(conn, "0.1.0")
         db.save_probe(conn, "q:3b", "sha256:1", True, "passed", "ok", 10)
         conn.close()
-        conn = db.connect(path)
+        conn = project_fixture_db(path)
         self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
         self.assertEqual(db.launch_count(conn), 1)
         self.assertIn(("q:3b", "sha256:1"), db.load_probes(conn))
         conn.close()
-        self.assertEqual([p.name for p in HistoryStore(path).list_projects()], ["General"])
+        self.assertEqual(HistoryStore(path).list_projects(), [])
 
 
 # ---------------------------------------------------------------- API
@@ -186,8 +190,9 @@ class HistoryApiTests(unittest.TestCase):
             for body in ({}, {"project_id": None}):
                 status, _, result = rt.post_json("/api/chats", body)
                 self.assertEqual(status, 201)
-                self.assertEqual(json.loads(result)["chat"]["project_id"], "prj_general")
-            self.assertEqual(len(rt.get_json("/api/projects")[1]["projects"]), 1)
+                self.assertTrue(json.loads(result)["chat"]["project_id"].startswith("prj_session_"))
+            self.assertEqual(rt.get_json("/api/projects")[1]["projects"], [])
+            self.assertEqual(len(rt.get_json("/api/chats")[1]["chats"]), 2)
 
     def test_history_survives_a_restart_in_the_right_project(self):
         with self.rt() as rt:
@@ -355,7 +360,7 @@ class HistoryApiTests(unittest.TestCase):
             self.assertEqual(rt.post_json("/api/chats", {"project_id": "prj_nope1234"})[0], 404)
             self.assertEqual(rt.post_json("/api/chats", {"project_id": "../etc"})[0], 400)
             self.assertEqual(rt.get_json("/api/chats?project_id=x%27%20OR%201=1")[0], 400)
-            self.assertEqual(rt.get_json("/api/chats")[0], 400)
+            self.assertEqual(rt.get_json("/api/chats")[0], 200)
 
     def test_partial_reply_is_saved_with_its_status(self):
         with self.rt() as rt:

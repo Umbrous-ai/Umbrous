@@ -32,6 +32,7 @@ A=$(python3 "$ROOT/desktop/e2e/stress.py" seed-coding-project "$W/m9-fixture/a")
 B=$(python3 "$ROOT/desktop/e2e/stress.py" seed-coding-project "$W/m9-fixture/b") && [ -d "$B" ] || abort "could not create project B"
 mkdir -p "$H" && echo "{\"codex_enabled\": false, \"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json" || abort "could not write $H/config.json"
 U() { PYTHONPATH="$ROOT" python3 -m umbrous --home "$H" "$@"; }
+seed_general "$H"
 for m in coder:3b slow-coder:3b; do U probe "$m" >/dev/null || abort "tool check on $m"; done
 S="$ROOT/desktop/e2e/scripts"
 e2e m9-coding m9-coding.txt "$H"
@@ -84,6 +85,7 @@ D=$(python3 "$ROOT/desktop/e2e/stress.py" seed-coding-project "$W/m9-fixture/d")
 mkdir -p "$H2" && echo "{\"codex_enabled\": false, \"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H2/config.json" || abort "could not write $H2/config.json"
 python3 "$ROOT/desktop/e2e/stress.py" fake-coding $PORT >/dev/null 2>&1 & FAKE=$!; sleep 1
 kill -0 "$FAKE" 2>/dev/null || abort "the fake Ollama did not start again (port $PORT in use?)"
+seed_general "$H2"
 PYTHONPATH="$ROOT" python3 -m umbrous --home "$H2" workspace General "$C" --profile code_ask_commands >/dev/null || abort "could not attach project C"
 e2e m9-approve m9-approve.txt "$H2"
 cleanup; FAKE=""

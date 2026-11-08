@@ -31,7 +31,7 @@ e2e background-delete background-delete.txt "$H"
 python3 - "$H/umbrous.db" <<'PY'
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as c:
-    assert c.execute('SELECT name FROM projects').fetchall() == [('Other',)]
+    assert c.execute('SELECT name FROM projects WHERE is_session=0').fetchall() == [('Other',)]
     assert sorted(c.execute('SELECT title FROM chats').fetchall()) == [('Keep Other E',), ('read readme.txt',)]
     assert sorted(c.execute('SELECT status FROM messages WHERE role="assistant"').fetchall()) == [('complete',), ('stopped',)]
     assert c.execute('SELECT COUNT(*) FROM pending_turns').fetchone()[0] == 0

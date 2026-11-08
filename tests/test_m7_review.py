@@ -26,6 +26,7 @@ from umbrous.memory.retrieve import select
 from umbrous.memory.review import Review, parse, text_hash
 from umbrous.memory.store import Memory, MemoryError_
 from umbrous.persistence import db
+from tests.helpers import project_fixture_db
 
 MSG = "I prefer short answers in tables. We decided to ship on Friday. What is in the workspace?"
 REPLY = "Here it is. Lesson: the build script needs a clean folder. the user prefers long essays"
@@ -45,7 +46,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "u.db"
-        db.connect(self.path).close()
+        project_fixture_db(self.path).close()
         self.history = HistoryStore(self.path)
         self.mem = Memory(self.path)
         self.rev = Review(self.path, self.mem)
@@ -466,6 +467,7 @@ class CliTests(unittest.TestCase):
         from tests.test_cli import run
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
+            project_fixture_db(home / "umbrous.db").close()
             self.assertEqual(run("memory", "suggestions", home=home).returncode, 0)
             path = home / "umbrous.db"
             mem = Memory(path)

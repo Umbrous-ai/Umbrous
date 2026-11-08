@@ -18,6 +18,16 @@ from umbrous.persistence import db
 from umbrous.receipts.redaction import default_redactor
 
 
+def project_fixture_db(path):
+    """Explicit General project for legacy project-scoped acceptance tests."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = not path.exists()
+    conn = db.connect(path)
+    if fresh:
+        conn.execute("INSERT OR IGNORE INTO projects (id, name, name_key, created_at) VALUES ('prj_general', 'General', 'general', '2026-01-01T00:00:00Z')")
+    return conn
+
+
 class RunningRuntime:
     """Context manager: starts the runtime exactly as `serve` does, minus the browser."""
 
@@ -34,7 +44,7 @@ class RunningRuntime:
         self.config = load_config(self.home, {"port": 0, "codex_enabled": False, **self.overrides})
         self.log_stream = io.StringIO()
         setup_logging(self.config, stream=self.log_stream)
-        self.conn = db.connect(self.config.db_path)
+        self.conn = project_fixture_db(self.config.db_path)
         db.record_launch(self.conn, "test")
         self.server, self.runtime = make_server(self.config, db.schema_version(self.conn), db.launch_count(self.conn))
         self.policy = self.runtime.policy

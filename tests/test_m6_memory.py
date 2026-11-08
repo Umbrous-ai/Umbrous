@@ -25,6 +25,7 @@ from umbrous.memory import retrieve
 from umbrous.memory.retrieve import select
 from umbrous.memory.store import MAX_TEXT, Memory, MemoryError_
 from umbrous.persistence import db
+from tests.helpers import project_fixture_db
 
 
 def models():
@@ -36,7 +37,7 @@ class StoreBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "u.db"
-        db.connect(self.path).close()
+        project_fixture_db(self.path).close()
         self.history = HistoryStore(self.path)
         self.mem = Memory(self.path)
         self.a = self.history.create_project("Alpha").id

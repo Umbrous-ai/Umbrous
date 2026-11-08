@@ -111,10 +111,11 @@ fn snapshot(ws: &Workspace, label: &str) -> Value {
 async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut AsyncApp) -> Result<Option<Value>, String> {
     match cmd {
         "sleep" => sleep(cx, arg.parse().unwrap_or(500)).await,
-        "wait_ready" => wait_until(cx, window, arg.parse().unwrap_or(30), "ready", |ws| matches!(ws.phase, Phase::Ready) && !ws.projects.is_empty()).await?,
+        "wait_ready" => wait_until(cx, window, arg.parse().unwrap_or(30), "ready", |ws| matches!(ws.phase, Phase::Ready) && ws.models.is_some()).await?,
         "wait_failed" => wait_until(cx, window, arg.parse().unwrap_or(30), "failure", |ws| matches!(ws.phase, Phase::Failed(_))).await?,
         "wait_models" => wait_until(cx, window, 30, "models", |ws| ws.models.is_some()).await?,
         "record" => return Ok(window.update(cx, |ws, _, _| snapshot(ws, arg)).ok()),
+        "new_standalone_chat" => { window.update(cx, |ws, _, cx| ws.new_standalone_chat(cx)).ok(); }
         "new_chat" => {
             window.update(cx, |ws, _, cx| ws.new_chat(cx)).ok();
         }

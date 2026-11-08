@@ -67,6 +67,8 @@ class Child:
     """`serve --desktop` in a child process, with the protocol helpers the tests need."""
 
     def __init__(self, home: Path, hang_reads: bool = False) -> None:
+        from tests.helpers import project_fixture_db
+        project_fixture_db(home / "umbrous.db").close()
         env = dict(os.environ, PYTHONPATH=str(REPO))
         env.pop("UMBROUS_PORT", None)
         if hang_reads:

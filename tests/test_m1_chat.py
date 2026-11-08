@@ -19,6 +19,7 @@ from umbrous.model.ollama import OllamaAdapter
 from umbrous.model.probe import run_probe
 from umbrous.model.router import ModelRouter
 from umbrous.persistence import db
+from tests.helpers import project_fixture_db
 
 
 def free_port() -> int:
@@ -174,7 +175,7 @@ class ProbeAndRouterTests(unittest.TestCase):
         self.a = OllamaAdapter(self.fake.url)
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "u.db"
-        db.connect(self.db_path).close()
+        project_fixture_db(self.db_path).close()
         self.router = ModelRouter(self.a, self.db_path)
 
     def tearDown(self):

@@ -71,6 +71,9 @@ impl PendingApproval {
 }
 
 impl Workspace {
+    pub(super) fn permissions_label(&self) -> &'static str {
+        if self.project_id.as_ref().map(|p| !p.starts_with("prj_session_")).unwrap_or(false) { "Manage project permissions" } else { "Manage chat permissions" }
+    }
     pub(super) fn selected_model_info(&self) -> Option<&api::ModelInfo> {
         self.models.as_ref().and_then(|ms| ms.models.iter().find(|m| Some(&m.name) == self.model.as_ref()))
     }
@@ -111,12 +114,13 @@ impl Workspace {
             return;
         };
         let view = self.view;
+        let advance_setup = self.setup_step == Some(2);
         let path = format!("/api/chats/{}/access", chat.id);
         self.api_call(cx, move |api| api.post::<api::OneChat>(&path, json!({ "access": access })), move |this, r, cx| match r {
             Ok(one) => {
                 if let Some(c) = this.chat.as_mut().filter(|c| c.id == one.chat.id) { c.access = one.chat.access.clone(); }
                 if let Some(c) = this.chats.iter_mut().find(|c| c.id == one.chat.id) { c.access = one.chat.access; }
-                if this.view == view && this.setup_step == Some(2) { this.setup_step = Some(3); this.check_tools(cx); }
+                if this.view == view && advance_setup && this.setup_step == Some(2) { this.setup_step = Some(3); this.check_tools(cx); }
             }
             Err(e) => this.access_error = Some(e.message),
         });
@@ -145,7 +149,20 @@ impl Workspace {
     /// project's default for other chats is Read only; the level you chose is stored on
     /// this chat only. Picking the folder is the choice; nothing is attached otherwise.
     pub(super) fn choose_folder(&mut self, profile: &'static str, cx: &mut Context<Self>) {
-        if self.project_id.is_none() { return }
+        if self.project_id.is_none() {
+            if self.loading_chat { return; }
+            self.loading_chat = true;
+            let view = self.view;
+            self.api_call(cx, |api| api.post::<api::OneChat>("/api/chats", json!({})), move |this, result, cx| {
+                if this.view != view { return; }
+                this.loading_chat = false;
+                match result {
+                    Ok(one) => { this.project_id = Some(one.chat.project_id.clone()); this.chat = Some(one.chat); this.load_chats(cx); this.choose_folder(profile, cx); }
+                    Err(e) => this.access_error = Some(e.message),
+                }
+            });
+            return;
+        }
         self.access_menu = false;
         let view = self.view;
         let project = self.project_id.clone();
@@ -354,7 +371,7 @@ impl Workspace {
         if let Some(e) = &self.access_error {
             menu = menu.child(div().px(px(8.)).py(px(6.)).text_size(fs_12()).text_color(danger()).child(e.clone()));
         }
-        menu = menu.child(ui::pill("manage-access-permissions").child("Manage project permissions").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx))));
+        menu = menu.child(ui::pill("manage-access-permissions").child(self.permissions_label()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx))));
         Some(menu.into_any_element())
     }
 
@@ -388,15 +405,15 @@ impl Workspace {
             .when(command.is_none(), |d| d.child(div().mt(px(6.)).w_full().child(format!("{}{}",
                 what.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default(), what.chars().skip(1).collect::<String>()))))
             .child(div().mt(px(6.)).w_full().text_size(fs_12()).text_color(text_subtle()).font_family(MONO)
-                .child(match ap.resource.as_str() { "" | "." => format!("{} in the project's folder", ap.action), r => format!("{} on {r}", ap.action) }))
+                .child(match ap.resource.as_str() { "" | "." => format!("{} in the selected folder", ap.action), r => format!("{} on {r}", ap.action) }))
             .when(command.is_some(), |d| d.child(div().mt(px(6.)).w_full().text_size(fs_12()).text_color(warning()).child(format!(
-                "It runs as you, with /bin/sh in the project's folder, and is not sandboxed: it can do anything you can.{}",
+                "It runs as you, with /bin/sh in the selected folder, and is not sandboxed: it can do anything you can.{}",
                 if background { " It may keep running in the background." } else { "" }))))
             .child(div().mt(px(8.)).flex().flex_wrap().gap(px(6.))
                 .child(btn("approve-once", "Approve once".into(), "once", true))
-                .child(btn("approve-grant", format!("Allow {} in this project", ap.grant_word()), "grant", false))
+                .child(btn("approve-grant", format!("Allow {} in this {}", ap.grant_word(), if self.project_id.as_ref().map(|p| p.starts_with("prj_session_")).unwrap_or(true) { "chat" } else { "project" }), "grant", false))
                 .child(btn("approve-deny", "Deny".into(), "deny", false))
-                .child(ui::pill("manage-approval-permissions").child("Manage project permissions").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx)))))
+                .child(ui::pill("manage-approval-permissions").child(self.permissions_label()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx)))))
             .when_some(ap.error.clone(), |d, e| d.child(div().mt(px(6.)).w_full().text_size(fs_12()).text_color(danger()).child(e)))
             .into_any_element())
     }

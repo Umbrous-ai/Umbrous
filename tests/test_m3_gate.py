@@ -15,6 +15,7 @@ from tests.test_m3_fs import SECRET, make_fixture
 from umbrous.gate.access import AccessError, AccessStore
 from umbrous.gate.gate import ALLOW, ASK, BLOCK, Call, Gate
 from umbrous.persistence import db
+from tests.helpers import project_fixture_db
 from umbrous.receipts.model import new_task_id
 from umbrous.receipts.store import ReceiptStore
 
@@ -30,7 +31,7 @@ class GateUnitTests(unittest.TestCase):
         (self.ws / "notes" / "password=hunter2.txt").write_text("ok\n")
         self.home = base / "home"
         self.home.mkdir()
-        db.connect(self.home / "u.db").close()
+        project_fixture_db(self.home / "u.db").close()
         self.access = AccessStore(self.home / "u.db", self.home)
         self.receipts = ReceiptStore(self.home / "u.db")
         self.gate = Gate(self.access, self.receipts)
@@ -543,6 +544,7 @@ class ReceiptCliTests(unittest.TestCase):
         from umbrous.cli import main
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "h"
+            project_fixture_db(home / "umbrous.db").close()
             ws = make_fixture(Path(tmp))
             self.assertEqual(main(["--home", str(home), "workspace", "General", str(ws)]), 0)
             access = AccessStore(home / "umbrous.db", home)

@@ -74,6 +74,13 @@ updates (none: a new version is a new `.dmg`).
 
 ## Access and approvals in the composer
 
+New chat and ⌘N start a standalone session, even when a project is selected.
+No project is created or selected automatically. Standalone sessions appear in
+Sessions and have independent folder, access, grants, and local memory scopes.
+Selecting a project explicitly creates chats within that project. Existing
+projects and their chats remain intact. Deleting a standalone session also
+removes its scope's permissions and folder reference, never source files.
+
 Each chat has its own access, chosen with the shield pill on the left of the
 composer (Freddy's design, 2026-11-08, after Codex's per-session permission):
 
@@ -94,7 +101,7 @@ A plain-language line explains the current level: **Can read files**, **Can
 edit; asks before commands**, or **Can run commands without asking**. Both
 command-capable levels explicitly say commands are **not sandboxed**.
 
-**Start working on a project** guides you through model → folder → access →
+**Start working with a folder** guides you through model → folder → access →
 compatibility. Pick the model in the composer, select a folder with the native
 picker, and choose access. The harmless tool check starts automatically and
 finishes with **Ready—what would you like to do?** Ordinary chat works without

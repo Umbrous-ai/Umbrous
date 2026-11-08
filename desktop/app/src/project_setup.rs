@@ -34,16 +34,25 @@ impl Workspace {
     }
     pub fn activity_snapshot(&self) -> Value { self.chat_context.clone().unwrap_or(Value::Null) }
 
+    pub(super) fn ensure_session_scope(&mut self, cx: &mut Context<Self>) {
+        if self.loading_chat { return; }
+        self.loading_chat = true;
+        let view = self.view;
+        self.api_call(cx, |api| api.post::<api::OneChat>("/api/chats", json!({})), move |this, result, cx| {
+            if this.view != view { return; }
+            this.loading_chat = false;
+            match result {
+                Ok(one) => { this.project_id = Some(one.chat.project_id.clone()); this.chat = Some(one.chat); this.load_chats(cx); }
+                Err(e) => this.access_error = Some(e.message),
+            }
+        });
+    }
+
     pub fn start_project_setup(&mut self, cx: &mut Context<Self>) {
         self.setup_step = Some(0);
         self.access_error = None;
         if self.project_id.is_none() {
-            self.api_call(cx, |api| api.post::<Value>("/api/projects", json!({"name":"General"})), |this, result, cx| {
-                match result {
-                    Ok(v) => { let id = v.pointer("/project/id").and_then(Value::as_str).map(str::to_string); this.project_id = id.clone(); this.load_projects(id, cx); },
-                    Err(e) => this.access_error = Some(e.message),
-                }
-            });
+            self.ensure_session_scope(cx);
         }
         cx.notify();
     }
@@ -111,7 +120,7 @@ impl Workspace {
     pub(super) fn render_project_setup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let step = self.setup_step?;
         let mut card = div().w_full().p(px(16.)).rounded(px(R_12)).border_1().border_color(border()).bg(bg_raised()).flex().flex_col().gap(px(12.))
-            .child(div().text_size(fs_16()).text_color(text_strong()).child(if step == 4 { "Ready—what would you like to do?" } else { "Start working on a project" }))
+            .child(div().text_size(fs_16()).text_color(text_strong()).child(if step == 4 { "Ready—what would you like to do?" } else { "Start working with a folder" }))
             .child(div().text_size(fs_12()).child("Model → Folder → Access → Compatibility"));
         match step {
             0 => {
@@ -200,8 +209,8 @@ impl Workspace {
     pub(super) fn render_permissions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.permissions_open { return None }
         let mut card = div().id("permissions-dialog").w(px(520.)).max_h(px(560.)).overflow_y_scroll().p(px(24.)).rounded(px(R_12)).bg(bg_raised()).border_1().border_color(border()).flex().flex_col().gap(px(12.))
-            .child(div().text_size(fs_16()).text_color(text_strong()).child("Manage project permissions"))
-            .child(div().child("Project grants apply to every chat in this project. Revoking a grant affects future actions; it does not stop a command already running."));
+            .child(div().text_size(fs_16()).text_color(text_strong()).child(self.permissions_label()))
+            .child(div().child("Revoking a grant affects future actions; it does not stop a command already running. Standalone chats keep their own grants; project chats share project grants."));
         if let Some(folder) = self.folder() { card = card.child(div().text_size(fs_12()).child(folder.root.clone())).child(div().child(format!("This chat: {}", permission_text(&self.effective_profile().unwrap_or_default())))); }
         let grants = self.access.as_ref().map(|a| a.grants.as_slice()).unwrap_or(&[]);
         if grants.is_empty() { card = card.child(div().child("No extra permissions granted. Actions follow the selected access level.")); }

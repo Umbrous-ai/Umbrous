@@ -351,9 +351,10 @@ def seed_tasks(db_path: str, kind: str) -> None:
     or leak breaks one thing for the checks to catch."""
     import sys
     from umbrous.persistence import db
+    from tests.helpers import project_fixture_db
     from umbrous.receipts.model import new_task_id
     from umbrous.tasks.store import TaskStore
-    db.connect(Path(db_path)).close()
+    project_fixture_db(Path(db_path)).close()
     store = TaskStore(Path(db_path))
     ends = ["completed", "cancelled", "completed"] if kind != "bad-status" else ["completed", "completed", "completed"]
     for i, end in enumerate(ends):
@@ -376,10 +377,11 @@ def seed_resume(db_path: str, kind: str) -> None:
     from datetime import datetime, timedelta, timezone
     from umbrous.history.store import HistoryStore
     from umbrous.persistence import db
+    from tests.helpers import project_fixture_db
     from umbrous.receipts.model import Receipt, new_action_id, new_task_id
     from umbrous.receipts.store import ReceiptStore
     from umbrous.tasks.store import TaskStore
-    db.connect(Path(db_path)).close()
+    project_fixture_db(Path(db_path)).close()
     tasks, history, receipts = TaskStore(Path(db_path)), HistoryStore(Path(db_path)), ReceiptStore(Path(db_path))
     chat = history.create_chat("prj_general").id
 
@@ -426,7 +428,8 @@ def seed_memory(db_path: str, kind: str) -> None:
     from umbrous.history.store import HistoryStore
     from umbrous.memory.store import Memory
     from umbrous.persistence import db
-    db.connect(Path(db_path)).close()
+    from tests.helpers import project_fixture_db
+    project_fixture_db(Path(db_path)).close()
     history, mem = HistoryStore(Path(db_path)), Memory(Path(db_path))
     other = history.create_project("Other").id
     pref = mem.personal.add("I like answers in British English, kept short", "fact")
@@ -462,10 +465,11 @@ def seed_review(db_path: str, kind: str) -> None:
     from umbrous.memory.review import Review
     from umbrous.memory.store import Memory
     from umbrous.persistence import db
+    from tests.helpers import project_fixture_db
     from umbrous.receipts.model import new_task_id
     from umbrous.tasks.store import TaskStore
     path = Path(db_path)
-    db.connect(path).close()
+    project_fixture_db(path).close()
     history, mem, tasks = HistoryStore(path), Memory(path), TaskStore(path)
     rev = Review(path, mem)
     chat = history.create_chat("prj_general").id
@@ -531,9 +535,10 @@ def seed_reset(db_path: str, kind: str) -> None:
     from umbrous.history.store import HistoryStore
     from umbrous.memory.store import Memory
     from umbrous.persistence import db
+    from tests.helpers import project_fixture_db
     from umbrous.reset import Reset
     path = Path(db_path)
-    db.connect(path).close()
+    project_fixture_db(path).close()
     history, mem = HistoryStore(path), Memory(path)
     code = next(m for m in mem.personal.list() if "ZEBRA" in m.text)
     british = next(m for m in mem.personal.list() if "British" in m.text)
@@ -577,9 +582,10 @@ def seed_approve(db_path: str, kind: str) -> None:
     once and one allowed by the grant you gave. `nogrant` leaves out the grant."""
     from datetime import datetime, timedelta, timezone
     from umbrous.persistence import db
+    from tests.helpers import project_fixture_db
     from umbrous.receipts.model import Receipt, new_action_id, new_task_id
     from umbrous.receipts.store import ReceiptStore
-    db.connect(Path(db_path)).close()
+    project_fixture_db(Path(db_path)).close()
     receipts = ReceiptStore(Path(db_path))
     tid = new_task_id()
     reasons = [("denied", "denied_by_you: You denied it."), ("allowed", "Approved once by you.")] + (
@@ -598,6 +604,7 @@ def seed_coding(db_path: str, kind: str) -> None:
     import time
     from tests.test_m9_coding import FIXED
     from umbrous.persistence import db
+    from tests.helpers import project_fixture_db
     from umbrous.receipts.model import new_action_id, new_task_id
     from umbrous.tasks.store import TaskStore
     path = Path(db_path)
@@ -612,7 +619,7 @@ def seed_coding(db_path: str, kind: str) -> None:
         calc.write_text(text)
         if name == "b" and kind == "tmp-left":
             (calc.parent / ".umbrous-tmp-0011aabb").write_text(text)
-    db.connect(path).close()
+    project_fixture_db(path).close()
     store = TaskStore(path)
     b = os.path.realpath(work / "m9-fixture" / "b" / "proj")
     ids = []

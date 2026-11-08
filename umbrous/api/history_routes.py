@@ -22,8 +22,8 @@ class HistoryRoutes:
             return 200, "projects"
         if path == "/api/chats" and cmd == "GET":
             query = parse_qs(self.path.split("?", 1)[1].split("#", 1)[0] if "?" in self.path else "")
-            project_id = (query.get("project_id") or [""])[0]
-            if not PROJECT_ID_RE.match(project_id):
+            project_id = (query.get("project_id") or [None])[0]
+            if project_id is not None and not PROJECT_ID_RE.fullmatch(project_id):
                 self._send_json(400, {"error": "bad_project_id"})
                 return 400, "bad_project_id"
             archived = (query.get("archived") or ["0"])[0] in ("1", "true")

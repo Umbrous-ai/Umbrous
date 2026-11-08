@@ -10,6 +10,7 @@ from tests.fake_ollama import FakeModel, FakeOllama
 from tests.helpers import RunningRuntime
 from umbrous.history.store import HistoryError, HistoryStore
 from umbrous.persistence import db
+from tests.helpers import project_fixture_db
 from umbrous.reset import Reset
 from umbrous.runloop.coordination import ChatLocks, RunRegistry
 
@@ -75,7 +76,7 @@ class RunningDeletionTests(unittest.TestCase):
 
     def test_cancel_covers_run_registered_after_deletion_starts(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'u.db'; db.connect(path).close()
+            path = Path(tmp) / 'u.db'; project_fixture_db(path).close()
             history = HistoryStore(path)
             cid = history.create_chat().id
             locks, runs = ChatLocks(), RunRegistry()

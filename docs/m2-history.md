@@ -18,7 +18,7 @@ Quit with Ctrl-C, start again, and your projects and chats are still there.
 | Word | Means | Where it lives |
 |---|---|---|
 | **Transcript** | The messages of one chat, exactly as sent and received, in order, with the model name, token counts and how each reply ended | `messages` table |
-| **Project** | A named group of chats. Every chat is in exactly one. A fresh install has **General** | `projects` table |
+| **Project** | An optional named group of chats. New chats are standalone by default; a fresh install has no projects | `projects` table |
 | **Archived chat** | Hidden from the normal list, read-only, **every message kept**. Restore puts it back unchanged | `chats.archived_at` is set; nothing else changes |
 | **Deleted chat** | M8: only through Start fresh (docs/m8-reset.md), which shows the exact chats and what stays first. Its row, messages and pending turn are erased; nothing else in this store deletes | – |
 | **Memory** (M6) | Notes given to later replies across chats. Its own two stores (docs/m6-memory.md); archiving a chat does not touch it | `personal_memory`, `project_memory` |
@@ -189,3 +189,5 @@ an unknown status. (Read only: don't edit the file while Umbrous is running.)
 |---|---|
 | `tests/test_m2_history.py` | General exists; project names (unique across Unicode case and forms, length); empty replies never saved; archive refused while a reply runs and the reply is saved; stop then archive keeps the partial reply; chats need a real project; order, title, model and token counts saved; long titles cut; projects kept apart (also in what the model is sent); archive round trip with identical row counts; archived chats refused before the model is called; no delete method, route or verb (405/404); unknown ids and injection-shaped ids refused; partial replies saved with their status; history needs the credential and the right Origin; no content or names in logs; an M1 database upgrades keeping its data; **restart persistence in the right project**, and a continued chat sends the saved turns |
 | `tests/test_browser_m2.py` | Headless Chromium across a real restart: add a project, duplicate refused, chats listed and titled, projects separate, transcript reload, saved HTML reply still inert, Options menu with disabled Delete, archived chat read-only, restore and continue, archive while a reply streams (stopped, saved, then archived), after restart the archived chat is hidden behind "Show archived (1)". Skipped without Node + Playwright |
+
+Standalone chats use independent session scopes (schema 11) for folder access, grants, and local memory. These scopes are not returned by the projects list. `GET /api/chats` lists standalone chats; an explicit `project_id` lists chats in that project. Existing projects are preserved on upgrade.

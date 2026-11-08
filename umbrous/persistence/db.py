@@ -103,8 +103,6 @@ MIGRATIONS = (
         created_at    TEXT NOT NULL,
         UNIQUE (chat_id, seq)
     );
-    INSERT INTO projects (id, name, name_key, created_at)
-        VALUES ('prj_general', 'General', 'general', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
     """,
     # version 4 (M3): workspaces, access profiles, grants and receipts. Each
     # project has at most one workspace folder and one profile. policy_version
@@ -291,6 +289,10 @@ MIGRATIONS = (
     """
     ALTER TABLE chats ADD COLUMN access TEXT CHECK (access IS NULL OR access IN
         ('workspace_read', 'ask_before_read', 'workspace_code', 'code_ask_commands'));
+    """,
+    # version 11: isolated session scopes, separate from user-created projects.
+    """
+    ALTER TABLE projects ADD COLUMN is_session INTEGER NOT NULL DEFAULT 0 CHECK (is_session IN (0,1));
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)

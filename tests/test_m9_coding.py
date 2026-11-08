@@ -35,6 +35,7 @@ from tests.test_m5_resume import Child
 from umbrous.gate.access import AccessStore
 from umbrous.gate.gate import ALLOW, ASK, BLOCK, Call, Gate, ToolContext, offered
 from umbrous.persistence import db
+from tests.helpers import project_fixture_db
 from umbrous.receipts.model import new_action_id, new_task_id
 from umbrous.receipts.store import ReceiptStore
 from umbrous.tools import edit
@@ -96,7 +97,7 @@ class ToolTests(unittest.TestCase):
         (self.ws / "calc.py").write_text(CALC)
         self.home = base / "home"
         self.home.mkdir()
-        db.connect(self.home / "u.db").close()
+        project_fixture_db(self.home / "u.db").close()
         self.access = AccessStore(self.home / "u.db", self.home)
         self.receipts = ReceiptStore(self.home / "u.db")
         self.gate = Gate(self.access, self.receipts)
@@ -426,7 +427,7 @@ class ProfileTests(unittest.TestCase):
         self.ws = make_project(base)
         home = base / "home"
         home.mkdir()
-        db.connect(home / "u.db").close()
+        project_fixture_db(home / "u.db").close()
         self.access = AccessStore(home / "u.db", home)
         self.gate = Gate(self.access, ReceiptStore(home / "u.db"))
 

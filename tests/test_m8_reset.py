@@ -27,6 +27,7 @@ from umbrous.memory.retrieve import select
 from umbrous.memory.review import Review
 from umbrous.memory.store import Memory
 from umbrous.persistence import db
+from tests.helpers import project_fixture_db
 from umbrous.reset import Reset, ResetError
 from umbrous.runloop.chat import ChatLocks
 
@@ -38,7 +39,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "u.db"
-        db.connect(self.path).close()
+        project_fixture_db(self.path).close()
         self.history = HistoryStore(self.path)
         self.mem = Memory(self.path)
         self.rs = Reset(self.path)

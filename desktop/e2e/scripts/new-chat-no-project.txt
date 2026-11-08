@@ -9,15 +9,15 @@ send Hello without a project
 wait_reply 30
 sleep 600
 expect messages 2
-expect project_count 1
-expect projects General
+expect project_count 0
+expect projects_lack General
 expect sessions Hello without a project
 new_chat
 send Second new chat
 wait_reply 30
 sleep 600
 expect messages 2
-expect project_count 1
+expect project_count 0
 expect sessions Second new chat
 record end
 quit

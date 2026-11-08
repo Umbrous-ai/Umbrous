@@ -6,6 +6,18 @@
 # record is the last line, the app logged no panic while it ran, and it then
 # exited and cleaned up.
 
+# Legacy project-scoped scenarios declare their General fixture explicitly.
+seed_general() {
+  PYTHONPATH="$ROOT" python3 - "$1" <<'PYSEED'
+import sys
+from pathlib import Path
+from umbrous.persistence import db
+home = Path(sys.argv[1]); home.mkdir(parents=True, exist_ok=True)
+with db.connect(home / "umbrous.db") as c:
+    c.execute("INSERT OR IGNORE INTO projects (id,name,name_key,created_at) VALUES ('prj_general','General','general','2026-01-01T00:00:00Z')")
+PYSEED
+}
+
 STATUS=${STATUS:-0}
 fail() { echo "FAIL $*"; STATUS=1; }
 
@@ -42,7 +54,14 @@ e2e() { # name script home [extra open args]
   name=$1; script=$2; home=$3; shift 3
   rm -f "$W/$name.jsonl"
   p0=$(panics "$home"); p0=${p0:-0}
+  [ "$name" = project-setup ] || seed_general "$home"
   sed -e "s|@OUT@|$W|g" -e "s|@NAME@|$name|g" "$S/$script" > "$W/$name.txt" || { fail "$name: could not prepare $script"; return; }
+  if [ "$name" != project-setup ]; then
+    sed '/^wait_ready /a\
+select_project General
+' "$W/$name.txt" > "$W/$name.selected.txt"
+    mv "$W/$name.selected.txt" "$W/$name.txt"
+  fi
   open -n -W --env UMBROUS_HOME="$home" --env UMBROUS_E2E_SCRIPT="$W/$name.txt" --env UMBROUS_E2E_OUT="$W/$name.jsonl" "$@" "$E2E"
   rc=$?
   [ $rc -eq 0 ] || fail "$name: the app could not be launched (open exited $rc)"

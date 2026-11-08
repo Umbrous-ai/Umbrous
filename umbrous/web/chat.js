@@ -35,7 +35,7 @@
   let chatId = null;       // the open chat; null until the first message creates it (M2)
   let chatArchived = false;
   let projects = [];
-  let projectId = 'prj_general';
+  let projectId = null;
   let showArchived = false;
   let view = 0;            // bumped on every chat switch, so a late answer for an old view is ignored
   let run = null;          // { runId, controller } while a reply is streaming
@@ -52,6 +52,7 @@
     return Math.floor(s / 86400) + 'd';
   }
   function projectName(id) {
+    if (!id || id.startsWith("prj_session_")) return "Standalone chats";
     const p = projects.find((x) => x.id === id);
     if (p) return p.name;
     return id === 'prj_general' ? 'General' : 'this project';  // before the project list has loaded
@@ -347,10 +348,11 @@
   async function loadChats() {
     const box = $('#sec-sessions');
     const want = projectId;
+    const filter = want && !want.startsWith('prj_session_') ? '&project_id=' + encodeURIComponent(want) : '';
     let active, archived = [];
     try {
-      active = (await getJson('/api/chats?project_id=' + encodeURIComponent(want))).chats;
-      if (showArchived) archived = (await getJson('/api/chats?archived=1&project_id=' + encodeURIComponent(want))).chats;
+      active = (await getJson('/api/chats?' + filter)).chats;
+      if (showArchived) archived = (await getJson('/api/chats?archived=1' + filter)).chats;
     } catch (e) { box.textContent = ''; box.appendChild(el('div', 'proj-error', e.message)); return; }
     if (want !== projectId) return;
     box.textContent = '';
@@ -411,7 +413,7 @@
   function openProject(id) {
     projectId = id;
     showArchived = false;
-    newChat();
+    newChat(true);
     loadChats();
     loadAccess();
     loadMemory();
@@ -670,6 +672,7 @@
     const box = $('#access-body');
     if (!box) return;
     $('#access').hidden = false;
+    if (!projectId) { accessView = null; box.textContent = 'Start a chat to configure its folder and access.'; return; }
     const want = projectId;
     let v;
     try { v = await getJson('/api/projects/' + encodeURIComponent(want) + '/access'); }
@@ -783,7 +786,7 @@
     $('#memory').hidden = false;
     const want = projectId;
     let v;
-    try { v = await getJson('/api/memory?project_id=' + encodeURIComponent(want)); }
+    try { v = await getJson('/api/memory' + (want ? '?project_id=' + encodeURIComponent(want) : '')); }
     catch (e) { box.textContent = ''; box.appendChild(el('div', 'acc-err', e.message)); return; }
     if (want !== projectId) return;
     memoryView = v;
@@ -1031,12 +1034,13 @@
     box.textContent = '';
     box.appendChild(el('div', 'acc-note', 'Loading…'));
     const want = projectId;
+    const filter = want && !want.startsWith('prj_session_') ? '&project_id=' + encodeURIComponent(want) : '';
     let active, archived, mem;
     try {
       [active, archived, mem] = await Promise.all([
-        getJson('/api/chats?project_id=' + encodeURIComponent(want)),
-        getJson('/api/chats?archived=1&project_id=' + encodeURIComponent(want)),
-        getJson('/api/memory?project_id=' + encodeURIComponent(want))]);
+        getJson('/api/chats?' + filter),
+        getJson('/api/chats?archived=1' + filter),
+        getJson('/api/memory' + (want ? '?project_id=' + encodeURIComponent(want) : ''))]);
     } catch (e) { box.textContent = ''; box.appendChild(el('div', 'acc-err', e.message)); return; }
     renderResetPicker(want, active.chats.concat(archived.chats), mem);
     if (preselectChat) previewReset();
@@ -1200,7 +1204,8 @@
     if (row) row.title = '';
   }
 
-  function newChat() {
+  function newChat(keepProject = false) {
+    if (!keepProject || (projectId && projectId.startsWith('prj_session_'))) projectId = null;
     if (run) stop();
     view++;
     chatId = null;
@@ -1219,11 +1224,14 @@
     newChatNotice();
     if (api && !providersUp) loadModels();
     markCurrent();
+    loadChats();
+    loadAccess();
+    loadMemory();
   }
 
   function newChatNotice() {
     const n = $('#new-chat-notice');
-    if (n) n.textContent = `New chat in ${projectName(projectId)}. Ollama runs locally. ChatGPT sends the conversation and tool results to OpenAI using your subscription. Chats are saved on this Mac.`;
+    if (n) n.textContent = `New chat${projectId ? " in " + projectName(projectId) : ""}. Ollama runs locally. ChatGPT sends the conversation and tool results to OpenAI using your subscription. Chats are saved on this Mac.`;
   }
 
   function renderStoredReply(m, receipts, tasks) {
@@ -1398,6 +1406,9 @@
         const j = await getJson('/api/chats', { json: { project_id: projectId } });
         if (mine !== view) return;
         chatId = j.chat.id;
+        projectId = j.chat.project_id;
+        loadAccess();
+        loadMemory();
       }
       const body = { chat_id: chatId, model: requestModel, approvals: true };
       Object.assign(body, requestControls);
@@ -1537,7 +1548,7 @@
     };
     sendBtn.addEventListener('click', (e) => { if (run) { e.preventDefault(); stop(); } });
     input.addEventListener('input', syncSend);   // runs after the prototype's own listener
-    $('[data-new]').addEventListener('click', newChat);
+    $('[data-new]').addEventListener('click', () => newChat());
     $('[data-addproj]').addEventListener('click', (e) => { e.stopPropagation(); addProject(); });
     $('#chat-options').addEventListener('click', (e) => {
       e.stopPropagation();

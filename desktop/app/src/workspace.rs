@@ -528,8 +528,7 @@ impl Workspace {
             }
             if let Ok(p) = r {
                 this.projects = p.projects;
-                let keep = select.or(this.project_id.clone()).filter(|id| this.projects.iter().any(|p| &p.id == id));
-                let id = keep.or_else(|| this.projects.iter().find(|p| p.id == "prj_general").or(this.projects.first()).map(|p| p.id.clone()));
+                let id = select.or(this.project_id.clone()).filter(|id| id.starts_with("prj_session_") || this.projects.iter().any(|p| &p.id == id));
                 if this.project_id != id {
                     this.new_chat(cx);
                     this.project_id = id;
@@ -548,17 +547,17 @@ impl Workspace {
     pub fn load_chats(&mut self, cx: &mut Context<Self>) {
         self.load_memory(cx);
         self.chats_seq += 1;
-        let Some(pid) = self.project_id.clone() else { return };
+        let for_project = self.project_id.clone();
+        let query = self.project_id.as_ref().filter(|p| !p.starts_with("prj_session_")).map(|p| format!("project_id={p}&")).unwrap_or_default();
         self.load_access(cx);
         let show_archived = self.show_archived;
         let seq = self.chats_seq;
-        let for_project = pid.clone();
         self.api_call(
             cx,
             move |api| {
-                let active: api::Chats = api.get(&format!("/api/chats?project_id={pid}"))?;
+                let active: api::Chats = api.get(&format!("/api/chats?{query}"))?;
                 let archived = if show_archived {
-                    api.get::<api::Chats>(&format!("/api/chats?project_id={pid}&archived=1"))?.chats
+                    api.get::<api::Chats>(&format!("/api/chats?{query}archived=1"))?.chats
                 } else {
                     vec![]
                 };
@@ -566,7 +565,7 @@ impl Workspace {
             },
             move |this, r, _| {
                 // drop it if another project was selected or a newer list was asked for
-                if seq != this.chats_seq || this.project_id.as_deref() != Some(for_project.as_str()) {
+                if seq != this.chats_seq || this.project_id != for_project {
                     return;
                 }
                 if let Ok((a, b)) = r {
@@ -1013,9 +1012,6 @@ impl Workspace {
             }
             self.stale_run_ended(chat, cx);
         } else if created {
-            if self.project_id.is_none() {
-                self.project_id = self.background_runs[index].chat.as_ref().map(|c| c.project_id.clone());
-            }
             self.load_projects(None, cx);
         }
         cx.notify();
@@ -1025,7 +1021,7 @@ impl Workspace {
         let running = self.background_runs.iter().filter_map(|b| b.chat.as_ref())
             .chain(self.chat.as_ref().filter(|_| self.run.is_some())).cloned().collect::<Vec<_>>();
         for chat in running {
-            if self.project_id.as_deref() != Some(chat.project_id.as_str()) { continue; }
+            if self.project_id.as_deref() != Some(chat.project_id.as_str()) && !(chat.project_id.starts_with("prj_session_") && self.project_id.as_ref().map(|p| p.starts_with("prj_session_")).unwrap_or(true)) { continue; }
             if let Some(row) = self.chats.iter_mut().find(|c| c.id == chat.id) {
                 if row.title == "New chat" { row.title = chat.title; }
             } else {
@@ -1034,8 +1030,25 @@ impl Workspace {
         }
     }
 
+    pub fn new_standalone_chat(&mut self, cx: &mut Context<Self>) {
+        self.new_chat(cx);
+        self.project_id = None;
+        self.access = None;
+        self.memory = None;
+        self.access_seq += 1;
+        self.memory_seq += 1;
+        self.load_chats(cx);
+    }
+
     pub fn new_chat(&mut self, cx: &mut Context<Self>) {
         self.begin_view(cx);
+        if self.project_id.as_ref().map(|p| p.starts_with("prj_session_")).unwrap_or(false) {
+            self.project_id = None;
+            self.access = None;
+            self.memory = None;
+            self.access_seq += 1;
+            self.memory_seq += 1;
+        }
         self.chat = None;
         self.pending_access = None; // a new chat starts with the project's access
         self.context = None;
@@ -1136,7 +1149,9 @@ impl Workspace {
                 match r {
                     Ok((chat, msgs, interrupted)) => {
                         let archived = chat.archived;
+                        this.project_id = Some(chat.project_id.clone());
                         this.chat = Some(chat);
+                        this.load_access(cx);
                         this.load_chat_activity(cx);
                         this.context = None;
                         this.msgs = msgs;
@@ -1226,6 +1241,7 @@ impl Workspace {
             && self.provider_up()
             && self.model.is_some()
             && self.run.is_none()
+            && !self.loading_chat
             && !self.chat.as_ref().map(|c| c.archived).unwrap_or(false)
     }
 
@@ -1907,7 +1923,7 @@ impl Workspace {
         let archived_count = project.map(|p| p.archived_chats).unwrap_or(0);
         if self.chats.is_empty() {
             // `.side-empty`
-            let text = if self.project_id.is_none() {
+            let text = if project.is_none() {
                 "No chats yet. Send a message to get started.".into()
             } else if archived_count > 0 {
                 format!("No active chats in {pname}. {archived_count} archived.")
@@ -2073,7 +2089,7 @@ impl Workspace {
                                     .child("⌘N"),
                             )
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.new_chat(cx);
+                                this.new_standalone_chat(cx);
                                 window.focus(&this.composer.focus_handle(cx));
                             })),
                     )
@@ -2192,7 +2208,7 @@ impl Workspace {
         let seq = self.settings_seq;
         self.api_call(cx, |api| {
             let projects = api.get::<api::Projects>("/api/projects")?;
-            let mut chats = Vec::new();
+            let mut chats = api.get::<api::Chats>("/api/chats?archived=1")?.chats;
             for project in projects.projects {
                 chats.extend(api.get::<api::Chats>(&format!("/api/chats?project_id={}&archived=1", project.id))?.chats);
             }
@@ -2803,8 +2819,8 @@ impl Workspace {
         if self.msgs.is_empty() && !self.loading_chat && self.setup_step.is_none() {
             notices.push(div().flex().flex_col().gap(px(12.))
                 .child(div().text_size(px(28.)).text_color(text_strong()).child("What would you like to work on?"))
-                .child(div().text_size(fs_14()).child("Ask anything, or connect a project to work with its files."))
-                .child(ui::pill("start-project").child("Start working on a project").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_project_setup(cx))))
+                .child(div().text_size(fs_14()).child("Ask anything, or choose a folder to work with its files."))
+                .child(ui::pill("start-project").child("Start working with a folder").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_project_setup(cx))))
                 .into_any_element());
         }
         if let Some(check) = self.render_compatibility(cx) { notices.push(check); }
@@ -3078,7 +3094,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| {
-                this.new_chat(cx);
+                this.new_standalone_chat(cx);
                 window.focus(&this.composer.focus_handle(cx));
             }))
             .on_action(cx.listener(|this, _: &StopReply, _, cx| this.stop_reply(cx)))
@@ -3105,7 +3121,7 @@ impl Render for Workspace {
             // the window controls' strip (the browser drew its own title bar here)
             .child(div().h(px(TITLEBAR)).flex_none().w_full());
 
-        if matches!(self.phase, Phase::Ready) && !self.projects.is_empty() && !self.logged_first_frame {
+        if matches!(self.phase, Phase::Ready) && self.models.is_some() && !self.logged_first_frame {
             self.logged_first_frame = true;
             logfile::event("ui.first_full_frame", &[("ms_since_start", self.started.elapsed().as_millis().to_string())]);
         }

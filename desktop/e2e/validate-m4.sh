@@ -27,6 +27,7 @@ kill -0 "$FAKE" 2>/dev/null || abort "the fake Ollama did not start (port $PORT 
 WS=$(python3 "$ROOT/desktop/e2e/stress.py" seed-workspace "$W/m4-fixture") && [ -d "$WS" ] || abort "could not create the test workspace"
 mkdir -p "$H" && echo "{\"codex_enabled\": false, \"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json" || abort "could not write $H/config.json"
 U() { PYTHONPATH="$ROOT" python3 -m umbrous --home "$H" "$@"; }
+seed_general "$H"
 for m in multi-step:3b slow-task:3b endless:3b; do U probe "$m" >/dev/null || abort "tool check on $m"; done
 U workspace General "$WS" >/dev/null || abort "could not attach the workspace"
 S="$ROOT/desktop/e2e/scripts"

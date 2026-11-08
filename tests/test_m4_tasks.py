@@ -14,6 +14,7 @@ from tests.fake_ollama import FakeModel, FakeOllama, scripted, workspace_agent
 from tests.helpers import RunningRuntime
 from tests.test_m3_fs import make_fixture
 from umbrous.persistence import db
+from tests.helpers import project_fixture_db
 from umbrous.tasks.store import TaskError, TaskStore
 from umbrous.tools import fs
 
@@ -32,14 +33,14 @@ class TaskStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "u.db"
-        db.connect(self.path).close()
+        project_fixture_db(self.path).close()
         self.store = TaskStore(self.path)
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def test_schema_has_task_tables(self):
-        conn = db.connect(self.path)
+        conn = project_fixture_db(self.path)
         self.assertGreaterEqual(db.schema_version(conn), 5)
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         conn.close()

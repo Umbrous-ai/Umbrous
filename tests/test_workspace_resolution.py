@@ -80,11 +80,12 @@ class ResolutionTests(unittest.TestCase):
 
     def test_discovery_finds_nested_repo_and_deduplicates(self):
         from umbrous.persistence import db
+        from tests.helpers import project_fixture_db
         from umbrous.gate.access import AccessStore
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             data = home / 'data'; data.mkdir()
-            path = data / 'umbrous.db'; db.connect(path).close()
+            path = data / 'umbrous.db'; project_fixture_db(path).close()
             root = home / 'workspace/github.com/me/Umbrous'
             (root / '.git').mkdir(parents=True)
             access = AccessStore(path, data)

@@ -13,8 +13,8 @@ What each word means here:
                deletion also removes project-owned data, never source files.
                See docs/deletion.md.
 
-Every chat belongs to exactly one project. A fresh database has one project,
-"General".
+Chats may belong to an explicit project or an isolated session scope.
+Session scopes reuse the access storage but are never listed as projects.
 
 Pending turns (M5): while a task runs, its message waits in `pending_turns`,
 not in the transcript. If the runtime is killed mid-task, the message is still
@@ -149,18 +149,19 @@ class HistoryStore:
         return session(self.db_path)
 
     # ---------------------------------------------------------------- projects
-    def list_projects(self) -> List[Project]:
+    def list_projects(self, include_sessions: bool = False) -> List[Project]:
         with self._db() as c:
             rows = c.execute("""
                 SELECT p.id, p.name, p.created_at,
                        COALESCE(SUM(ch.id IS NOT NULL AND ch.archived_at IS NULL), 0),
                        COALESCE(SUM(ch.archived_at IS NOT NULL), 0)
                 FROM projects p LEFT JOIN chats ch ON ch.project_id = p.id
-                GROUP BY p.id ORDER BY p.id = ? DESC, p.name_key""", (DEFAULT_PROJECT_ID,)).fetchall()
+                WHERE (? OR p.is_session = 0)
+                GROUP BY p.id ORDER BY p.id = ? DESC, p.name_key""", (include_sessions, DEFAULT_PROJECT_ID,)).fetchall()
         return [Project(*r) for r in rows]
 
     def get_project(self, project_id: str) -> Project:
-        for p in self.list_projects():
+        for p in self.list_projects(include_sessions=True):
             if p.id == project_id:
                 return p
         raise HistoryError("That project does not exist.", "no_such_project")
@@ -184,19 +185,18 @@ class HistoryStore:
     def create_chat(self, project_id: Optional[str] = None, title: str = "New chat", access: Optional[str] = None) -> ChatInfo:
         if project_id is not None:
             self.get_project(project_id)  # explicit missing projects remain an error
+            with self._db() as c:
+                if c.execute("SELECT is_session FROM projects WHERE id=?", (project_id,)).fetchone()[0]:
+                    raise HistoryError("A standalone session cannot contain another chat.", "bad_project_id")
         _check_access(access)
         cid = "chat_" + secrets.token_hex(12)
         now = _now()
         with self._write_lock, self._db() as c:
             c.execute("BEGIN IMMEDIATE")
             if project_id is None:
-                # Create a fresh container only when sending, never restore deleted data.
-                row = c.execute("SELECT id FROM projects WHERE id = ? OR name_key = ? ORDER BY id = ? DESC LIMIT 1",
-                                (DEFAULT_PROJECT_ID, name_key("General"), DEFAULT_PROJECT_ID)).fetchone()
-                project_id = row[0] if row else DEFAULT_PROJECT_ID
-                if row is None:
-                    c.execute("INSERT INTO projects (id, name, name_key, created_at) VALUES (?, ?, ?, ?)",
-                              (project_id, "General", name_key("General"), now))
+                project_id = "prj_session_" + secrets.token_hex(12)
+                c.execute("INSERT INTO projects (id, name, name_key, created_at, is_session) VALUES (?, ?, ?, ?, 1)",
+                          (project_id, "Standalone chat", project_id, now))
             c.execute("INSERT INTO chats (id, project_id, title, created_at, updated_at, access) VALUES (?, ?, ?, ?, ?, ?)",
                       (cid, project_id, title[:MAX_TITLE], now, now, access))
             c.execute("COMMIT")
@@ -221,16 +221,17 @@ class HistoryStore:
             raise HistoryError("That chat does not exist.", "no_such_chat")
         return ChatInfo(*row)
 
-    def list_chats(self, project_id: str, archived: bool = False) -> List[ChatInfo]:
-        """Chats of ONE project, newest activity first. Archived ones only when asked."""
-        self.get_project(project_id)
+    def list_chats(self, project_id: Optional[str] = None, archived: bool = False) -> List[ChatInfo]:
+        """Chats of one explicit project, or standalone chats when omitted."""
+        if project_id is not None:
+            self.get_project(project_id)
         with self._db() as c:
             rows = c.execute(f"""
                 SELECT ch.id, ch.project_id, ch.title, ch.created_at, ch.updated_at, ch.archived_at,
                        (SELECT COUNT(*) FROM messages m WHERE m.chat_id = ch.id), ch.access
                 FROM chats ch
-                WHERE ch.project_id = ? AND ch.archived_at IS {'NOT ' if archived else ''}NULL
-                ORDER BY ch.updated_at DESC, ch.id""", (project_id,)).fetchall()
+                WHERE (ch.project_id = ? OR (? IS NULL AND ch.project_id IN (SELECT id FROM projects WHERE is_session = 1))) AND ch.archived_at IS {'NOT ' if archived else ''}NULL
+                ORDER BY ch.updated_at DESC, ch.id""", (project_id, project_id)).fetchall()
         return [ChatInfo(*r) for r in rows]
 
     def messages(self, chat_id: str) -> List[Message]:

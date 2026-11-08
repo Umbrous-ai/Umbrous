@@ -296,7 +296,14 @@ class Reset:
         """
         if kind not in ("chat", "project"):
             raise ResetError("Choose a chat or project to delete.", "bad_selection")
-        sel = normalize({"chats" if kind == "chat" else "delete_projects": [target]})
+        # A standalone chat owns its scope: remove its grants, folder reference,
+        # and local memory together. Source files and audit records remain.
+        scope = None
+        if kind == "chat":
+            with self._db() as c:
+                row = c.execute("SELECT p.id FROM projects p JOIN chats ch ON ch.project_id=p.id WHERE ch.id=? AND p.is_session=1", (target,)).fetchone()
+                scope = row[0] if row else None
+        sel = normalize({"delete_projects": [scope]} if scope else {"chats" if kind == "chat" else "delete_projects": [target]})
         deadline = time.monotonic() + 30
         while True:
             preview = self.preview(sel)
