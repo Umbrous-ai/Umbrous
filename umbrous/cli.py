@@ -513,6 +513,89 @@ def models_command(config: Config, command: str, names: List[str], probe_all: bo
     return 0 if failed == 0 else 1
 
 
+def _runtime_running(config: Config) -> Optional[int]:
+    try:
+        other = json.loads((config.run_dir / "runtime.json").read_text())
+        pid = int(other["pid"])
+        return pid if _pid_alive(pid) and pid != os.getpid() else None
+    except (ValueError, KeyError, OSError, TypeError):
+        return None
+
+
+def reset_command(config: Config, chats: List[str], all_chats: List[str], personal: List[str],
+                  project_memory: List[str], items: List[str], start_fresh: bool, confirm: Optional[str]) -> int:
+    """M8: preview a selective reset; with --confirm PREVIEW_ID, delete exactly that preview."""
+    from umbrous.memory.store import Memory
+    from umbrous.reset import Reset, ResetError
+    history, _, _ = _stores(config)
+    mem = Memory(config.db_path)
+    sel: dict = {"chats": list(chats), "chats_in": [], "personal": [], "project": {}, "start_fresh": start_fresh}
+    try:
+        for name in all_chats:
+            p = _find_project(history, name)
+            if p is None:
+                print(f"No project called {name!r}.", file=sys.stderr)
+                return 2
+            sel["chats_in"].append(p.id)
+        if "all" in personal:
+            sel["personal"] = "all"
+        else:
+            sel["personal"] = list(personal)
+        for name in project_memory:
+            p = _find_project(history, name)
+            if p is None:
+                print(f"No project called {name!r}.", file=sys.stderr)
+                return 2
+            sel["project"][p.id] = "all"
+        for mid in items:
+            m = mem.get(mid)
+            if m is None or m.store != "project":
+                print(f"No project memory item {mid!r}.", file=sys.stderr)
+                return 2
+            if sel["project"].get(m.scope) != "all":
+                sel["project"].setdefault(m.scope, []).append(mid)
+        rs = Reset(config.db_path)
+        if confirm:
+            pid = _runtime_running(config)
+            if pid:
+                print(f"Umbrous is running (pid {pid}). Quit it first, or reset from the app, so no reply is "
+                      "written into a chat while it is deleted. Nothing was deleted.", file=sys.stderr)
+                return 1
+            out = rs.confirm(sel, confirm)
+            d = out["deleted"]
+            print(f"Reset done: {d['chats']} chat(s) with {d['messages']} message(s), {d['personal']} personal and "
+                  f"{d['project']} project memory item(s), {d['suggestions']} waiting suggestion(s).")
+            for k in out["kept"]:
+                print("Kept: " + k["text"])
+            print(out["not_touched"])
+            print(out["backups"])
+            return 0
+        pv = rs.preview(sel)
+    except ResetError as exc:
+        print(exc.message, file=sys.stderr)
+        if exc.preview is not None:
+            print(f"New preview: {exc.preview['preview_id']}. Run the preview again to see it.", file=sys.stderr)
+        return 1
+    print("A reset would delete exactly these:")
+    for i in pv["items"]:
+        if i["type"] == "chat":
+            print(f"  chat      {i['id']}  {i['project']}: {i['title']} ({i['messages']} messages"
+                  + (", archived" if i["archived"] else "") + (", a reply is running" if i["busy"] else "") + ")")
+        elif i["type"] == "suggestion":
+            print(f"  waiting   {i['id']}  a {i['store']} {i['kind']} suggestion from {i['chat_id']}")
+        else:
+            print(f"  {i['type']:<9} {i['id']}  {i['kind']}: {i['text']}")
+    if pv["empty"]:
+        print("  (nothing: the selection matches no chat or memory item)")
+        return 0
+    for k in pv["kept"]:
+        print("Kept: " + k["text"])
+    print(pv["not_touched"])
+    print(pv["backups"])
+    print(f"Nothing has been deleted. To delete exactly these, run the same command with --confirm {pv['preview_id']}")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="umbrous", description="Umbrous local agent harness runtime")
     parser.add_argument("--home", type=Path, help="data directory (default: ~/Library/Application Support/Umbrous)")
@@ -554,6 +637,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_mem.add_argument("--yes", action="store_true", help="delete: really delete")
     p_mem.add_argument("--all", action="store_true", dest="all_", help="suggestions: also the decided ones (M7)")
     p_mem.add_argument("--to", choices=["personal", "project"], help="accept: the store to write it to (M7)")
+    p_rs = sub.add_parser("reset", help="selective start-fresh reset: preview, then --confirm (M8)")
+    p_rs.add_argument("--chat", action="append", default=[], help="a chat to delete (chat_…); repeat for more")
+    p_rs.add_argument("--all-chats", action="append", default=[], metavar="PROJECT",
+                      help="every chat of this project, archived too")
+    p_rs.add_argument("--personal", action="append", default=[], metavar="all|MEM_ID",
+                      help="personal memory: all of it, or one item; repeat for more")
+    p_rs.add_argument("--project-memory", action="append", default=[], metavar="PROJECT",
+                      help="all of this project's memory")
+    p_rs.add_argument("--item", action="append", default=[], metavar="MEM_ID", help="one project memory item")
+    p_rs.add_argument("--start-fresh", action="store_true", help="say that a new chat should follow (the app)")
+    p_rs.add_argument("--confirm", metavar="PREVIEW_ID", help="delete exactly what this preview showed")
     sub.add_parser("version")
     sub.add_parser("models", help="list Ollama models, probe results and the exposure check")
     p_probe = sub.add_parser("probe", help="run the tool-call probe")
@@ -595,6 +689,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if command == "memory":
         return memory_command(config, args.action, args.rest, args.project, args.kind, args.scope, args.yes,
                               args.to, args.all_)
+    if command == "reset":
+        return reset_command(config, args.chat, args.all_chats, args.personal, args.project_memory, args.item,
+                             args.start_fresh, args.confirm)
     if command in ("models", "probe"):
         return models_command(config, command, getattr(args, "model", []), getattr(args, "all", False))
     desktop = args.command == "serve" and args.desktop

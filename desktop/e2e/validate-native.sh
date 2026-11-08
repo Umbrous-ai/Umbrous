@@ -72,6 +72,8 @@ echo "### M6: personal and project memory, a reply that uses them, delete (valid
 "$ROOT/desktop/e2e/validate-m6.sh" "$W" || fail "validate-m6.sh: M6 in the app failed (see above)"
 echo "### M7: suggestions to review after a task, accept and reject (validate-m7.sh)"
 "$ROOT/desktop/e2e/validate-m7.sh" "$W" || fail "validate-m7.sh: M7 in the app failed (see above)"
+echo "### M8: Start fresh, a selective reset with a preview (validate-m8.sh)"
+"$ROOT/desktop/e2e/validate-m8.sh" "$W" || fail "validate-m8.sh: M8 in the app failed (see above)"
 echo "### a runtime started from a terminal is reported and left running"
 mkdir -p "$W/h-cli"
 PYTHONPATH="$ROOT" python3 -m umbrous --home "$W/h-cli" serve --no-open --port 0 >/dev/null 2>&1 & CLI=$!; sleep 2

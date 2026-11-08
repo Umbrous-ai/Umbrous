@@ -16,11 +16,13 @@ use serde_json::{json, Value};
 pub struct ApiError {
     pub code: String,
     pub message: String,
+    /// M8: a refused reset (preview_changed, chat_busy) carries the new preview
+    pub preview: Option<Value>,
 }
 
 impl ApiError {
     fn transport(e: impl std::fmt::Display) -> Self {
-        ApiError { code: "unreachable".into(), message: format!("The Umbrous runtime is not answering ({e}).") }
+        ApiError { code: "unreachable".into(), message: format!("The Umbrous runtime is not answering ({e})."), preview: None }
     }
 }
 
@@ -56,6 +58,7 @@ fn to_error(e: ureq::Error) -> ApiError {
             ApiError {
                 code: body.get("error").and_then(Value::as_str).unwrap_or("error").to_string(),
                 message: body.get("message").and_then(Value::as_str).unwrap_or("The runtime refused the request.").to_string(),
+                preview: body.get("preview").cloned(),
             }
         }
         other => ApiError::transport(other),
@@ -236,6 +239,150 @@ impl Candidate {
     }
 }
 
+// ---- M8: selective start-fresh reset (umbrous/reset.py) ----
+
+/// What you ticked in Start fresh. `selection()` is what the runtime reads:
+/// each part names one store, so nothing here can mean "everything".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResetChoice {
+    pub project_id: String,
+    pub all_chats: bool,
+    pub chats: std::collections::BTreeSet<String>,
+    pub all_personal: bool,
+    pub personal: std::collections::BTreeSet<String>,
+    pub all_project: bool,
+    pub project: std::collections::BTreeSet<String>,
+    pub start_fresh: bool,
+}
+
+impl ResetChoice {
+    pub fn selection(&self) -> Value {
+        let chats_in: Vec<&String> = if self.all_chats { vec![&self.project_id] } else { vec![] };
+        let personal = if self.all_personal { json!("all") } else { json!(self.personal) };
+        let mut project = serde_json::Map::new();
+        if self.all_project {
+            project.insert(self.project_id.clone(), json!("all"));
+        } else if !self.project.is_empty() {
+            project.insert(self.project_id.clone(), json!(self.project));
+        }
+        json!({"chats": self.chats, "chats_in": chats_in, "personal": personal, "project": project,
+               "start_fresh": self.start_fresh})
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !(self.all_chats || self.all_personal || self.all_project)
+            && self.chats.is_empty() && self.personal.is_empty() && self.project.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetItem {
+    #[serde(rename = "type")]
+    pub item_type: String, // chat | personal | project | suggestion
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub store: Option<String>,
+    #[serde(default)]
+    pub messages: u32,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub busy: bool,
+}
+
+impl ResetItem {
+    /// The line the preview shows for it.
+    pub fn label(&self) -> String {
+        match self.item_type.as_str() {
+            "chat" => self.title.clone().unwrap_or_default(),
+            "suggestion" => format!("A {} {} suggestion from a chat above",
+                                    self.store.as_deref().unwrap_or(""), self.kind.as_deref().unwrap_or("")),
+            _ => self.text.clone().unwrap_or_default(),
+        }
+    }
+
+    pub fn tag(&self) -> String {
+        match self.item_type.as_str() {
+            "chat" => {
+                let mut t = format!("chat · {} messages", self.messages);
+                if self.archived {
+                    t.push_str(" · archived");
+                }
+                if self.busy {
+                    t.push_str(" · a reply is running");
+                }
+                t
+            }
+            "personal" => format!("personal memory · {}", self.kind.as_deref().unwrap_or("")),
+            "project" => format!("project memory · {}", self.kind.as_deref().unwrap_or("")),
+            _ => "waiting suggestion · quotes the chat".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetKept {
+    pub what: String,
+    pub count: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetPreview {
+    pub preview_id: String,
+    pub items: Vec<ResetItem>,
+    pub kept: Vec<ResetKept>,
+    pub not_touched: String,
+    pub backups: String,
+    #[serde(default)]
+    pub blocked: Vec<String>,
+    #[serde(default)]
+    pub empty: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetDeleted {
+    pub chats: u64,
+    pub messages: u64,
+    pub personal: u64,
+    pub project: u64,
+    pub suggestions: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetIdOnly {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetDone {
+    pub deleted: ResetDeleted,
+    pub items: Vec<ResetIdOnly>,
+    pub kept: Vec<ResetKept>,
+    pub backups: String,
+    #[serde(default)]
+    pub start_fresh: bool,
+}
+
+impl ResetDone {
+    pub fn summary(&self) -> String {
+        let d = &self.deleted;
+        let mut s = format!("Deleted {} chat(s) with {} message(s), {} personal and {} project memory item(s)",
+                            d.chats, d.messages, d.personal, d.project);
+        if d.suggestions > 0 {
+            s.push_str(&format!(", {} waiting suggestion(s)", d.suggestions));
+        }
+        s.push('.');
+        s
+    }
+}
+
 /// The reply's meta line says how many suggestions wait for review (M7).
 pub fn suggestion_note(n: usize) -> Option<String> {
     match n {
@@ -394,6 +541,41 @@ mod tests {
                            "uncertainty": [], "failures": [], "limits_hit": []});
         assert!(!report_line(&clean).unwrap().1);
         assert_eq!(report_line(&json!({})), None);
+    }
+
+    #[test]
+    fn reset_choice_names_each_store_and_never_everything() {
+        let mut c = ResetChoice { project_id: "prj_a".into(), start_fresh: true, ..Default::default() };
+        assert!(c.is_empty());
+        c.chats.insert("chat_1".into());
+        c.personal.insert("mem_b".into());
+        c.personal.insert("mem_a".into());
+        assert_eq!(c.selection(), json!({"chats": ["chat_1"], "chats_in": [], "personal": ["mem_a", "mem_b"],
+                                         "project": {}, "start_fresh": true}));
+        c.all_personal = true;
+        c.all_project = true;
+        c.all_chats = true;
+        assert_eq!(c.selection(), json!({"chats": ["chat_1"], "chats_in": ["prj_a"], "personal": "all",
+                                         "project": {"prj_a": "all"}, "start_fresh": true}));
+    }
+
+    #[test]
+    fn reset_preview_and_result_parse() {
+        let p: ResetPreview = serde_json::from_value(json!({"preview_id": "rst_1", "selection": {}, "counts": {},
+            "items": [{"type": "chat", "id": "chat_1", "title": "Plan", "project_id": "prj_a", "project": "A",
+                       "messages": 4, "archived": true, "busy": false},
+                      {"type": "personal", "id": "mem_1", "kind": "fact", "text": "Tea", "scope": "all"},
+                      {"type": "suggestion", "id": "cand_1", "chat_id": "chat_1", "store": "project", "kind": "lesson"}],
+            "kept": [{"what": "task_records", "count": 2, "text": "2 stay"}], "not_touched": "n", "backups": "b",
+            "blocked": [], "empty": false, "start_fresh": true})).unwrap();
+        assert_eq!(p.items[0].label(), "Plan");
+        assert_eq!(p.items[0].tag(), "chat · 4 messages · archived");
+        assert_eq!(p.items[1].tag(), "personal memory · fact");
+        assert_eq!(p.items[2].label(), "A project lesson suggestion from a chat above");
+        let d: ResetDone = serde_json::from_value(json!({"done": true, "deleted": {"chats": 1, "messages": 2,
+            "personal": 1, "project": 0, "suggestions": 0, "pending_turns": 0}, "items": [{"type": "chat", "id": "chat_1"}],
+            "kept": [], "not_touched": "n", "backups": "b", "start_fresh": true})).unwrap();
+        assert_eq!(d.summary(), "Deleted 1 chat(s) with 2 message(s), 1 personal and 0 project memory item(s).");
     }
 
     #[test]

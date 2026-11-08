@@ -94,6 +94,12 @@ class ChatLocks:
         with self._lock:
             return self._locks.setdefault(chat_id, threading.Lock())
 
+    def forget(self, chat_ids) -> None:
+        """M8: a reset chat no longer exists; drop its lock."""
+        with self._lock:
+            for cid in chat_ids:
+                self._locks.pop(cid, None)
+
 
 # status stored with a kept partial reply, by error code
 PARTIAL_STATUS = {"cancelled": "stopped", "timeout": "timeout", "stream_interrupted": "interrupted",

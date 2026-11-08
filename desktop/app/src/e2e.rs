@@ -263,6 +263,54 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             window.update(cx, |ws, _, cx| ws.reject_candidate(id, cx)).ok();
             wait_until(cx, window, 10, "rejected", move |ws| ws.memory.as_ref().is_some() && ws.candidate(&gone).is_none()).await?;
         }
+        "reset_open" => {
+            // Start fresh… (no argument), or Options › Delete chat… on the open chat (`reset_open chat`) (M8)
+            let on_chat = arg == "chat";
+            window.update(cx, |ws, _, cx| { let id = if on_chat { ws.chat.as_ref().map(|c| c.id.clone()) } else { None }; ws.open_reset(id, cx) }).ok();
+            wait_until(cx, window, 10, "start fresh", |ws| ws.reset.as_ref().map(|r| r.chats.is_some()).unwrap_or(false)).await?;
+            if on_chat {
+                wait_until(cx, window, 10, "preview", |ws| ws.reset.as_ref().map(|r| r.preview.is_some() || r.error.is_some()).unwrap_or(false)).await?;
+            }
+        }
+        "reset_tick" => {
+            // a tick box: all_chats | chat TITLE | all_personal | personal TEXT | all_project | project TEXT | start_fresh
+            let (what, val) = arg.split_once(' ').map(|(a, b)| (a, b.trim().to_string())).unwrap_or((arg, String::new()));
+            let tick = window.update(cx, |ws, _, _| -> Result<crate::workspace::ResetTick, String> {
+                use crate::workspace::ResetTick as T;
+                let r = ws.reset.as_ref().ok_or("start fresh is not open")?;
+                let mem = ws.memory.as_ref().ok_or("no memory view")?;
+                Ok(match what {
+                    "all_chats" => T::AllChats,
+                    "all_personal" => T::AllPersonal,
+                    "all_project" => T::AllProject,
+                    "start_fresh" => T::StartFresh,
+                    "chat" => T::Chat(r.chats.as_ref().and_then(|c| c.iter().find(|c| c.title.contains(&val))).map(|c| c.id.clone()).ok_or("no such chat")?),
+                    "personal" => T::Personal(mem.personal.iter().find(|m| m.text.contains(&val)).map(|m| m.id.clone()).ok_or("no such item")?),
+                    "project" => T::Project(mem.project.iter().find(|m| m.text.contains(&val)).map(|m| m.id.clone()).ok_or("no such item")?),
+                    _ => return Err(format!("reset_tick {what}?")),
+                })
+            }).map_err(|_| "window gone".to_string())??;
+            window.update(cx, |ws, _, cx| ws.toggle_reset(tick, cx)).ok();
+        }
+        "reset_preview" => {
+            window.update(cx, |ws, _, cx| ws.preview_reset(cx)).ok();
+            wait_until(cx, window, 10, "preview", |ws| ws.reset.as_ref().map(|r| !r.working && (r.preview.is_some() || r.error.is_some())).unwrap_or(false)).await?;
+        }
+        "reset_confirm" => {
+            // what Delete N items does: done, or refused with a new preview to check
+            window.update(cx, |ws, _, cx| ws.confirm_reset(cx)).ok();
+            wait_until(cx, window, 10, "reset answered", |ws| ws.reset.as_ref().map(|r| !r.working).unwrap_or(true)).await?;
+            // once done, until the lists the app shows no longer hold what was deleted
+            let gone: Vec<String> = window.update(cx, |ws, _, _| ws.reset.as_ref().and_then(|r| r.done.as_ref())
+                .map(|d| d.items.iter().map(|i| i.id.clone()).collect()).unwrap_or_default()).unwrap_or_default();
+            if !gone.is_empty() {
+                wait_until(cx, window, 10, "lists reloaded", move |ws| !ws.chats.iter().any(|c| gone.contains(&c.id))
+                    && ws.memory.as_ref().map(|v| !v.personal.iter().chain(v.project.iter()).any(|m| gone.contains(&m.id))).unwrap_or(false)).await?;
+            }
+        }
+        "reset_cancel" => {
+            window.update(cx, |ws, _, cx| ws.close_reset(cx)).ok();
+        }
         "use_memory" => {
             let on = arg != "off";
             window.update(cx, |ws, _, cx| { ws.use_memory = on; cx.notify(); }).ok();
@@ -300,7 +348,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "ask_notice" => ws.asks_before_read().to_string(),
                 "last_text_len_over" => (ws.msgs.last().map(|m| m.text.len()).unwrap_or(0) > val.parse::<usize>().unwrap_or(0)).to_string(),
                 "phase" => match &ws.phase { Phase::Ready => "ready".into(), Phase::Starting => "starting".into(), Phase::Failed(f) => f.code.clone() },
-                "sessions" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),
+                "sessions" | "sessions_lack" => ws.chats.iter().map(|c| c.title.clone()).collect::<Vec<_>>().join(" | "),
                 "opening" => ws.opening_title().unwrap_or_else(|| "none".into()),
                 "interrupted" => ws.interrupted.as_ref().map(|i| i.text.clone()).unwrap_or_else(|| "none".into()),
                 "last_text_lacks" => (!ws.msgs.last().map(|m| m.text.contains(val)).unwrap_or(false)).to_string(),
@@ -311,11 +359,24 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "memory_personal" => ws.memory.as_ref().map(|v| v.personal.len()).unwrap_or(0).to_string(),
                 "candidates" => ws.memory.as_ref().map(|v| v.candidates.iter()
                     .map(|c| format!("{} {} ({}): {}", c.store, c.kind, c.basis, c.text)).collect::<Vec<_>>().join(" | ")).unwrap_or_default(),
+                "reset" => match &ws.reset {
+                    None => "closed".into(),
+                    Some(r) if r.done.is_some() => format!("done: {}", r.done.as_ref().unwrap().summary()),
+                    Some(r) => match &r.preview {
+                        Some(p) => format!("preview {} items{}: {}{}", p.items.len(),
+                                           r.warning.as_ref().map(|w| format!(" (warning: {w})")).unwrap_or_default(),
+                                           p.items.iter().map(|i| i.label()).collect::<Vec<_>>().join(" | "),
+                                           format!(" || stays: {} {}", p.kept.iter().map(|k| k.text.clone()).collect::<Vec<_>>().join(" "), p.backups)),
+                        None => format!("open{}", r.error.as_ref().map(|e| format!(" (error: {e})")).unwrap_or_default()),
+                    },
+                },
                 _ => "?".into(),
             }).map_err(|_| "window gone".to_string())?;
             let ok = match what {
                 "chat" if val != "none" => got.contains(val),
                 "last_meta" | "sessions" | "last_text" | "reply_metas" | "memory" => got.contains(val),
+                "reset" if val != "closed" => got.contains(val),
+                "sessions_lack" => !got.contains(val),
                 "candidates" if val != "none" => got.contains(val),
                 "candidates" => got.is_empty(),
                 "last_text_lacks" => got == "true",

@@ -130,7 +130,7 @@ are separate. **Deleting from one never deletes from another.**
 | You delete… | Gone | Not touched |
 |---|---|---|
 | a memory item | its row in `personal_memory` or `project_memory`; it is never retrieved again, for any later reply | every chat, including replies that used it (which keep going back to the model as recent messages of their chat, above); task records; receipts; the other memory items |
-| a chat (not possible yet, M2) | — | memory. No memory column points at a chat, and no memory row is removed with one |
+| a chat (M8: Start fresh, docs/m8-reset.md) | the chat, its messages, its pending turn, and the suggestions from it still waiting for review | memory, unless you select items too. No memory column points at a chat, and no memory row is removed with one |
 
 ### Why deleting a memory item does not rewrite old chats
 
@@ -147,8 +147,8 @@ back and edit what the model answered, for three reasons:
 
 So **old conversations can still contain the same fact**, and while they do,
 their later replies can still be shaped by it through the chat history. If you need it gone
-from those too, that is a chat deletion, which is still blocked pending the
-deletion decision (docs/m2-history.md). The old reply still lists the deleted
+from those too, reset those chats with Start fresh (M8, docs/m8-reset.md): its
+preview names the kept replies that were given an item you reset. The old reply still lists the deleted
 item's id under it; the id now points at nothing, which is itself the record
 that the item was used and later deleted.
 

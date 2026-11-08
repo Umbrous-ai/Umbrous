@@ -70,6 +70,36 @@ pub enum MemTarget {
     Accept(String),    // M7: a suggestion's id: edit its text, Enter accepts it
 }
 
+/// M8: Start fresh, in the right panel while it is open. The choice is what
+/// you ticked; a preview is the runtime's exact list for that choice, and any
+/// change to the choice drops it, so only a preview you saw can be confirmed.
+#[derive(Debug, Clone, Default)]
+pub struct ResetUi {
+    pub choice: api::ResetChoice,
+    /// the project's chats, active and archived, loaded when Start fresh opens
+    pub chats: Option<Vec<api::ChatInfo>>,
+    pub preview: Option<api::ResetPreview>,
+    /// the runtime refused a preview that no longer matched; this one is new
+    pub warning: Option<String>,
+    pub error: Option<String>,
+    pub done: Option<api::ResetDone>,
+    pub working: bool,
+    /// Options › Delete chat…: preview as soon as the chat list is in
+    preview_on_load: bool,
+}
+
+/// One tick box in Start fresh.
+#[derive(Clone, Debug)]
+pub enum ResetTick {
+    AllChats,
+    Chat(String),
+    AllPersonal,
+    Personal(String),
+    AllProject,
+    Project(String),
+    StartFresh,
+}
+
 enum StreamMsg {
     Event(Value),
     Ended(Option<api::ApiError>),
@@ -128,6 +158,8 @@ pub struct Workspace {
     memory_armed: Option<String>,
     /// send replies with memory (the default) or without, to compare
     pub use_memory: bool,
+    /// M8: Start fresh (selective reset), while open
+    pub reset: Option<ResetUi>,
     sidebar: bool,
     /// the right sidebar (Changes and Sources), shown and hidden by the header's panel button
     details: bool,
@@ -281,6 +313,7 @@ impl Workspace {
             memory_input: None,
             memory_armed: None,
             use_memory: true,
+            reset: None,
             access_seq: 0,
             access_error: None,
             sidebar: true,
@@ -537,6 +570,146 @@ impl Workspace {
         self.api_call(cx, move |api| api.post::<Value>(&path, json!({})), |this, r, cx| this.memory_done(r, cx));
     }
 
+    // ---------- start fresh (M8) ----------
+    /// Open Start fresh for the selected project. `chat`: Options › Delete chat…
+    /// on the open chat, which ticks it and asks for the preview at once.
+    pub fn open_reset(&mut self, chat: Option<String>, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        self.options_menu = false;
+        self.details = true;
+        let mut ui = ResetUi { preview_on_load: chat.is_some(), ..Default::default() };
+        ui.choice.project_id = pid.clone();
+        ui.choice.start_fresh = true;
+        if let Some(c) = chat {
+            ui.choice.chats.insert(c);
+        }
+        self.reset = Some(ui);
+        logfile::event("ui.reset_open", &[]);
+        self.load_memory(cx);
+        let for_project = pid.clone();
+        self.api_call(
+            cx,
+            move |api| {
+                let mut all = api.get::<api::Chats>(&format!("/api/chats?project_id={pid}"))?.chats;
+                all.extend(api.get::<api::Chats>(&format!("/api/chats?project_id={pid}&archived=1"))?.chats);
+                Ok(all)
+            },
+            move |this, r, cx| {
+                let Some(ui) = this.reset.as_mut() else { return };
+                if ui.choice.project_id != for_project {
+                    return;
+                }
+                match r {
+                    Ok(all) => {
+                        ui.chats = Some(all);
+                        if std::mem::take(&mut ui.preview_on_load) {
+                            this.preview_reset(cx);
+                        }
+                    }
+                    Err(e) => ui.error = Some(e.message),
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// Cancel: close it. Nothing was sent that could delete anything.
+    pub fn close_reset(&mut self, cx: &mut Context<Self>) {
+        if self.reset.take().is_some() {
+            logfile::event("ui.reset_cancel", &[]);
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_reset(&mut self, tick: ResetTick, cx: &mut Context<Self>) {
+        let Some(ui) = self.reset.as_mut() else { return };
+        let c = &mut ui.choice;
+        fn flip(set: &mut std::collections::BTreeSet<String>, id: String) {
+            if !set.remove(&id) {
+                set.insert(id);
+            }
+        }
+        match tick {
+            ResetTick::AllChats => c.all_chats = !c.all_chats,
+            ResetTick::Chat(id) => flip(&mut c.chats, id),
+            ResetTick::AllPersonal => c.all_personal = !c.all_personal,
+            ResetTick::Personal(id) => flip(&mut c.personal, id),
+            ResetTick::AllProject => c.all_project = !c.all_project,
+            ResetTick::Project(id) => flip(&mut c.project, id),
+            ResetTick::StartFresh => c.start_fresh = !c.start_fresh,
+        }
+        // a different choice needs its own preview
+        ui.preview = None;
+        ui.warning = None;
+        ui.error = None;
+        ui.done = None;
+        cx.notify();
+    }
+
+    /// Ask the runtime for the exact items this choice covers, and what stays.
+    pub fn preview_reset(&mut self, cx: &mut Context<Self>) {
+        let Some(ui) = self.reset.as_mut() else { return };
+        if ui.choice.is_empty() {
+            ui.error = Some("Nothing is selected. Tick chats or memory items first.".into());
+            cx.notify();
+            return;
+        }
+        ui.working = true;
+        ui.error = None;
+        ui.warning = None;
+        ui.done = None;
+        let sel = ui.choice.selection();
+        self.api_call(cx, move |api| api.post::<api::ResetPreview>("/api/reset/preview", json!({"selection": sel})),
+            move |this, r, _| {
+                let Some(ui) = this.reset.as_mut() else { return };
+                ui.working = false;
+                match r {
+                    Ok(p) => ui.preview = Some(p),
+                    Err(e) => ui.error = Some(e.message),
+                }
+            });
+        cx.notify();
+    }
+
+    /// Delete exactly the preview shown. The runtime refuses one that no longer
+    /// matches and sends the new one, which is shown to check instead.
+    pub fn confirm_reset(&mut self, cx: &mut Context<Self>) {
+        let Some(ui) = self.reset.as_mut() else { return };
+        let Some(preview) = ui.preview.as_ref() else { return };
+        if ui.working {
+            return;
+        }
+        ui.working = true;
+        let body = json!({"selection": ui.choice.selection(), "preview_id": preview.preview_id});
+        logfile::event("ui.reset_confirm", &[("items", preview.items.len().to_string())]); // ids stay in the runtime log
+        self.api_call(cx, move |api| api.post::<api::ResetDone>("/api/reset", body), move |this, r, cx| {
+            let Some(ui) = this.reset.as_mut() else { return };
+            ui.working = false;
+            match r {
+                Ok(done) => {
+                    let gone_open = this.chat.as_ref().map(|c| done.items.iter().any(|i| i.id == c.id)).unwrap_or(false);
+                    let fresh = done.start_fresh;
+                    ui.preview = None;
+                    ui.choice = api::ResetChoice { project_id: ui.choice.project_id.clone(), start_fresh: true, ..Default::default() };
+                    ui.chats = None;
+                    ui.done = Some(done);
+                    if fresh || gone_open {
+                        this.new_chat(cx);
+                    }
+                    this.load_projects(None, cx);
+                }
+                Err(e) => match e.preview.and_then(|p| serde_json::from_value::<api::ResetPreview>(p).ok()) {
+                    Some(p) => {
+                        ui.preview = Some(p);
+                        ui.warning = Some(e.message);
+                    }
+                    None => ui.error = Some(e.message),
+                },
+            }
+        });
+        cx.notify();
+    }
+
     fn begin_memory_input(&mut self, target: MemTarget, window: &mut Window, cx: &mut Context<Self>) {
         let initial = match &target {
             MemTarget::Edit(id) => self.memory_item(id).map(|m| m.text.clone()).unwrap_or_default(),
@@ -612,6 +785,7 @@ impl Workspace {
             self.memory_error = None;
             self.memory_input = None;
             self.memory_armed = None;
+            self.reset = None;
             self.new_chat(cx);
             self.load_chats(cx);
         }
@@ -1689,11 +1863,19 @@ impl Workspace {
                 )
                 .child(
                     div()
+                        .id("opt-delete")
                         .px(px(10.))
                         .py(px(7.))
-                        .text_color(text_subtle())
-                        .child("Delete chat")
-                        .child(div().text_size(fs_12()).child("Not available yet")),
+                        .rounded(px(R_8))
+                        .cursor_pointer()
+                        .text_color(text_strong())
+                        .hover(|s| s.bg(bg_selected()))
+                        .child("Delete chat…")
+                        .child(div().text_size(fs_12()).text_color(text_subtle()).child("Shows what goes and what stays first"))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let id = this.chat.as_ref().map(|c| c.id.clone());
+                            this.open_reset(id, cx);
+                        })),
                 )
                 .into_any_element(),
         )
@@ -1825,6 +2007,9 @@ impl Workspace {
                     cx.notify();
                 })),
         );
+        if self.reset.is_some() {
+            return col.child(self.render_reset(cx)).into_any_element();
+        }
         let Some(view) = self.memory.clone() else {
             return col.child(note(self.memory_error.clone().unwrap_or_else(|| "Loading…".into()))).into_any_element();
         };
@@ -1975,6 +2160,161 @@ impl Workspace {
             col = col.child(div().px(px(20.)).py(px(4.)).text_size(fs_12()).text_color(danger()).child(err.clone()));
         }
         col = col.child(note("Off or deleted means not retrieved again. Earlier replies that repeat an item still reach the model as chat history; compare in a new chat.".into()));
+        // M8
+        col = col.child(title("reset-title", "Start fresh".into(), None))
+            .child(note("Delete chosen chats and memory, after seeing exactly what goes and what stays.".into()))
+            .child(div().px(px(20.)).pt(px(3.)).child(Self::small_button("reset-open", "Start fresh…".into(), false)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_reset(None, cx)))));
+        col.into_any_element()
+    }
+
+    fn small_button(id: impl Into<SharedString>, label: SharedString, danger_: bool) -> gpui::Stateful<gpui::Div> {
+        use theme::*;
+        div()
+            .id(gpui::ElementId::Name(id.into()))
+            .flex_none()
+            .h(px(22.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .rounded(px(R_6))
+            .border_1()
+            .border_color(if danger_ { danger() } else { border_strong() })
+            .cursor_pointer()
+            .text_size(fs_12())
+            .text_color(if danger_ { danger() } else { text_strong() })
+            .hover(|s| s.bg(bg_hover()))
+            .child(label)
+    }
+
+    /// M8: Start fresh: tick chats and memory, Preview, then the exact list and
+    /// what stays, with Delete N items or Cancel.
+    fn render_reset(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use theme::*;
+        let Some(ui) = self.reset.clone() else { return div().into_any_element() };
+        let note = |text: String| div().px(px(20.)).py(px(3.)).text_size(fs_12()).text_color(text_subtle()).child(text);
+        let head = |label: String| div().px(px(20.)).pt(px(10.)).pb(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(label);
+        let project = self.projects.iter().find(|p| p.id == ui.choice.project_id).map(|p| p.name.clone()).unwrap_or_default();
+        let mut col = div().id("reset").flex().flex_col();
+        col = col.child(div().flex().items_center().justify_between().h(px(30.)).px(px(20.)).text_size(fs_13())
+            .text_color(text_default()).child("Start fresh")
+            .child(Self::small_button("reset-close", "Cancel".into(), false)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_reset(cx)))));
+        if let Some(done) = &ui.done {
+            col = col.child(div().px(px(20.)).py(px(4.)).text_size(fs_13()).text_color(success()).child(done.summary()));
+            for k in &done.kept {
+                col = col.child(note(format!("Kept: {}", k.text)));
+            }
+            col = col.child(note(done.backups.clone()));
+            return col.into_any_element();
+        }
+        let tick = |id: String, label: String, on: bool, sub: bool, what: ResetTick, cx: &mut Context<Self>| {
+            div()
+                .id(gpui::ElementId::Name(id.into()))
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .pl(px(if sub { 38. } else { 20. }))
+                .pr(px(20.))
+                .py(px(3.))
+                .cursor_pointer()
+                .child(
+                    div().flex_none().mt(px(2.)).size(px(14.)).rounded(px(R_4)).border_1()
+                        .border_color(if on { accent() } else { border_strong() })
+                        .when(on, |d| d.bg(accent()).flex().items_center().justify_center()
+                            .child(ui::icon_sized("check", 10.).text_color(text_strong()))),
+                )
+                .child(div().flex_1().min_w_0().text_size(fs_13()).line_height(px(18.)).text_color(text_strong()).child(label))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_reset(what.clone(), cx)))
+        };
+        let c = &ui.choice;
+        col = col.child(head(format!("Chats in {project}")));
+        match &ui.chats {
+            None => col = col.child(note("Loading…".into())),
+            Some(chats) if chats.is_empty() => col = col.child(note("No chats.".into())),
+            Some(chats) => {
+                col = col.child(tick("reset-all-chats".into(), format!("All chats in {project} ({}, archived too)", chats.len()),
+                                     c.all_chats, false, ResetTick::AllChats, cx));
+                for ch in chats {
+                    let label = if ch.archived { format!("{} (archived)", ch.title) } else { ch.title.clone() };
+                    col = col.child(tick(format!("reset-chat-{}", ch.id), label, c.chats.contains(&ch.id), true,
+                                         ResetTick::Chat(ch.id.clone()), cx));
+                }
+            }
+        }
+        if let Some(view) = self.memory.clone().filter(|v| v.project_id.as_deref() == Some(c.project_id.as_str())) {
+            col = col.child(head("Personal memory".into()));
+            if view.personal.is_empty() {
+                col = col.child(note("Nothing saved.".into()));
+            } else {
+                col = col.child(tick("reset-all-personal".into(), format!("All personal memory ({}, every project)", view.personal.len()),
+                                     c.all_personal, false, ResetTick::AllPersonal, cx));
+            }
+            for m in &view.personal {
+                col = col.child(tick(format!("reset-p-{}", m.id), m.text.clone(), c.personal.contains(&m.id), true,
+                                     ResetTick::Personal(m.id.clone()), cx));
+            }
+            col = col.child(head(format!("Memory of {project}")));
+            if view.project.is_empty() {
+                col = col.child(note("Nothing saved.".into()));
+            } else {
+                col = col.child(tick("reset-all-project".into(), format!("All of {project}'s memory ({})", view.project.len()),
+                                     c.all_project, false, ResetTick::AllProject, cx));
+            }
+            for m in &view.project {
+                col = col.child(tick(format!("reset-m-{}", m.id), m.text.clone(), c.project.contains(&m.id), true,
+                                     ResetTick::Project(m.id.clone()), cx));
+            }
+        }
+        col = col.child(div().pt(px(8.)).child(tick("reset-fresh".into(), "Start a new chat afterwards".into(), c.start_fresh, false,
+                                                     ResetTick::StartFresh, cx)));
+        if ui.preview.is_none() {
+            col = col.child(div().px(px(20.)).pt(px(6.)).child(Self::small_button("reset-preview", "Preview".into(), false)
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.preview_reset(cx)))));
+        }
+        if let Some(err) = &ui.error {
+            col = col.child(div().px(px(20.)).py(px(4.)).text_size(fs_12()).text_color(danger()).child(err.clone()));
+        }
+        if ui.working {
+            col = col.child(note("Asking the runtime…".into()));
+        }
+        if let Some(p) = &ui.preview {
+            let mut box_ = div().id("reset-preview").mx(px(12.)).mt(px(8.)).p(px(8.)).rounded(px(R_8)).border_1()
+                .border_color(danger()).flex().flex_col();
+            if let Some(w) = &ui.warning {
+                box_ = box_.child(div().py(px(3.)).text_size(fs_12()).text_color(warning()).child(w.clone()));
+            }
+            if p.empty {
+                box_ = box_.child(div().text_size(fs_12()).text_color(text_subtle()).child("The selection matches nothing, so there is nothing to delete."));
+            } else {
+                let n = p.items.len();
+                box_ = box_.child(div().text_size(fs_12()).text_color(text_subtle()).pb(px(2.))
+                    .child(format!("This deletes exactly {n} item{}:", if n == 1 { "" } else { "s" })));
+                for i in &p.items {
+                    box_ = box_.child(div().py(px(2.)).child(div().text_size(fs_13()).text_color(text_strong()).child(i.label()))
+                        .child(div().text_size(fs_12()).text_color(text_subtle()).child(i.tag())));
+                }
+                box_ = box_.child(div().pt(px(6.)).text_size(fs_12()).text_color(text_subtle()).child("What stays"));
+                for k in &p.kept {
+                    box_ = box_.child(div().py(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(k.text.clone()));
+                }
+                box_ = box_.child(div().py(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(p.not_touched.clone()))
+                    .child(div().py(px(2.)).text_size(fs_12()).text_color(text_subtle()).child(p.backups.clone()));
+                if !p.blocked.is_empty() {
+                    box_ = box_.child(div().py(px(2.)).text_size(fs_12()).text_color(danger())
+                        .child("A reply is running in a selected chat. Stop it or let it finish, then preview again."));
+                }
+                let mut row = div().flex().gap(px(6.)).pt(px(6.));
+                if p.blocked.is_empty() {
+                    row = row.child(Self::small_button("reset-confirm", format!("Delete {n} item{}", if n == 1 { "" } else { "s" }).into(), true)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_reset(cx))));
+                }
+                row = row.child(Self::small_button("reset-cancel", "Cancel".into(), false)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_reset(cx))));
+                box_ = box_.child(row);
+            }
+            col = col.child(box_);
+        }
         col.into_any_element()
     }
 

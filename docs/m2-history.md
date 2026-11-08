@@ -20,7 +20,7 @@ Quit with Ctrl-C, start again, and your projects and chats are still there.
 | **Transcript** | The messages of one chat, exactly as sent and received, in order, with the model name, token counts and how each reply ended | `messages` table |
 | **Project** | A named group of chats. Every chat is in exactly one. A fresh install has **General** | `projects` table |
 | **Archived chat** | Hidden from the normal list, read-only, **every message kept**. Restore puts it back unchanged | `chats.archived_at` is set; nothing else changes |
-| **Deleted chat** | Does not exist yet. No function, endpoint or button deletes | – |
+| **Deleted chat** | M8: only through Start fresh (docs/m8-reset.md), which shows the exact chats and what stays first. Its row, messages and pending turn are erased; nothing else in this store deletes | – |
 | **Memory** (M6) | Notes given to later replies across chats. Its own two stores (docs/m6-memory.md); archiving a chat does not touch it | `personal_memory`, `project_memory` |
 | **Task records / receipts** (M3, M4) | What tools did and what they changed. Not built. Their own store, kept even if a chat is later deleted | – |
 
@@ -93,7 +93,8 @@ uses `?` parameters, so a crafted id is refused, never interpreted.
   "École", "école" and "STRASSE"/"Straße" count as the same name. SQLite's own
   `NOCASE` only folds A to Z, which is why it is not used.
 - **Options** (⋯ in the header): Archive chat, or Restore chat when it is
-  archived, and a greyed-out **Delete chat**: "Not available yet".
+  archived. **Delete chat…** was greyed out until M8; it now opens Start fresh
+  with this chat ticked and its preview shown (docs/m8-reset.md).
 - An archived chat opens read-only: a notice with a **Restore** button, and the
   message box is disabled. The server enforces this too: sending to an archived
   chat is refused before any model is called.
@@ -165,7 +166,7 @@ disabled. `bin/umbrous purge logs` still only touches logs.
    tulip chat. The whole transcript is back, and a new message continues it
    (the model sees the earlier turns).
 5. ⋯ ▸ **Archive chat**. It is marked archived, the box is disabled, the
-   messages are all there. Delete is greyed out. Press **Restore** and carry on.
+   messages are all there. (Until M8, Delete was greyed out.) Press **Restore** and carry on.
 
 ## Exercise: see what archive really changes
 

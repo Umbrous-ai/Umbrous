@@ -337,6 +337,7 @@
     loadChats();
     loadAccess();
     loadMemory();
+    if (resetOpen) closeReset();
   }
 
 
@@ -858,6 +859,178 @@
       'item, those replies still go back to the model as history. To compare, use a new chat.'));
   }
 
+  // ---------- M8: start fresh (selective reset) ----------
+  // Pick chats and memory, see the exact items and what stays, then confirm
+  // that preview. Cancel sends nothing. The runtime refuses a preview that no
+  // longer matches (preview_changed) and sends the new one to check instead.
+  let resetOpen = false, resetPreselect = null;
+  function renderResetEntry() {
+    const sec = $('#reset'), box = $('#reset-body');
+    if (!sec || !box) return;
+    sec.hidden = false;
+    if (resetOpen) return;
+    box.textContent = '';
+    box.appendChild(el('div', 'acc-note', 'Delete chosen chats and memory items, after seeing exactly what goes and ' +
+      'what stays. Nothing is deleted until you confirm.'));
+    const r = el('div', 'acc-row');
+    const b = memButton('Start fresh…', () => openReset(null));
+    b.dataset.act = 'reset-open';
+    r.appendChild(b);
+    box.appendChild(r);
+  }
+  async function openReset(preselectChat) {
+    resetOpen = true;
+    resetPreselect = preselectChat;
+    $('#reset').hidden = false;
+    const box = $('#reset-body');
+    box.textContent = '';
+    box.appendChild(el('div', 'acc-note', 'Loading…'));
+    const want = projectId;
+    let active, archived, mem;
+    try {
+      [active, archived, mem] = await Promise.all([
+        getJson('/api/chats?project_id=' + encodeURIComponent(want)),
+        getJson('/api/chats?archived=1&project_id=' + encodeURIComponent(want)),
+        getJson('/api/memory?project_id=' + encodeURIComponent(want))]);
+    } catch (e) { box.textContent = ''; box.appendChild(el('div', 'acc-err', e.message)); return; }
+    renderResetPicker(want, active.chats.concat(archived.chats), mem);
+    if (preselectChat) previewReset();
+  }
+  function closeReset() { resetOpen = false; resetPreselect = null; renderResetEntry(); }
+  function pick(label, value, group, checked, sub) {
+    const lab = el('label', 'reset-pick' + (sub ? ' sub' : ''));
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.value = value;
+    cb.dataset.group = group;
+    cb.checked = !!checked;
+    lab.append(cb, document.createTextNode(label));
+    return lab;
+  }
+  function renderResetPicker(pid, chats, mem) {
+    const box = $('#reset-body');
+    box.textContent = '';
+    box.dataset.projectId = pid;
+    const name = projectName(pid);
+    box.appendChild(el('div', 'mem-h', 'Chats in ' + name));
+    if (!chats.length) box.appendChild(el('div', 'acc-note', 'No chats.'));
+    else box.appendChild(pick(`All chats in ${name} (${chats.length}, archived too)`, pid, 'chats_in'));
+    for (const c of chats) box.appendChild(pick(c.title + (c.archived ? ' (archived)' : ''), c.id, 'chats',
+      c.id === resetPreselect, true));
+    box.appendChild(el('div', 'mem-h', 'Personal memory'));
+    if (!mem.personal.length) box.appendChild(el('div', 'acc-note', 'Nothing saved.'));
+    else box.appendChild(pick(`All personal memory (${mem.personal.length}, every project)`, 'all', 'personal'));
+    for (const m of mem.personal) box.appendChild(pick(m.text, m.id, 'personal_item', false, true));
+    box.appendChild(el('div', 'mem-h', 'Memory of ' + name));
+    if (!mem.project.length) box.appendChild(el('div', 'acc-note', 'Nothing saved.'));
+    else box.appendChild(pick(`All of ${name}'s memory (${mem.project.length})`, pid, 'project_all'));
+    for (const m of mem.project) box.appendChild(pick(m.text, m.id, 'project_item', false, true));
+    const fresh = pick('Start a new chat afterwards', '1', 'start_fresh', true);
+    fresh.style.marginTop = '10px';
+    box.appendChild(fresh);
+    const err = el('div', 'acc-err');
+    err.id = 'reset-err';
+    err.hidden = true;
+    const r = el('div', 'acc-row');
+    const pv = memButton('Preview', () => previewReset());
+    pv.dataset.act = 'reset-preview';
+    r.append(pv, memButton('Cancel', closeReset));
+    box.append(err, r);
+    const out = el('div');
+    out.id = 'reset-preview';
+    box.appendChild(out);
+  }
+  function resetSelection() {
+    const box = $('#reset-body');
+    const pid = box.dataset.projectId;
+    const on = (g) => [...box.querySelectorAll(`input[data-group="${g}"]`)].filter((x) => x.checked).map((x) => x.value);
+    const sel = { chats: on('chats'), chats_in: on('chats_in'), personal: on('personal').length ? 'all' : on('personal_item'),
+      project: {}, start_fresh: on('start_fresh').length > 0 };
+    if (on('project_all').length) sel.project[pid] = 'all';
+    else if (on('project_item').length) sel.project[pid] = on('project_item');
+    return sel;
+  }
+  async function previewReset() {
+    const err = $('#reset-err'), out = $('#reset-preview');
+    err.hidden = true;
+    out.textContent = '';
+    const sel = resetSelection();
+    let pv;
+    try { pv = await getJson('/api/reset/preview', { json: { selection: sel } }); }
+    catch (e) { err.textContent = e.message; err.hidden = false; return; }
+    showResetPreview(sel, pv, null);
+  }
+  const RESET_WORD = { chat: 'chat', personal: 'personal memory', project: 'project memory', suggestion: 'waiting suggestion' };
+  function showResetPreview(sel, pv, warning) {
+    const out = $('#reset-preview');
+    out.textContent = '';
+    const box = el('div', 'reset-preview');
+    box.dataset.previewId = pv.preview_id;
+    if (warning) box.appendChild(el('div', 'notice warn small', warning));
+    if (pv.empty) {
+      box.appendChild(el('div', 'acc-note', 'The selection matches nothing, so there is nothing to delete.'));
+      out.appendChild(box);
+      return;
+    }
+    const n = pv.items.length;
+    box.appendChild(el('div', 'mem-h', `This deletes exactly ${n} item${n === 1 ? '' : 's'}:`));
+    for (const i of pv.items) {
+      const row = el('div', 'reset-item', i.type === 'chat' ? i.title : i.type === 'suggestion'
+        ? `A ${i.store} ${i.kind} suggestion from a chat above` : i.text);
+      row.dataset.resetItem = i.id;
+      const tag = i.type === 'chat' ? `${i.messages} messages${i.archived ? ' · archived' : ''}${i.busy ? ' · a reply is running' : ''}`
+        : i.type === 'suggestion' ? 'not in memory, quotes the chat' : i.kind;
+      row.appendChild(el('span', 'mem-tag', `${RESET_WORD[i.type]} · ${i.id} · ${tag}`));
+      box.appendChild(row);
+    }
+    box.appendChild(el('div', 'mem-h', 'What stays'));
+    for (const k of pv.kept) box.appendChild(el('div', 'reset-kept', k.text));
+    box.appendChild(el('div', 'reset-kept', pv.not_touched));
+    box.appendChild(el('div', 'reset-kept', pv.backups));
+    const err = el('div', 'acc-err');
+    err.hidden = true;
+    const r = el('div', 'acc-row');
+    const go = memButton(`Delete ${n} item${n === 1 ? '' : 's'}`, () => confirmReset(sel, pv.preview_id, err), 'danger');
+    go.dataset.act = 'reset-confirm';
+    if (pv.blocked.length) {
+      go.disabled = true;
+      box.appendChild(el('div', 'acc-err', 'A reply is running in a selected chat. Stop it or let it finish, then preview again.'));
+    }
+    const cancel = memButton('Cancel', closeReset);
+    cancel.dataset.act = 'reset-cancel';
+    r.append(go, cancel);
+    box.append(err, r);
+    out.appendChild(box);
+  }
+  async function confirmReset(sel, previewId, err) {
+    const r = await api.fetch('/api/reset', { json: { selection: sel, preview_id: previewId } });
+    let j = null;
+    try { j = await r.json(); } catch (_) { j = null; }
+    if (r.status === 409 && j && j.preview) {
+      showResetPreview(sel, j.preview, j.message);
+      return;
+    }
+    if (!r.ok) { err.textContent = (j && (j.message || j.error)) || 'HTTP ' + r.status; err.hidden = false; return; }
+    const d = j.deleted;
+    const gone = new Set(j.items.map((i) => i.id));
+    resetOpen = false;
+    const box = $('#reset-body');
+    box.textContent = '';
+    const done = el('div', 'acc-note ok', `Deleted ${d.chats} chat(s) with ${d.messages} message(s), ` +
+      `${d.personal} personal and ${d.project} project memory item(s)` + (d.suggestions ? `, ${d.suggestions} waiting suggestion(s)` : '') + '.');
+    done.id = 'reset-done';
+    box.appendChild(done);
+    for (const k of j.kept) box.appendChild(el('div', 'reset-kept', 'Kept: ' + k.text));
+    box.appendChild(el('div', 'reset-kept', j.backups));
+    const again = el('div', 'acc-row');
+    again.appendChild(memButton('Start fresh…', () => openReset(null)));
+    box.appendChild(again);
+    lastMemory = null;
+    await refreshSidebar();
+    await loadMemory();
+    if (j.start_fresh || (chatId && gone.has(chatId))) newChat();
+  }
+
   // ---------- history: the open chat ----------
   function setTitle(text) { $('#title').textContent = text; }
   function setComposer() {
@@ -992,6 +1165,7 @@
     showSessionProject();
     if (projectChanged || !accessView) loadAccess();
     if (projectChanged || !memoryView) loadMemory();
+    if (projectChanged && resetOpen) closeReset();
     clearContext();
     markCurrent();
     scrollDown();
@@ -1029,7 +1203,8 @@
     if (!chatId) item('Archive chat', 'Nothing saved yet: send a message first.', null);
     else if (chatArchived) item('Restore chat', 'Back to the list; you can continue it.', () => setArchived(false)).dataset.act = 'restore';
     else item('Archive chat', 'Hidden from the list, read-only. Nothing is deleted.', () => setArchived(true)).dataset.act = 'archive';
-    item('Delete chat', 'Not available yet: how deletion must work is still being decided.', null).dataset.act = 'delete';
+    if (!chatId) item('Delete chat…', 'Nothing saved yet.', null).dataset.act = 'delete';
+    else item('Delete chat…', 'Shows exactly what goes and what stays first (Start fresh).', () => openReset(chatId)).dataset.act = 'delete';
     $('.panel .head').appendChild(menu);
   }
 
@@ -1216,7 +1391,7 @@
     $('#sec-projects').textContent = '';   // the prototype's placeholder projects and sessions
     $('#sec-sessions').textContent = '';
     $('[data-new]').click();  // the prototype's own New chat (sidebar state) plus ours
-    refreshSidebar().then(() => { showSessionProject(); newChatNotice(); loadAccess(); loadMemory(); });
+    refreshSidebar().then(() => { showSessionProject(); newChatNotice(); loadAccess(); loadMemory(); renderResetEntry(); });
     loadModels();
   }
 

@@ -1,0 +1,74 @@
+# M8 in the app: Start fresh. Options › Delete chat… previews the open chat and
+# Cancel changes nothing; a mixed selection (a chat, a personal item, all of
+# this project's memory) is refused once something changes after its preview,
+# the new preview is confirmed, a new chat opens, and its reply is given none of
+# the reset memory.
+# Data: validate-m8.sh adds two personal items and one project item with the CLI
+# before launch; Ollama: stress.py fake-memory (memory-aware:3b repeats the memory it is given).
+wait_ready 30
+wait_models
+card open
+select_model memory-aware:3b
+wait_memory
+expect memory_personal 2
+expect memory_project 1
+# two chats; both replies are given the codename
+send What do you remember?
+wait_reply 30
+expect last_text ZEBRA-SHIP-731
+new_chat
+send Keep this chat
+wait_reply 30
+expect last_text ZEBRA-SHIP-731
+open_chat What do you remember
+# 1. Options › Delete chat…: the open chat only, previewed at once; Cancel changes nothing
+reset_open chat
+expect reset preview 1 items: What do you remember
+expect reset Time Machine
+screenshot @OUT@/m8-preview-chat.png
+reset_cancel
+expect reset closed
+expect sessions What do you remember
+expect sessions Keep this chat
+record cancelled
+# 2. a mixed selection, previewed
+reset_open
+reset_tick chat What do you remember
+reset_tick personal ZEBRA-SHIP-731
+reset_tick all_project
+reset_preview
+expect reset preview 3 items
+expect reset What do you remember
+expect reset My codename is ZEBRA-SHIP-731
+expect reset The release branch is ship-friday
+expect reset reply(ies) in chats you keep
+screenshot @OUT@/m8-preview-mixed.png
+record previewed
+# 3. a project item is added after the preview: confirm is refused, nothing is deleted, the new preview shows it
+memory_add project Tests run on every push
+reset_confirm
+expect reset preview 4 items (warning: What this selection covers changed since the preview
+expect reset Tests run on every push
+expect sessions What do you remember
+screenshot @OUT@/m8-preview-changed.png
+record changed
+# 4. the new preview, confirmed: exactly those, and a new chat opens
+reset_confirm
+expect reset done: Deleted 1 chat(s) with 2 message(s), 1 personal and 2 project memory item(s).
+expect chat none
+expect sessions_lack What do you remember
+expect sessions Keep this chat
+screenshot @OUT@/m8-done.png
+reset_cancel
+wait_memory
+expect memory_personal 1
+expect memory_project 0
+expect memory British English
+record done
+# 5. the fresh chat: given the item that stayed, not the reset one
+send What do you remember?
+wait_reply 30
+expect last_text British English
+expect last_text_lacks ZEBRA-SHIP-731
+record end
+quit

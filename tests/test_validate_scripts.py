@@ -40,6 +40,9 @@ pass)     printf '{"expect":"x","ok":true}\n{"record":"end"}\n' > "$OUT"
           fi
           if [ "$name" = m7-review ]; then  # play the M7 run: three suggestions, two accepted, one rejected
             PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-review "$H/umbrous.db" "${REVIEW:-good}"
+          fi
+          if [ "$name" = m8-reset ]; then  # play the M8 run: two chats, a mixed reset, a fresh chat
+            PYTHONPATH="$STUB_ROOT" python3 -m tests.test_validate_scripts seed-reset "$H/umbrous.db" "${RESET:-good}"
           fi;;
 assert)   printf '{"expect":"x","ok":true}\n{"step":"expect y","error":"got z"}\n' > "$OUT";;
 noend)    printf '{"expect":"x","ok":true}\n' > "$OUT";;
@@ -201,9 +204,36 @@ class NativeValidationExitStatus(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("FAIL suggested text reached a log file", r.stdout)
 
+    # ---- validate-m8.sh
+    def test_m8_only_a_clean_complete_run_passes(self):
+        r = self.run_script("validate-m8.sh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("m8-reset: PASS", r.stdout)
+        self.assertIn("ok   the CLI preview lists the 2 chats left", r.stdout)
+        for mode, why in (("assert", "a step failed"), ("noend", "did not reach its end"),
+                          ("none", "no results"), ("panic", "m8-reset: the app panicked"),
+                          ("openfail", "could not be launched")):
+            r = self.run_script("validate-m8.sh", mode)
+            self.assertEqual(r.returncode, 1, (mode, r.stdout))
+            self.assertIn(why, r.stdout, mode)
+            self.assertIn("m8-reset: FAIL", r.stdout, mode)
+
+    def test_m8_checks_the_records(self):
+        for kind in ("not-deleted", "too-broad", "memory-left", "trace-left", "fresh-used"):
+            r = self.run_script("validate-m8.sh", RESET=kind)
+            self.assertEqual(r.returncode, 1, (kind, r.stdout + r.stderr))
+            self.assertIn("FAIL reset records", r.stdout, kind)
+            self.assertIn("m8-reset: FAIL", r.stdout, kind)
+        r = self.run_script("validate-m8.sh", RESET="logged")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FAIL memory text reached a log file", r.stdout)
+        r = self.run_script("validate-m8.sh", RESET="no-reset-log")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FAIL no reset.done in the log", r.stdout)
+
     def test_usage_errors(self):
         for script in ("validate-m3.sh", "validate-m4.sh", "validate-m5.sh", "validate-m6.sh", "validate-m7.sh",
-                       "validate-native.sh"):
+                       "validate-m8.sh", "validate-native.sh"):
             self.assertEqual(self.run_script(script, args=[]).returncode, 2, script)
 
     # ---- validate-native.sh, the whole run
@@ -265,6 +295,11 @@ class NativeValidationExitStatus(unittest.TestCase):
         r = self.run_script("validate-native.sh", "assert", bad="m7-review")
         self.assertEqual(r.returncode, 1, r.stdout[-2000:])
         self.assertIn("FAIL validate-m7.sh", r.stdout)
+
+    def test_native_fails_on_an_m8_failure(self):
+        r = self.run_script("validate-native.sh", "assert", bad="m8-reset")
+        self.assertEqual(r.returncode, 1, r.stdout[-2000:])
+        self.assertIn("FAIL validate-m8.sh", r.stdout)
 
     def test_every_scenario_script_ends_with_its_end_record(self):
         for f in (ROOT / "desktop" / "e2e" / "scripts").glob("*.txt"):
@@ -449,6 +484,56 @@ def seed_review(db_path: str, kind: str) -> None:
     sys.exit(0)
 
 
+def seed_reset(db_path: str, kind: str) -> None:
+    """What the M8 scenario leaves, made with the real reset: the CLI's three
+    items, two chats whose replies repeat them, a project item added after the
+    preview, the mixed reset confirmed, and a fresh chat. Any other `kind`
+    breaks one thing for the checks to catch."""
+    import sys
+    from umbrous.history.store import HistoryStore
+    from umbrous.memory.store import Memory
+    from umbrous.persistence import db
+    from umbrous.reset import Reset
+    path = Path(db_path)
+    db.connect(path).close()
+    history, mem = HistoryStore(path), Memory(path)
+    code = next(m for m in mem.personal.list() if "ZEBRA" in m.text)
+    british = next(m for m in mem.personal.list() if "British" in m.text)
+    ship = mem.project.list("prj_general")[0]
+    said = f"Using what you saved: [{code.id}] {code.text} [{british.id}] {british.text} [{ship.id}] {ship.text}"
+    ids = [code.id, british.id, ship.id]
+    gone = history.create_chat("prj_general").id
+    history.append_exchange(gone, "What do you remember?", "You asked: What do you remember? " + said, "m", "complete",
+                            memory_ids=ids)
+    keep = history.create_chat("prj_general").id
+    history.append_exchange(keep, "Keep this chat", "You asked: Keep this chat " + said, "m", "complete", memory_ids=ids)
+    mem.project.add("prj_general", "Tests run on every push")
+    sel = {"chats": [gone] + ([keep] if kind == "too-broad" else []), "personal": [code.id],
+           "project": {} if kind == "memory-left" else {"prj_general": "all"}, "start_fresh": True}
+    if kind == "trace-left":    # deleted without overwriting the freed space
+        c = sqlite3.connect(path)
+        c.execute("PRAGMA secure_delete = OFF")
+        c.execute("DELETE FROM messages WHERE chat_id = ?", (gone,))
+        c.execute("DELETE FROM chats WHERE id = ?", (gone,))
+        c.execute("DELETE FROM personal_memory WHERE id = ?", (code.id,))
+        c.execute("DELETE FROM project_memory")
+        c.commit()
+        c.close()
+    elif kind != "not-deleted":
+        rs = Reset(path)
+        rs.confirm(sel, rs.preview(sel)["preview_id"])
+    fresh = history.create_chat("prj_general").id
+    history.append_exchange(fresh, "What do you remember?", "You asked: What do you remember? Using what you saved: "
+                            + (code.text if kind == "fresh-used" else f"[{british.id}] {british.text}"), "m", "complete")
+    logs = path.parent / "logs"
+    logs.mkdir(exist_ok=True)
+    lines = [] if kind == "no-reset-log" else ['{"event": "reset.done", "chats": 1}']
+    if kind == "logged":
+        lines.append("ZEBRA-SHIP-731")
+    (logs / "umbrous.log").write_text("\n".join(lines) + "\n")
+    sys.exit(0)
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "seed-tasks":
@@ -457,6 +542,8 @@ if __name__ == "__main__":
         seed_resume(sys.argv[2], sys.argv[3])
     if len(sys.argv) > 1 and sys.argv[1] == "seed-memory":
         seed_memory(sys.argv[2], sys.argv[3])
+    if len(sys.argv) > 1 and sys.argv[1] == "seed-reset":
+        seed_reset(sys.argv[2], sys.argv[3])
     if len(sys.argv) > 1 and sys.argv[1] == "seed-review":
         seed_review(sys.argv[2], sys.argv[3])
     unittest.main()

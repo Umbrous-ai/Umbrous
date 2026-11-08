@@ -50,7 +50,8 @@ class BrowserHistoryTests(unittest.TestCase):
         self.assertEqual(first["storedHtmlElements"], ["A https://example.com/docs"])  # only the safe link
         self.assertEqual(first["transcript"], ["When should I plant tulips?", "You said: When should I plant tulips?",
                                                "And daffodils?", "You said: And daffodils?"])
-        self.assertEqual(first["optionItems"], ["Archive chat", "[off] Delete chat"])   # no working delete
+        # M8: Delete chat… opens Start fresh with a preview; it deletes nothing by itself (test_browser_m8)
+        self.assertEqual(first["optionItems"], ["Archive chat", "Delete chat…"])
         self.assertTrue(first["inputDisabledWhenArchived"])
         self.assertTrue(first["sendDisabledWhenArchived"])
         self.assertEqual(first["transcriptWhileArchived"], 2)            # still all there

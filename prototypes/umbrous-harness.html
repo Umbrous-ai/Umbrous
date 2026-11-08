@@ -180,6 +180,15 @@ textarea:focus-visible,input:focus-visible{outline:none}
 .mem-cand .mem-src{font-size:var(--fs-12);color:var(--text-subtle);overflow-wrap:anywhere;margin-top:2px}
 .mem-cand .acc-row{margin:4px 0}
 .mem-cand .acc-note.ok{color:var(--success)}
+.reset-pick{font-size:var(--fs-13);margin:4px 0;display:flex;gap:6px;align-items:flex-start;color:var(--text-strong);overflow-wrap:anywhere}
+.reset-pick input{flex:none;margin-top:3px}
+.reset-pick.sub{padding-left:18px}
+.reset-preview{margin-top:10px;padding:8px 12px;border:1px solid var(--danger);border-radius:var(--r-8)}
+.reset-item{font-size:var(--fs-13);margin:4px 0;color:var(--text-strong);overflow-wrap:anywhere}
+.reset-item .mem-tag{display:block;font:var(--fs-12) var(--mono);color:var(--text-subtle)}
+.reset-kept{font-size:var(--fs-12);color:var(--text-subtle);margin-top:4px}
+.acc-row button.danger{color:var(--danger);border-color:var(--danger)}
+.acc-note.ok{color:var(--success)}
 /* M2: history */
 .nav.archived .t{color:var(--text-subtle);font-style:italic}
 .nav.toggle-archived{height:30px;font-size:var(--fs-12);color:var(--text-subtle)}
@@ -392,6 +401,10 @@ h3{font-size:var(--fs-16);font-weight:var(--fw-medium);color:var(--text-strong);
       <div class="rsec" id="memory" hidden>
         <h4>Memory</h4>
         <div id="memory-body"></div>
+      </div>
+      <div class="rsec" id="reset" hidden>
+        <h4>Start fresh</h4>
+        <div id="reset-body"></div>
       </div>
       <div class="rsec">
         <h4>Tools</h4>

@@ -372,6 +372,6 @@ Limitations found, none worked around by changing the architecture:
 Not ported from the browser page yet: M3's tool steps, approval cards, Sources
 and Access view (the app ignores those stream events; see
 [m3-gate.md](m3-gate.md#the-desktop-app)), M4's task trace (the app shows the
-running step and a one-line report; see [m4-tasks.md](m4-tasks.md#the-desktop-app); M5's interrupted-task notice and Resume are ported, see [m5-resume.md](m5-resume.md#the-desktop-app); M6's Memory section is in the right panel, with kinds and scopes set in the browser page, see [m6-memory.md](m6-memory.md#the-desktop-app); M7's suggestions wait for review at the top of that section, see [m7-review.md](m7-review.md#the-desktop-app)), the tool-call probe button in the model
+running step and a one-line report; see [m4-tasks.md](m4-tasks.md#the-desktop-app); M5's interrupted-task notice and Resume are ported, see [m5-resume.md](m5-resume.md#the-desktop-app); M6's Memory section is in the right panel, with kinds and scopes set in the browser page, see [m6-memory.md](m6-memory.md#the-desktop-app); M7's suggestions wait for review at the top of that section, see [m7-review.md](m7-review.md#the-desktop-app); M8's Start fresh is at the end of that section and in Options › Delete chat…, see [m8-reset.md](m8-reset.md#the-desktop-app)), the tool-call probe button in the model
 menu, and the prototype's placeholder panels (tool toggles, files, steps) that
 had no runtime behind them.

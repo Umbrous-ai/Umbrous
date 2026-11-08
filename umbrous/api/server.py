@@ -25,7 +25,8 @@ Routes (everything under /api/ needs the session credential, see security.py):
     GET  /api/chats/<id>                     one chat and its transcript (M2)
     POST /api/chats/<id>/archive             hide it, read-only; deletes nothing (M2)
     POST /api/chats/<id>/unarchive           bring it back (M2)
-There is deliberately no route that deletes a chat or project (docs/m2-history.md).
+There is deliberately no route that deletes a chat or project (docs/m2-history.md); chats
+and memory go only through the reset below, which shows the exact items first (M8).
     GET  /api/projects/<id>/access                  the access view: workspace, profile, grants (M3)
     POST /api/projects/<id>/workspace {root, profile}  attach a workspace folder (M3)
     POST /api/projects/<id>/workspace/detach        forget the folder and revoke its grants (M3)
@@ -47,6 +48,10 @@ There is deliberately no route that deletes a chat or project (docs/m2-history.m
     POST /api/memory/candidates/<cand_id> {text, kind, store, scope}   edit a waiting suggestion (M7)
     POST /api/memory/candidates/<cand_id>/accept {…}  check it again and write it to its store (M7)
     POST /api/memory/candidates/<cand_id>/reject    reject it; its text is not kept (M7)
+    POST /api/reset/preview {selection}             the exact chats and memory items a reset would delete,
+                                                    what stays, and a preview_id; stores nothing (M8)
+    POST /api/reset {selection, preview_id}         delete exactly that preview, or nothing (409
+                                                    preview_changed with the new preview) (M8)
 """
 
 from __future__ import annotations
@@ -79,6 +84,7 @@ from umbrous.history.store import HistoryError, HistoryStore
 from umbrous.memory.review import Review
 from umbrous.memory.store import Memory, MemoryError_
 from umbrous.receipts.store import ReceiptStore
+from umbrous.reset import Reset, ResetError
 from umbrous.runloop.chat import ChatLocks, RunRegistry, run_chat
 from umbrous.tasks.recover import recover, resume_info
 from umbrous.tasks.store import TaskStore
@@ -102,6 +108,8 @@ MEMORY_PATH = re.compile(r"^/api/memory/(mem_[0-9a-f]{16})(/delete)?$")
 MEMORY_STATUS = {"no_such_memory": 404, "no_such_project": 404, "memory_full": 409,
                  "no_such_candidate": 404, "already_decided": 409, "duplicate": 409}
 CANDIDATE_PATH = re.compile(r"^/api/memory/candidates/(cand_[0-9a-f]{16})(/accept|/reject)?$")
+RESET_STATUS = {"no_such_chat": 404, "no_such_memory": 404, "no_such_project": 404, "preview_changed": 409,
+                "chat_busy": 409}
 HISTORY_STATUS = {"no_such_project": 404, "no_such_chat": 404, "project_exists": 409, "bad_project_name": 400}
 
 _INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
@@ -165,6 +173,7 @@ class Runtime:
         self.tasks = TaskStore(config.db_path)
         self.memory = Memory(config.db_path)
         self.review = Review(config.db_path, self.memory)
+        self.reset = Reset(config.db_path)
         self.chat_locks = ChatLocks()
         self.runs = RunRegistry()
         self.exposure: Optional[ExposureReport] = None
@@ -304,6 +313,8 @@ class Handler(BaseHTTPRequestHandler):
                 status = MEMORY_STATUS.get(exc.code, HISTORY_STATUS.get(exc.code, 400))
                 self._send_json(status, {"error": exc.code, "message": exc.message})
                 return status, exc.code
+        if path in ("/api/reset", "/api/reset/preview"):
+            return self._reset(path)
         if path == "/api/projects" or path == "/api/chats" or path.startswith("/api/chats/"):
             try:
                 return self._history(path)
@@ -440,6 +451,35 @@ class Handler(BaseHTTPRequestHandler):
         log_event(log, "memory.edited", memory_id=item_id, store=item.store)
         self._send_json(200, {"item": item.as_dict()})
         return 200, "memory_edited"
+
+    def _reset(self, path: str) -> Tuple[int, str]:
+        """M8: preview a selective reset, or confirm exactly a preview."""
+        rt = self.runtime
+        if self.command != "POST":
+            self._send_json(405, {"error": "method_not_allowed"})
+            return 405, "method_not_allowed"
+        body = self._read_json()
+        if body is None:
+            self._send_json(400, {"error": "expected a JSON object with Content-Type: application/json"})
+            return 400, "bad_json"
+        try:
+            if path == "/api/reset/preview":
+                out = rt.reset.preview(body.get("selection"), lambda cid: rt.chat_locks.get(cid).locked())
+                self._send_json(200, out)
+                return 200, "reset_preview"
+            out = rt.reset.confirm(body.get("selection"), str(body.get("preview_id") or ""), rt.chat_locks)
+        except ResetError as exc:
+            status = RESET_STATUS.get(exc.code, 400)
+            payload = {"error": exc.code, "message": exc.message}
+            if exc.preview is not None:
+                payload["preview"] = exc.preview
+            self._send_json(status, payload)
+            return status, exc.code
+        # ids and counts only, never titles or memory text
+        log_event(log, "reset.done", **{k: v for k, v in out["deleted"].items()},
+                  ids=[i["id"] for i in out["items"]][:50])
+        self._send_json(200, out)
+        return 200, "reset_done"
 
     def _candidate(self, cand_id: str, action: str, body: dict, exists) -> Tuple[int, str]:
         """M7: review one suggestion. Accept is the only way a suggestion

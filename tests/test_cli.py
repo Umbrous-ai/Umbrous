@@ -33,7 +33,7 @@ class CliTests(unittest.TestCase):
     def test_version(self):
         out = run("version", home=self.home)
         self.assertEqual(out.returncode, 0)
-        self.assertRegex(out.stdout, r"umbrous \S+ \(M7\)")
+        self.assertRegex(out.stdout, r"umbrous \S+ \(M8\)")
 
     def test_config_error_stops_startup(self):
         self.home.mkdir(parents=True)
