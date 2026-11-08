@@ -601,6 +601,82 @@ pub fn report_line(rep: &Value) -> Option<(String, bool)> {
     Some((parts.join(" · "), attention))
 }
 
+/// User-facing task evidence. Command success is never called test success.
+#[derive(Clone, Debug)]
+pub struct TaskOutcome {
+    pub summary: String,
+    pub attention: bool,
+    pub sections: Vec<(&'static str, Vec<String>)>,
+}
+
+pub fn task_outcome(rep: &Value) -> Option<TaskOutcome> {
+    let status = rep.get("status")?.as_str()?;
+    let items = |key: &str| rep.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+    let changes = items("changes");
+    let actual_changes: Vec<&Value> = changes.iter().filter(|c| matches!(c["op"].as_str(), Some("created" | "replaced" | "edited"))).collect();
+    let commands = items("commands");
+    let uncertainties = items("uncertainty");
+    let failures = items("failures");
+    let limits = items("limits_hit");
+    let failed_commands = commands.iter().filter(|c| c["status"] != "exited" || c["exit"].as_i64() != Some(0)).count();
+    let attention = status != "completed" || !uncertainties.is_empty() || !failures.is_empty()
+        || !limits.is_empty() || failed_commands > 0 || (!actual_changes.is_empty() && commands.is_empty());
+    let heading = match status {
+        "completed" if attention => "Finished with unresolved checks",
+        "completed" => "Finished",
+        "cancelled" => "Stopped",
+        "failed" => "Could not finish",
+        _ => "Outcome unknown",
+    };
+    let mut paths: Vec<&str> = actual_changes.iter().filter_map(|c| c["path"].as_str()).collect();
+    paths.sort_unstable(); paths.dedup();
+    let summary = if !paths.is_empty() {
+        format!("{heading} · {} file{} changed", paths.len(), if paths.len() == 1 { "" } else { "s" })
+    } else { heading.into() };
+    let mut sections = Vec::new();
+    let changed: Vec<String> = changes.iter().map(|c| {
+        format!("{} — {} (+{}, −{})", c["path"].as_str().unwrap_or("Unknown file"),
+            c["op"].as_str().unwrap_or("changed"), c["added"].as_u64().unwrap_or(0), c["removed"].as_u64().unwrap_or(0))
+    }).collect();
+    sections.push(("Recorded file changes", if changed.is_empty() { vec!["No direct file edits recorded. Commands may have changed other files.".into()] } else { changed }));
+    let mut ran: Vec<String> = commands.iter().map(|c| {
+        let result = match c["status"].as_str() {
+            Some("exited") => c["exit"].as_i64().map(|n| format!("exit {n}")).unwrap_or_else(|| "exit status unknown".into()),
+            Some(s) => s.replace('_', " "),
+            None => "outcome unknown".into(),
+        };
+        format!("{} — {result}", c["command"].as_str().unwrap_or("Command unavailable"))
+    }).collect();
+    if ran.is_empty() { ran.push("No commands run; no command-based verification recorded.".into()); }
+    else { ran.push("Exit 0 means the command succeeded; it does not establish that tests ran or passed.".into()); }
+    sections.push(("Commands and verification", ran));
+    let mut unresolved: Vec<String> = uncertainties.iter().filter_map(Value::as_str).map(str::to_string).collect();
+    for f in &failures {
+        unresolved.push(format!("{}: {}", f["resource"].as_str().or_else(|| f["tool"].as_str()).unwrap_or("Action"),
+            f["message"].as_str().or_else(|| f["code"].as_str()).unwrap_or("did not complete")));
+    }
+    for limit in &limits {
+        if let Some(s) = limit.as_str() { unresolved.push(format!("{} limit reached.", s.replace('_', " "))); }
+    }
+    if failed_commands > 0 { unresolved.push(format!("{failed_commands} command(s) did not finish successfully. See their results above.")); }
+    if !actual_changes.is_empty() && commands.is_empty() { unresolved.push("File changes have no recorded command-based verification.".into()); }
+    if status == "cancelled" { unresolved.push("Work stopped. Existing file changes were kept.".into()); }
+    if status == "failed" { unresolved.push("The task failed. Existing file changes may remain.".into()); }
+    if !unresolved.is_empty() { sections.push(("Still unresolved", unresolved)); }
+    sections.push(("Execution record", vec![
+        format!("{} steps · {} of {} actions completed", rep["steps"].as_u64().unwrap_or(0),
+            rep["actions"]["completed"].as_u64().unwrap_or(0), rep["tool_calls"].as_u64().unwrap_or(0)),
+        format!("{} file edit records · {} commands", changes.len(), commands.len()),
+        format!("{} unverified observation(s)", uncertainties.len()),
+    ]));
+    sections.push(("Next step", vec![if attention {
+        "Review the unresolved items, then ask Umbrous to continue or run the missing checks."
+    } else if !actual_changes.is_empty() {
+        "Review the file changes and command results before accepting the work."
+    } else { "Review the answer above; ask a follow-up if anything is missing." }.into()]));
+    Some(TaskOutcome { summary, attention, sections })
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Transcript {
     pub chat: ChatInfo,
@@ -715,6 +791,53 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn outcomes_report_files_once_and_keep_command_evidence_honest() {
+        let outcome = task_outcome(&json!({"status":"completed", "changes":[
+            {"path":"a.py", "op":"edited", "added":2,"removed":1},
+            {"path":"a.py", "op":"edited", "added":1,"removed":0}],
+            "commands":[{"command":"printf done", "status":"exited", "exit":0}]})).unwrap();
+        assert_eq!(outcome.summary, "Finished · 1 file changed");
+        assert!(!outcome.attention);
+        let evidence = &outcome.sections[1].1;
+        assert_eq!(evidence[0], "printf done — exit 0");
+        assert!(evidence[1].contains("does not establish that tests ran or passed"));
+    }
+
+    #[test]
+    fn outcomes_expose_missing_checks_failures_and_limits() {
+        let outcome = task_outcome(&json!({"status":"completed", "changes":[{"path":"README.md", "op":"edited"}],
+            "uncertainty":["The build was not verified."], "limits_hit":["tool_calls"],
+            "failures":[{"resource":"lint", "message":"tool unavailable"}]})).unwrap();
+        assert!(outcome.attention);
+        assert_eq!(outcome.summary, "Finished with unresolved checks · 1 file changed");
+        let issues = &outcome.sections.iter().find(|s| s.0 == "Still unresolved").unwrap().1;
+        assert!(issues.contains(&"The build was not verified.".into()));
+        assert!(issues.contains(&"lint: tool unavailable".into()));
+        assert!(issues.contains(&"tool calls limit reached.".into()));
+        assert!(issues.iter().any(|s| s.contains("no recorded command-based verification")));
+    }
+
+    #[test]
+    fn outcomes_do_not_claim_noop_writes_changed_files() {
+        let outcome = task_outcome(&json!({"status":"completed", "changes":[
+            {"path":"a.py", "op":"unchanged"}, {"path":"b.py", "op":"already_applied"}]})).unwrap();
+        assert_eq!(outcome.summary, "Finished");
+        assert!(!outcome.attention);
+        assert!(outcome.sections[0].1[0].contains("unchanged"));
+    }
+
+    #[test]
+    fn outcomes_never_hide_timed_out_or_stopped_work() {
+        let outcome = task_outcome(&json!({"status":"cancelled", "commands":[
+            {"command":"make test", "status":"timed_out", "exit":null}]})).unwrap();
+        assert_eq!(outcome.summary, "Stopped");
+        assert!(outcome.attention);
+        assert_eq!(outcome.sections[1].1[0], "make test — timed out");
+        assert!(outcome.sections.iter().find(|s| s.0 == "Still unresolved").unwrap().1.iter().any(|s| s.contains("changes were kept")));
+        assert!(task_outcome(&json!({})).is_none());
+    }
 
     #[test]
     fn report_line_counts_changes_and_commands() {

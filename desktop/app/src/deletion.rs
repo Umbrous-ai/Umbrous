@@ -107,7 +107,7 @@ impl Workspace {
         } else { format!("Delete “{}”? This chat will be permanently removed.", dialog.title) };
         let mut content = div().flex().flex_col().gap(px(12.))
             .child(div().text_size(fs_16()).font_weight(FontWeight::MEDIUM).text_color(text_strong()).child(title))
-            .child(div().child(description))
+            .child(div().relative().child(crate::accessibility::text("deletion", "delete-description", description.clone())).child(description))
             .child(div().text_size(fs_12()).text_color(text_subtle()).child(if dialog.project {
                 "Your source folders and files, personal memory, and activity records are kept."
             } else { "Your files, saved memory, and activity records are kept." }));
@@ -121,11 +121,11 @@ impl Workspace {
         }
         content = content.child(div().flex().justify_end().gap(px(8.))
             .child(ui::pill("delete-cancel").child("Cancel")
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_deletion(cx))))
+                .accessible_click_in("deletion", "Cancel deletion", !dialog.deleting, cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_deletion(cx))))
             .child(ui::pill("delete-confirm").child(if dialog.deleting { "Deleting…" } else { "Delete" })
                 .when(ready && !dialog.deleting, |d| d.bg(danger()).text_color(bg_app()).border_color(danger()))
                 .when(!ready || dialog.deleting, |d| d.text_color(text_subtle()).cursor_default())
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_deletion(cx)))));
+                .accessible_click_in("deletion", "Delete permanently", ready && !dialog.deleting, cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_deletion(cx)))));
         Some(div().id("delete-overlay").absolute().inset_0().flex().items_center().justify_center().bg(gpui::rgba(0x0000_0099))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().id("delete-dialog").w(px(440.)).max_w_full().max_h_full().overflow_y_scroll().p(px(24.))

@@ -346,6 +346,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(mem["project"], [])
         self.assertFalse(mem["personal"][0]["applies"])
 
+    def test_personal_memory_without_a_project_scope(self):
+        shared = self.add(**{"store": "personal", "text": "Prefer concise explanations"})
+        scoped = self.add(**{"store": "personal", "text": "Project release preference", "scope": ["prj_general"]})
+        status, view = self.rt.get_json("/api/memory")
+        self.assertEqual(status, 200)
+        self.assertIsNone(view["project_id"])
+        self.assertEqual(view["project"], [])
+        self.assertEqual(view["candidates"], [])
+        items = {m["id"]: m for m in view["personal"]}
+        self.assertTrue(items[shared["id"]]["applies"])
+        self.assertFalse(items[scoped["id"]]["applies"])
+
     def test_edit_and_errors(self):
         item = self.add(store="personal", text="draft")
         status, _, raw = self.rt.post_json(f"/api/memory/{item['id']}", {"text": "final", "kind": "preference"})

@@ -8,7 +8,7 @@ wait_access
 select_model multi-step:3b
 send What is the plan? Resume check
 wait_reply 30
-expect last_meta Task completed
+expect outcome Finished with unresolved checks
 # 2. a slow task: its first step reads the workspace (receipt saved), then the
 #    answer streams; the runtime is killed in the middle of it
 select_model slow-task:3b
@@ -32,7 +32,8 @@ resume
 wait_reply 60
 expect interrupted none
 expect messages 4
-expect last_meta Task completed
+expect outcome Finished with unresolved checks
+expect outcome resumed an interrupted one
 expect last_text step by step
 screenshot @OUT@/m5-resumed.png
 record resumed

@@ -7,7 +7,7 @@ actions!(
     [
         // app
         Quit, Hide, HideOthers, ShowAll, About, NewChat, CloseWindow, Minimize, Zoom, ToggleFullScreen,
-        ToggleSidebar, ToggleDetails, StopReply, ShowDataFolder, ReloadModels,
+        ToggleSidebar, ToggleDetails, OpenSettings, StopReply, ShowDataFolder, ReloadModels,
         // editing (composer and transcript)
         Copy, Cut, Paste, SelectAll, Undo, Redo,
         Backspace, Delete, DeleteWordLeft, DeleteToLineStart,
@@ -25,6 +25,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-n", NewChat, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),

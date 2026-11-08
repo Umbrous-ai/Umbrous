@@ -10,8 +10,10 @@ select_model multi-step:3b
 send What is the plan? My note: ZEBRA-CANARY-991
 wait_reply 30
 expect last_text ship on Friday
-expect last_meta Task completed · 4 steps · 3 of 3 actions completed
-expect last_meta 2 things not fully checked
+expect outcome Finished with unresolved checks
+expect outcome 4 steps · 3 of 3 actions completed
+expect outcome 2 unverified observation(s)
+expect outcome notes/team.md
 screenshot @OUT@/m4-report.png
 record multi
 # 2. Stop while a step is running: the reply ends at once and no new step starts
@@ -22,7 +24,8 @@ wait_streaming
 stop
 expect running false
 expect last_meta Stopped by you.
-expect last_meta Task stopped · 2 steps · 1 of 1 actions completed
+expect outcome Stopped
+expect outcome 2 steps · 1 of 1 actions completed
 screenshot @OUT@/m4-stopped.png
 record stopped
 # 3. a model that never stops asking for tools reaches the step limit, and says so
@@ -30,12 +33,13 @@ new_chat
 select_model endless:3b
 send Look around as much as you like
 wait_reply 30
-expect last_meta step limit reached
+expect outcome steps limit reached
 expect last_text stopped at the limit
 record limit
 # 4. the report comes back when a stored chat is opened again
 open_chat What is the plan
-expect last_meta Task completed · 4 steps
+expect outcome Finished with unresolved checks
+expect outcome 4 steps
 # the report belongs to the reply, never to your message
 expect user_meta_empty true
 record end

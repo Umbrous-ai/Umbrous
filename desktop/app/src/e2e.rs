@@ -292,7 +292,12 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
         }
         "check_tools" => {
             window.update(cx, |ws, _, cx| ws.check_tools(cx)).ok();
-            wait_until(cx, window, 60, "tool check", |ws| !ws.probe_running()).await?;
+            wait_until(cx, window, 60, "tool check and refreshed model capabilities", |ws| !ws.probe_running() && !ws.tools_blocked_by_check()).await?;
+        }
+        "reload_memory" => { window.update(cx, |ws, _, cx| ws.load_memory(cx)).ok(); }
+        "review_changes" => {
+            window.update(cx, |ws, _, cx| ws.open_change_review(cx)).ok();
+            wait_until(cx, window, 15, "folder review", |ws| !ws.review_snapshot().is_null()).await?;
         }
         "wait_memory" => {
             // until the selected project's memory view has loaded (M6)
@@ -489,6 +494,8 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "setup_stage" => ws.setup_stage().map(|n| n.to_string()).unwrap_or_else(|| "none".into()),
                 "grants" => ws.access.as_ref().map(|a| a.grants.len()).unwrap_or(0).to_string(),
                 "activity" => ws.activity_snapshot().to_string(),
+                "review" => ws.review_snapshot().to_string(),
+                "outcome" => ws.msgs.last().and_then(|m| m.outcome.as_ref()).map(|o| format!("{o:?}")).unwrap_or_default(),
                 "messages" => ws.msgs.len().to_string(),
                 "chat" => ws.chat.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "none".into()),
                 "running" => ws.is_running().to_string(),
@@ -545,7 +552,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             }).map_err(|_| "window gone".to_string())?;
             let ok = match what {
                 "chat" if val != "none" => got.contains(val),
-                "activity" | "last_meta" | "sessions" | "last_text" | "reply_metas" | "memory" => got.contains(val),
+                "review" | "outcome" | "activity" | "last_meta" | "sessions" | "last_text" | "reply_metas" | "memory" => got.contains(val),
                 "reset" if val != "closed" => got.contains(val),
                 "sessions_lack" | "projects_lack" => !got.contains(val),
                 "projects" | "deletion" => got.contains(val),

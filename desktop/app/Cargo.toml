@@ -13,6 +13,7 @@ gpui = { version = "=0.2.2", default-features = false, features = ["font-kit", "
 futures = "0.3"
 libc = "0.2"
 objc = "0.2"
+raw-window-handle = "0.6.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

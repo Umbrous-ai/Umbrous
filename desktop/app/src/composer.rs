@@ -38,6 +38,7 @@ pub struct Composer {
     redo: Vec<(String, Range<usize>)>,
     /// one-line field (the sidebar's project name box)
     compact: bool,
+    accessibility_scope: &'static str,
     /// remembered x position for up/down
     goal_x: Option<Pixels>,
     /// the message box grows up to MAX_HEIGHT and then scrolls
@@ -65,6 +66,7 @@ impl Composer {
             content: String::new(),
             placeholder: "Ask Umbrous to do something…".into(),
             compact: false,
+            accessibility_scope: "main",
             selected: 0..0,
             reversed: false,
             marked: None,
@@ -79,6 +81,8 @@ impl Composer {
             reveal: false,
         }
     }
+
+    pub fn set_accessibility_scope(&mut self, scope: &'static str) { self.accessibility_scope = scope; }
 
     pub fn text(&self) -> &str {
         &self.content
@@ -486,12 +490,26 @@ impl Render for Composer {
         let reveal = std::mem::take(&mut self.reveal) && !empty;
         let scroll = self.scroll.clone();
         let compact = self.compact;
+        let ax_entity = cx.entity().downgrade();
+        let ax = crate::accessibility::marker_in(self.accessibility_scope,
+            format!("text-{:?}", cx.entity_id()), self.placeholder.to_string(), Some(self.content.clone()), !self.disabled,
+            move |event, window, cx| {
+                ax_entity.update(cx, |this, cx| {
+                    if this.disabled { return; }
+                    match event {
+                        crate::accessibility::Event::Focus | crate::accessibility::Event::Press => window.focus(&this.focus),
+                        crate::accessibility::Event::SetText(text) => { this.edit(0..this.content.len(), &text, cx); window.focus(&this.focus); }
+                    }
+                }).ok();
+            });
 
         // Block layout all the way down, with a definite width: inside a flex column the
         // text was measured as one unwrapped line, so a long paragraph got a one-line
         // box and its wrapped lines were painted over the toolbar and out of the window.
         div()
             .id("composer-scroll")
+            .relative()
+            .child(ax)
             .key_context("Composer")
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)

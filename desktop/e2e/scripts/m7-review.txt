@@ -13,7 +13,7 @@ expect memory_count 0
 # 1. a task, then two suggestions; nothing is in memory yet
 send I prefer answers as short lists. We decided to release on Friday. What is in the workspace?
 wait_reply 30
-expect last_meta Task completed
+expect outcome Finished
 expect last_meta 2 memory suggestions to review
 wait_candidates 2
 expect candidates personal preference (message): Prefers answers as short lists

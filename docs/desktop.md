@@ -116,12 +116,12 @@ while a card is open makes a one-time approval stale. The folder, its grants
 and every hard block stay the project's: paths outside the folder, links and
 excluded files stay blocked at every level.
 
-With no folder attached, choosing a level opens the system folder picker and
-attaches the folder you pick; the level is stored on the chat it was chosen in,
-and the project's default for every other chat is Read only (so Full access
-never spreads to other chats this way). The menu
-shows the three access levels and Manage project permissions; it adds a line
-only when something needs you (no folder yet, a model without the tool check).
+With no folder attached, the access pill says **Chat only**. Its menu offers
+**Choose folder…**, which opens the guided model → folder → access flow.
+Once connected, access choices use the same plain-language descriptions as
+setup. The selected level applies to this chat; project defaults and grants
+remain separate. **Manage chat permissions** or **Manage project permissions**
+uses the current scope's name.
 
 When the gate asks, a card appears above the composer: what the model wants
 to do, the action and its target; for a command, the whole command line
@@ -464,3 +464,30 @@ Access view with grants (approval cards and the profile are in the composer, see
 [m3-gate.md](m3-gate.md#the-desktop-app)), M4's task trace (the app shows the
 running step and a one-line report; see [m4-tasks.md](m4-tasks.md#the-desktop-app); M5's interrupted-task notice and Resume are ported, see [m5-resume.md](m5-resume.md#the-desktop-app); M6's Memory section is in the right panel, with kinds and scopes set in the browser page, see [m6-memory.md](m6-memory.md#the-desktop-app); M7's suggestions wait for review at the top of that section, see [m7-review.md](m7-review.md#the-desktop-app); M8's Start fresh is at the end of that section and in Options › Delete chat…, see [m8-reset.md](m8-reset.md#the-desktop-app)), and the prototype's placeholder panels (tool toggles, files, steps) that
 had no runtime behind them.
+
+### Reviewing task outcomes and folder changes
+
+Task replies show a short outcome with **Review outcome**. Expanding it lists
+recorded file changes, actual commands and exit statuses, unresolved issues,
+and a next step. **Copy outcome** copies this evidence. A successful command
+exit is not labelled a passing test. No-op file writes are not counted as changed
+files. The outcome is restored when reopening a chat.
+
+The details panel keeps this chat's recorded activity separate from **Review
+folder changes**. Review shows the current repository-root folder against Git
+HEAD, including untracked files and work outside this chat; staged changes are
+not shown separately. It is read-only and does not stage, revert, or write files.
+It requires file-read access. Excluded files and symbolic links remain blocked.
+Large, binary, and truncated previews are labelled; refresh explicitly to read
+new changes. No folder or no Git repository yields an actionable explanation.
+
+Settings → Memory loads personal memory even before a standalone chat exists.
+Chat/project memory is shown only when a scope exists. Failed loads offer Retry.
+
+Native controls publish AppKit accessibility elements using their actual layout
+bounds. Primary navigation, the composer, Settings, task outcomes, and permission
+and deletion dialogs share handlers between mouse and accessibility activation.
+Modal surfaces hide background accessibility actions; changing chats invalidates
+queued actions. Transcript and diff text expose read-only semantic text. This is
+not a claim of complete VoiceOver conformance: reading order and keyboard-only
+coverage still need broader assistive-technology testing.

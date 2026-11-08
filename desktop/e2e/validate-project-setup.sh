@@ -20,6 +20,10 @@ sleep 1
 kill -0 "$FAKE"
 printf '{"codex_enabled":false,"ollama_url":"http://127.0.0.1:%s"}' "$PORT" > "$H/config.json"
 mkdir -p "$W/source"
+git -C "$W/source" init -q
+printf 'Original text' > "$W/source/readme.txt"
+git -C "$W/source" add readme.txt
+git -C "$W/source" -c user.name=Test -c user.email=test@example.invalid commit -qm fixture
 printf 'Project setup works' > "$W/source/readme.txt"
 S="$ROOT/desktop/e2e/scripts"
 e2e project-setup project-setup.txt "$H"

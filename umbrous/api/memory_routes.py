@@ -37,7 +37,7 @@ class MemoryRoutes:
             personal = []
             for m in mem.personal.list():
                 d = m.as_dict()
-                d["applies"] = bool(project_id) and (m.scope == "all" or project_id in m.scope)
+                d["applies"] = m.scope == "all" or (bool(project_id) and project_id in m.scope)
                 personal.append(d)
             out = {"personal": personal, "project_id": project_id or None, "project": [],
                    "limits": {"max_items": rt.config.memory_max_items, "max_tokens": rt.config.memory_tokens}}

@@ -10,10 +10,15 @@ expect access none
 select_model coder:3b
 send work on @OUT@/m9-fixture/a/proj: add a multiply function to calc.py and make the tests pass
 wait_reply 60
-expect last_meta Task completed
-expect last_meta 2 changes · 2 commands (1 not passing)
+expect outcome Finished with unresolved checks
+expect outcome 1 file changed
+expect outcome 2 file edit records · 2 commands
+expect outcome calc.py — edited
+expect outcome exit 1
+expect outcome exit 0
+expect outcome 1 command(s) did not finish successfully.
 expect last_text now passes (exit 0)
-expect notice Working in
+expect notice Workspace:
 expect notice attached now with Code in workspace
 wait_profile workspace_code
 expect access_root m9-fixture/a/proj
@@ -23,11 +28,11 @@ record coding
 new_chat
 select_model slow-coder:3b
 send Run the tests again
-wait_meta running sleep 30
+wait_meta Running sleep 30
 stop
 expect running false
 expect last_meta Stopped by you.
-expect last_meta Task stopped
+expect outcome Stopped
 record stopped
 # 3. the runtime is killed while the tests run, after the edit was made (a first
 #    plain exchange gives the chat its title, so it can be opened again)
@@ -37,7 +42,7 @@ send Notes for project B
 wait_reply 30
 select_model slow-coder:3b
 send work on @OUT@/m9-fixture/b/proj: add multiply to calc.py and run the tests
-wait_meta running sleep 30
+wait_meta Running sleep 30
 screenshot @OUT@/m9-before-kill.png
 kill_backend
 wait_failed 10
@@ -57,7 +62,8 @@ select_model coder:3b
 resume
 wait_reply 60
 expect interrupted none
-expect last_meta Task completed
+expect outcome Finished with unresolved checks
+expect outcome resumed an interrupted one
 expect last_text now passes (exit 0)
 screenshot @OUT@/m9-resumed.png
 record end

@@ -242,7 +242,7 @@ impl Workspace {
 
     pub fn access_pill_label(&self) -> String {
         match self.effective_profile() {
-            None if self.access.is_none() => "Access".to_string(),
+            None if self.access.is_none() && self.project_id.is_some() => "Loading access…".to_string(),
             None => "Chat only".to_string(),
             Some(p) => level_label(&p).to_string(),
         }
@@ -283,7 +283,7 @@ impl Workspace {
         let enable = ui::pill("full-access-enable").h(px(36.)).px(px(16.)).text_size(fs_13()).child("Enable Full access")
             .when(c.checked, |d| d.bg(text_strong()).text_color(bg_app()).border_color(text_strong()).hover(|s| s.bg(text_default()).text_color(bg_app())))
             .when(!c.checked, |d| d.bg(bg_selected()).text_color(text_subtle()).cursor_default().hover(|s| s.bg(bg_selected()).text_color(text_subtle())))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_full_access(true, cx)));
+            .accessible_click_in("full-access", "Enable full access", c.checked, cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_full_access(true, cx)));
         Some(div().id("full-access-overlay").absolute().top_0().left_0().size_full().flex().items_center().justify_center()
             .bg(gpui::rgba(0x0000_0099))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -292,7 +292,7 @@ impl Workspace {
                 .child(div().flex().items_center()
                     .child(div().flex_1().text_size(fs_16()).font_weight(FontWeight::MEDIUM).text_color(text_strong()).child("Enable Full access?"))
                     .child(ui::icon_btn("full-access-close", "x", false)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_full_access(false, cx)))))
+                        .accessible_click_in("full-access", "Cancel full access", true, cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_full_access(false, cx)))))
                 .child(div().flex().items_start().gap(px(10.))
                     .child(ui::icon("shield").text_color(danger()).mt(px(2.)))
                     // a definite width (440 less padding, icon and gap): as a flex item the
@@ -305,10 +305,10 @@ impl Workspace {
                         .flex().items_center().justify_center()
                         .when(c.checked, |d| d.bg(text_strong()).child(ui::icon_sized("check", 14.).text_color(bg_app()))))
                     .child(div().text_size(fs_13()).text_color(text_strong()).child("I understand the risks and want to continue"))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_full_access_check(cx))))
+                    .accessible_click_in("full-access", if c.checked { "Risk acknowledgment selected" } else { "Acknowledge unsandboxed command risk" }, true, cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_full_access_check(cx))))
                 .child(div().flex().justify_end().gap(px(8.))
                     .child(ui::pill("full-access-cancel").h(px(36.)).px(px(16.)).text_size(fs_13()).child("Cancel")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_full_access(false, cx))))
+                        .accessible_click_in("full-access", "Cancel full access", true, cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_full_access(false, cx))))
                     .child(enable)))
             .into_any_element())
     }
@@ -330,32 +330,35 @@ impl Workspace {
             .child(ui::hover_icon(self.effective_profile().map(|p| level_icon(&p)).unwrap_or("shield-check"), &"access-pill".into(), c, h))
             .child(label)
             .child(ui::hover_icon("chevron-down", &"access-pill".into(), c, h))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_access_menu(cx)))
+            .accessible_click("Choose access level", true, cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_access_menu(cx)))
             .into_any_element()
     }
 
     fn render_access_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.access_menu { return None }
+        if !self.access_menu || self.settings_open || self.review_open || self.permissions_open
+            || self.full_access_confirm.is_some() || self.deletion.is_some() || self.reset.is_some() { return None }
         use theme::*;
         let note = |t: String| div().px(px(8.)).py(px(6.)).text_size(fs_12()).text_color(text_subtle()).child(t);
-        let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
         let folder = self.folder().cloned();
-        let mut menu = div().id("access-menu").absolute().bottom(px(36.)).left_0().w(px(300.))
+        let mut menu = div().id("access-menu").absolute().bottom(px(36.)).left_0().w(px(360.))
             .max_h(px(480.)).overflow_y_scroll().p(px(6.)).rounded(px(R_12)).bg(bg_raised())
             .border_1().border_color(border_strong()).shadow_lg().flex().flex_col();
         let current = self.effective_profile();
         if folder.is_none() {
-            menu = menu.child(note(format!("{project} has no folder yet: choose a level, then pick one.")));
+            menu = menu.child(note("No folder connected. Choose a folder before setting file access.".into()));
         }
-        for (i, (profile, label, icon)) in LEVELS.iter().enumerate() {
+        if folder.is_none() {
+            menu = menu.child(ui::pill("access-setup-folder").child("Choose folder…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| { this.access_menu = false; this.start_project_setup(cx); })));
+        }
+        for (i, (profile, _label, icon)) in LEVELS.iter().enumerate().filter(|_| folder.is_some()) {
             let on = current.as_deref() == Some(*profile);
             let profile: &'static str = profile;
             menu = menu.child(div().id(("access-row", i)).flex().items_center().gap(px(10.)).h(px(36.)).px(px(10.)).rounded(px(R_8))
                 .cursor_pointer().text_size(fs_14()).text_color(text_strong()).hover(|s| s.bg(bg_hover()))
                 .child(ui::icon(icon).text_color(if profile == "workspace_code" { danger() } else { text_default() }))
-                .child(div().flex_1().child(*label))
+                .child(div().flex_1().child(super::project_setup::permission_text(profile)))
                 .when(on, |d| d.child(ui::icon("check").text_color(text_strong())))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose_level(profile, cx))));
+                .accessible_click(super::project_setup::permission_text(profile), true, cx.listener(move |this, _: &ClickEvent, _, cx| this.choose_level(profile, cx))));
         }
         if self.tools_blocked_by_check() {
             let model = self.selected_model_label();
@@ -371,8 +374,8 @@ impl Workspace {
         if let Some(e) = &self.access_error {
             menu = menu.child(div().px(px(8.)).py(px(6.)).text_size(fs_12()).text_color(danger()).child(e.clone()));
         }
-        menu = menu.child(ui::pill("manage-access-permissions").child(self.permissions_label()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx))));
-        Some(menu.into_any_element())
+        menu = menu.child(ui::pill("manage-access-permissions").child(self.permissions_label()).accessible_click(self.permissions_label(), true, cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx))));
+        Some(gpui::deferred(menu.occlude()).with_priority(1).into_any_element())
     }
 
     /// The waiting approval, as a card above the composer.
@@ -413,7 +416,7 @@ impl Workspace {
                 .child(btn("approve-once", "Approve once".into(), "once", true))
                 .child(btn("approve-grant", format!("Allow {} in this {}", ap.grant_word(), if self.project_id.as_ref().map(|p| p.starts_with("prj_session_")).unwrap_or(true) { "chat" } else { "project" }), "grant", false))
                 .child(btn("approve-deny", "Deny".into(), "deny", false))
-                .child(ui::pill("manage-approval-permissions").child(self.permissions_label()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx)))))
+                .child(ui::pill("manage-approval-permissions").child(self.permissions_label()).accessible_click(self.permissions_label(), true, cx.listener(|this, _: &ClickEvent, _, cx| this.open_permissions(cx)))))
             .when_some(ap.error.clone(), |d, e| d.child(div().mt(px(6.)).w_full().text_size(fs_12()).text_color(danger()).child(e)))
             .into_any_element())
     }

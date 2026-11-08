@@ -12,6 +12,7 @@
 //!   click a block.
 
 use std::ops::Range;
+use crate::accessibility::AccessibleClick;
 use std::sync::Arc;
 
 use gpui::{
@@ -71,6 +72,8 @@ pub struct Msg {
     /// the text `blocks` was parsed from (lags `text` while streaming)
     pub parsed_len: usize,
     pub meta: String,
+    pub outcome: Option<crate::api::TaskOutcome>,
+    pub outcome_expanded: bool,
     /// Present only while awaiting a terminal stream event.
     pub activity_icon: Option<&'static str>,
     pub meta_kind: MetaKind,
@@ -179,6 +182,7 @@ fn highlights(block: &Block, sel: Option<Range<usize>>, mono: bool) -> Vec<(Rang
 
 /// Callbacks into the owner of the selection (the workspace).
 pub trait SelectionHost: gpui::Focusable + 'static {
+    fn toggle_outcome(&mut self, msg: usize, cx: &mut gpui::Context<Self>) where Self: Sized;
     fn selection_down(&mut self, pos: Pos, click_count: usize, shift: bool, cx: &mut gpui::Context<Self>)
     where
         Self: Sized;
@@ -393,7 +397,7 @@ pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &S
             let Some(b) = m.blocks.get(bi) else { return div().into_any_element() };
             let s = sel.in_block(ix, bi, b.text.len());
             let gap = if bi == 0 { SP_48 } else { block_gap(&b.kind, m.blocks.get(bi - 1).map(|p| &p.kind)) };
-            outer.pt(px(gap)).child(inner.child(block_element(host, ix, bi, b, s))).into_any_element()
+            outer.pt(px(gap)).child(inner.relative().child(block_element(host, ix, bi, b, s)).child(crate::accessibility::text("main", format!("message-{ix}-block-{bi}"), b.text.clone()))).into_any_element()
         }
         RowKind::Pending => outer.pt(px(SP_48)).child(inner).into_any_element(),
         // `.reply-meta`: 12px subtle, 8 above; `.reply` 16 below
@@ -403,15 +407,45 @@ pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &S
                 MetaKind::Warn => warning(),
                 MetaKind::Bad => danger(),
             };
-            outer
-                .pt(px(SP_8))
-                .pb(px(SP_16))
-                .child(inner.text_size(fs_12()).line_height(px(18.)).text_color(color).child(
-                    div().flex().items_center().gap(px(8.))
-                        .when_some(m.activity_icon, |row, name| row.child(crate::ui::activity_icon(name, color, ix)))
-                        .child(m.meta.clone()),
-                ))
-                .into_any_element()
+            let mut content = inner.text_size(fs_12()).line_height(px(18.)).text_color(color).child(
+                div().flex().items_center().gap(px(8.))
+                    .when_some(m.activity_icon, |row, name| row.child(crate::ui::activity_icon(name, color, ix)))
+                    .child(m.meta.clone()),
+            );
+            if let Some(outcome) = &m.outcome {
+                let owner = host.clone();
+                let accessible_owner = host.clone();
+                let expanded = m.outcome_expanded;
+                let mut card = div().mt(px(8.)).p(px(12.)).border_1().border_color(border()).rounded(px(R_8))
+                    .text_color(text_default())
+                    .child(div().id(("task-outcome", ix)).relative().flex().items_center().gap(px(8.)).cursor_pointer()
+                        .child(crate::ui::chevron(m.outcome_expanded))
+                        .child(div().flex_1().text_color(if outcome.attention { warning() } else { text_strong() }).child(outcome.summary.clone()))
+                        .child(if m.outcome_expanded { "Hide details" } else { "Review outcome" })
+                        .on_click(move |_, _, cx| owner.update(cx, |h, cx| h.toggle_outcome(ix, cx)))
+                        .child(crate::accessibility::marker(format!("task-outcome-{ix}"),
+                            format!("{}: {}", if expanded { "Hide outcome details" } else { "Review outcome" }, outcome.summary), None, true,
+                            move |event, _, cx| {
+                                if matches!(event, crate::accessibility::Event::Press) {
+                                    accessible_owner.update(cx, |h, cx| h.toggle_outcome(ix, cx));
+                                }
+                            })));
+                if m.outcome_expanded {
+                    let mut details = div().relative().id(("task-evidence", ix)).mt(px(12.)).max_h(px(360.)).overflow_y_scroll();
+                    for (title, lines) in &outcome.sections {
+                        details = details.child(div().mt(px(10.)).text_color(text_strong()).font_weight(FontWeight::MEDIUM).child(*title));
+                        for line in lines {
+                            details = details.child(div().mt(px(4.)).child(line.clone()));
+                        }
+                    }
+                    let copy = outcome.sections.iter().map(|(title, rows)| format!("{title}\n{}", rows.join("\n"))).collect::<Vec<_>>().join("\n\n");
+                    details = details.child(crate::accessibility::text("main", format!("task-evidence-{ix}"), copy.clone()));
+                    card = card.child(details).child(crate::ui::nav(format!("copy-outcome-{ix}"), false).mt(px(10.)).child("Copy outcome")
+                        .accessible_click("Copy outcome", true, move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))));
+                }
+                content = content.child(card);
+            }
+            outer.pt(px(SP_8)).pb(px(SP_16)).child(content).into_any_element()
         }
     }
 }
@@ -423,7 +457,7 @@ mod tests {
 
     fn msg(role: Role, text: &str) -> Msg {
         let blocks = if role == Role::User { markdown::plain(text) } else { markdown::parse(text) };
-        Msg { role, text: text.into(), parsed_len: text.len(), blocks: Arc::new(blocks), meta: String::new(), activity_icon: None, meta_kind: MetaKind::Normal, streaming: false }
+        Msg { role, text: text.into(), parsed_len: text.len(), blocks: Arc::new(blocks), meta: String::new(), outcome: None, outcome_expanded: false, activity_icon: None, meta_kind: MetaKind::Normal, streaming: false }
     }
 
     #[test]

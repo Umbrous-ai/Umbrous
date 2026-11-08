@@ -9,6 +9,9 @@ from urllib.parse import parse_qs
 from umbrous.logging_setup import log_event
 from umbrous.tasks.recover import resume_info
 from umbrous.reset import ResetError
+from umbrous.history.store import HistoryError
+from umbrous.gate.access import PROFILES, ALLOW
+from umbrous.api.workspace_review import review_folder
 from umbrous.api.contracts import CHAT_PATH, TASK_ID_RE, RESET_STATUS
 
 log = logging.getLogger("umbrous.api")
@@ -22,6 +25,38 @@ class TaskRoutes:
         if self.command != "GET":
             self._send_json(405, {"error": "method_not_allowed"})
             return 405, "method_not_allowed"
+        if path == "/api/tasks/review":
+            q = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            chat_id = (q.get("chat_id") or [""])[0]
+            if not CHAT_PATH.fullmatch("/api/chats/" + chat_id):
+                self._send_json(400, {"error": "bad_chat_id"})
+                return 400, "bad_chat_id"
+            try:
+                chat = rt.history.get_chat(chat_id)
+            except HistoryError as exc:
+                self._send_json(404, {"error": exc.code, "message": exc.message})
+                return 404, exc.code
+            workspace = rt.access.workspace(chat.project_id)
+            unavailable = dict(available=False, files=[], truncated=False, omitted=0)
+            if workspace is None:
+                self._send_json(200, dict(unavailable, message="Connect a folder to review its changes."))
+                return 200, "review_no_workspace"
+            profile = chat.access or workspace.profile
+            rules = PROFILES.get(profile, {}).get("rules", {})
+            grants = tuple(rt.access.active_grant(chat.project_id, cap) for cap in ("fs.list", "fs.read"))
+            if any(rules.get(cap) != ALLOW and not grant
+                   for cap, grant in zip(("fs.list", "fs.read"), grants)):
+                self._send_json(200, dict(unavailable, message="Reading files needs approval. Manage this chat’s permissions, then retry."))
+                return 200, "review_needs_access"
+            result = review_folder(workspace.root)
+            # A permission or attachment change invalidates an in-flight read.
+            current = rt.access.workspace(chat.project_id)
+            fresh_chat = rt.history.get_chat(chat_id)
+            fresh_grants = tuple(rt.access.active_grant(chat.project_id, cap) for cap in ("fs.list", "fs.read"))
+            if current != workspace or fresh_chat.access != chat.access or grants != fresh_grants:
+                result = dict(unavailable, message="Folder or permissions changed. Retry the review.")
+            self._send_json(200, result)
+            return 200, "workspace_review"
         if path == "/api/tasks":
             q = parse_qs(self.path.split("?", 1)[1].split("#", 1)[0] if "?" in self.path else "")
             chat_id = (q.get("chat_id") or [""])[0]

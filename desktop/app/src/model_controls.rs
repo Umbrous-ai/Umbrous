@@ -156,7 +156,8 @@ impl Workspace {
 
     }
     pub(super) fn render_model_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.model_menu { return None }
+        if !self.model_menu || self.settings_open || self.review_open || self.permissions_open
+            || self.full_access_confirm.is_some() || self.deletion.is_some() || self.reset.is_some() { return None }
         use theme::*;
         let mut menu = div().id("model-menu").absolute().bottom(px(36.)).left(px(32.)).w(px(420.))
             .max_h(px(480.)).overflow_y_scroll().p(px(6.)).rounded(px(R_12)).bg(bg_raised())
@@ -164,8 +165,8 @@ impl Workspace {
         let note = |t: String| div().p(px(8.)).text_size(fs_12()).text_color(text_subtle()).child(t);
         menu = menu.child(div().flex().items_center().gap(px(8.)).p(px(6.))
             .child(ui::pill("connect-chatgpt").child(if self.codex_login_busy { "Opening sign-in…" } else if self.codex_status.authenticated { "ChatGPT connected" } else { "Connect ChatGPT" })
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.connect_chatgpt(cx))))
-            .child(ui::pill("refresh-models").child("Refresh").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_models(true, cx)))));
+                .accessible_click("Connect ChatGPT", !self.codex_login_busy, cx.listener(|this, _: &ClickEvent, _, cx| this.connect_chatgpt(cx))))
+            .child(ui::pill("refresh-models").child("Refresh").accessible_click("Refresh models", true, cx.listener(|this, _: &ClickEvent, _, cx| this.load_models(true, cx)))));
         if let Some(error) = &self.codex_status.error { menu = menu.child(note(error.clone())); }
         if !self.codex_status.available { menu = menu.child(note("ChatGPT requires the Codex CLI. Install or enable it, then Refresh.".into())); }
         if self.codex_status.authenticated && self.codex_status.auth_type.as_deref().map(|x| x != "chatgpt").unwrap_or(false) {
@@ -183,8 +184,8 @@ impl Workspace {
             menu = menu.child(div().id(("mm-row", i)).flex().flex_col().px(px(8.)).py(px(6.)).rounded(px(R_8)).cursor_pointer()
                 .when(on, |d| d.bg(bg_selected())).hover(|s| s.bg(bg_selected()))
                 .child(div().text_size(fs_13()).text_color(text_strong()).child(md.label().to_string()))
-                .child(div().text_size(fs_12()).text_color(text_subtle()).child(sub))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                .child(div().text_size(fs_12()).text_color(text_subtle()).child(sub.clone()))
+                .accessible_click(format!("{}: {}", md.label(), sub), true, cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.model = Some(name.clone());
                     this.model_menu = false;
                     if matches!(this.notice, Some((_, MetaKind::Warn, false))) { this.notice = None; }
@@ -200,7 +201,7 @@ impl Workspace {
                     let value = effort.clone();
                     row = row.child(div().id(("reasoning-option", n)).px(px(7.)).py(px(4.)).rounded(px(R_8)).cursor_pointer().text_size(fs_12()).hover(|s| s.bg(bg_selected())).child(value.clone())
                         .when(current.reasoning_effort.as_ref() == Some(effort), |d| d.bg(bg_selected()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_model_control(Some(value.clone()), None, cx))));
+                        .accessible_click(format!("Reasoning {value}"), true, cx.listener(move |this, _: &ClickEvent, _, cx| this.set_model_control(Some(value.clone()), None, cx))));
                 }
                 menu = menu.child(row).child(note("Speed · Fast uses more subscription allowance".into()));
                 let mut row = div().flex().gap(px(4.)).px(px(8.));
@@ -210,7 +211,7 @@ impl Workspace {
                     row = row.child(div().id(("speed-option", n)).px(px(7.)).py(px(4.)).rounded(px(R_8)).cursor_pointer().text_size(fs_12()).hover(|s| s.bg(bg_selected())).child(if *speed == "fast" { "Fast" } else { "Standard" })
                         .when(current.speed == *speed, |d| d.bg(bg_selected()))
                         .when(!enabled, |d| d.opacity(0.4))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        .accessible_click(format!("Speed {value}"), enabled, cx.listener(move |this, _: &ClickEvent, _, cx| {
                             if enabled { this.set_model_control(None, Some(value.clone()), cx); }
                         })));
                 }

@@ -5,6 +5,7 @@
 //! Only active compatibility checks poll; Ollama and runtime state refresh when
 //! the window becomes active, when you open the model menu, or press Retry.
 
+use crate::accessibility::AccessibleClick;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +34,8 @@ mod model_controls;
 mod access_controls;
 #[path = "project_setup.rs"]
 mod project_setup;
+#[path = "change_review.rs"]
+mod change_review;
 pub use access_controls::PendingApproval;
 #[path = "deletion.rs"]
 mod deletion;
@@ -181,6 +184,11 @@ pub struct Workspace {
     setup_step: Option<u8>,
     permissions_open: bool,
     chat_context: Option<Value>,
+    review_open: bool,
+    review_loading: bool,
+    review_seq: u64,
+    review_data: Option<Value>,
+    review_file: usize,
     /// the access chosen for a chat that does not exist yet (sent when it is created)
     pending_access: Option<String>,
     /// the "Enable Full access?" dialog, while open
@@ -288,6 +296,11 @@ impl Focusable for Workspace {
 }
 
 impl SelectionHost for Workspace {
+    fn toggle_outcome(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(msg) = self.msgs.get_mut(ix) { msg.outcome_expanded = !msg.outcome_expanded; }
+        self.refresh_msg_rows(ix, usize::MAX);
+        cx.notify();
+    }
     fn selection_down(&mut self, pos: Pos, clicks: usize, shift: bool, cx: &mut Context<Self>) {
         if shift && self.selection.anchor.is_some() {
             self.selection.head = Some(pos);
@@ -392,6 +405,11 @@ impl Workspace {
             setup_step: None,
             permissions_open: false,
             chat_context: None,
+            review_open: false,
+            review_loading: false,
+            review_seq: 0,
+            review_data: None,
+            review_file: 0,
             pending_access: None,
             full_access_confirm: None,
             model_preferences: model_controls::Preferences::default(),
@@ -605,12 +623,13 @@ impl Workspace {
     /// Personal memory and the selected project's memory, asked again whenever
     /// the chat list is, so a change made in the browser or the CLI shows up.
     pub fn load_memory(&mut self, cx: &mut Context<Self>) {
-        let Some(pid) = self.project_id.clone() else { return };
+        let scope = self.project_id.clone();
+        self.memory_error = None;
         self.memory_seq += 1;
         let seq = self.memory_seq;
-        let path = format!("/api/memory?project_id={pid}");
+        let path = scope.as_ref().map(|pid| format!("/api/memory?project_id={pid}")).unwrap_or_else(|| "/api/memory".into());
         self.api_call(cx, move |api| api.get::<api::MemoryView>(&path), move |this, r, _| {
-            if seq != this.memory_seq || this.project_id.as_deref() != Some(pid.as_str()) {
+            if seq != this.memory_seq || this.project_id != scope {
                 return;
             }
             match r {
@@ -641,11 +660,11 @@ impl Workspace {
     /// Add an item: personal (a fact, for every project) or this project's (a decision).
     /// The kind and a narrower scope are set in the browser page or the CLI.
     pub fn add_memory(&mut self, store: &'static str, text: String, cx: &mut Context<Self>) {
-        let Some(pid) = self.project_id.clone() else { return };
         logfile::event("ui.memory_add", &[("store", store.into())]); // never the text
         let body = if store == "personal" {
             json!({"store": "personal", "text": text, "kind": "fact"})
         } else {
+            let Some(pid) = self.project_id.clone() else { return };
             json!({"store": "project", "project_id": pid, "text": text, "kind": "decision"})
         };
         self.api_call(cx, move |api| api.post::<Value>("/api/memory", body), |this, r, cx| this.memory_done(r, cx));
@@ -898,6 +917,7 @@ impl Workspace {
         let input = cx.new(|cx| {
             let mut c = Composer::new(cx);
             c.set_placeholder(placeholder, cx);
+            c.set_accessibility_scope("settings");
             c.set_compact(cx);
             if !initial.is_empty() {
                 c.set_text(&initial, cx);
@@ -948,6 +968,10 @@ impl Workspace {
         self.setup_step = None;
         self.permissions_open = false;
         self.chat_context = None;
+        self.review_open = false;
+        self.review_seq += 1;
+        self.review_loading = false;
+        self.review_data = None;
         self.parse_in_flight = false;
         self.opening = None;
         self.loading_chat = false;
@@ -1129,11 +1153,9 @@ impl Workspace {
                             }
                             let Some(tid) = m.task_id.as_deref() else { continue };
                             let rep = list.tasks.iter().find(|x| x.task_id == tid).and_then(|x| x.report.as_ref());
-                            if let Some((line, attention)) = rep.and_then(api::report_line) {
-                                msg.meta = format!("{} · {line}", msg.meta);
-                                if attention && msg.meta_kind == MetaKind::Normal {
-                                    msg.meta_kind = MetaKind::Warn;
-                                }
+                            msg.outcome = rep.and_then(api::task_outcome);
+                            if msg.outcome.as_ref().map(|o| o.attention).unwrap_or(false) && msg.meta_kind == MetaKind::Normal {
+                                msg.meta_kind = MetaKind::Warn;
                             }
                         }
                     }
@@ -1285,6 +1307,8 @@ impl Workspace {
             parsed_len: text.len(),
             text: text.clone(),
             meta: String::new(),
+            outcome: None,
+            outcome_expanded: false,
             activity_icon: None,
             meta_kind: MetaKind::Normal,
             streaming: false,
@@ -1295,6 +1319,8 @@ impl Workspace {
             blocks: Arc::new(vec![]),
             parsed_len: 0,
             meta: "Thinking…".into(),
+            outcome: None,
+            outcome_expanded: false,
             activity_icon: Some("cpu"),
             meta_kind: MetaKind::Normal,
             streaming: true,
@@ -1464,11 +1490,9 @@ impl Workspace {
                             msg.meta = parts.join(" · ");
                             msg.meta_kind = MetaKind::Normal;
                             // M4: a task's report, in one line (the trace is in the browser page)
-                            if let Some((line, attention)) = api::report_line(&ev["report"]) {
-                                msg.meta = format!("{} · {line}", msg.meta);
-                                if attention {
-                                    msg.meta_kind = MetaKind::Warn;
-                                }
+                            msg.outcome = api::task_outcome(&ev["report"]);
+                            if msg.outcome.as_ref().map(|o| o.attention).unwrap_or(false) {
+                                msg.meta_kind = MetaKind::Warn;
                             }
                             // M7: suggestions wait in Memory; nothing was saved
                             let n = ev.get("candidates").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
@@ -1512,9 +1536,7 @@ impl Workspace {
                                 text.clone()
                             };
                             msg.meta_kind = if code == "cancelled" { MetaKind::Warn } else { MetaKind::Bad };
-                            if let Some((line, _)) = api::report_line(&ev["report"]) {
-                                msg.meta = format!("{} {line}.", msg.meta.trim_end());
-                            }
+                            msg.outcome = api::task_outcome(&ev["report"]);
                             // M6: a partial reply is stored with the memory it was given; say so now,
                             // not only when the chat is opened again
                             if partial {
@@ -1757,6 +1779,7 @@ impl Workspace {
         cx.notify();
     }
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.review_open { self.review_open = false; cx.notify(); return; }
         if self.permissions_open { self.permissions_open = false; cx.notify(); return; }
         if self.full_access_confirm.is_some() {
             self.full_access_confirm = None;
@@ -1811,7 +1834,7 @@ fn stored_msg(m: &api::Message) -> Msg {
             other => (format!("{model} · Incomplete ({other}).{mem}"), MetaKind::Warn),
         }
     };
-    Msg { role, text: m.content.clone(), parsed_len: m.content.len(), blocks: Arc::new(blocks), meta, activity_icon: None, meta_kind: kind, streaming: false }
+    Msg { role, text: m.content.clone(), parsed_len: m.content.len(), blocks: Arc::new(blocks), meta, outcome: None, outcome_expanded: false, activity_icon: None, meta_kind: kind, streaming: false }
 }
 
 // ---------------- rendering ----------------
@@ -1882,7 +1905,7 @@ impl Workspace {
                             this.project_menu = if this.project_menu.as_ref() == Some(&menu_id) { None } else { Some(menu_id.clone()) };
                             cx.notify();
                         })))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.select_project(id.clone(), cx))),
+                    .accessible_click(format!("Open project {}", p.name), true, cx.listener(move |this, _: &ClickEvent, _, cx| this.select_project(id.clone(), cx))),
             );
             if self.project_menu.as_ref() == Some(&p.id) {
                 projects = projects.child(div().p(px(6.)).rounded(px(R_8)).bg(bg_raised())
@@ -1963,12 +1986,12 @@ impl Workspace {
             row = row.child(div().id(SharedString::from(format!("chat-menu-{}", c.id)))
                 .size(px(28.)).flex_none().flex().items_center().justify_center().rounded(px(R_6))
                 .hover(|s| s.bg(bg_hover())).child(ui::icon("more").text_color(text_default()))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                .accessible_click(format!("Options for {}", c.title), true, cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
                     this.chat_menu = if this.chat_menu.as_ref() == Some(&menu_id) { None } else { Some(menu_id.clone()) };
                     cx.notify();
                 })));
-            sessions = sessions.child(row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            sessions = sessions.child(row.accessible_click(format!("Open chat {}", c.title), true, cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.chat_menu = None;
                 this.open_chat(id.clone(), cx);
             })));
@@ -1976,9 +1999,9 @@ impl Workspace {
                 sessions = sessions.child(div().p(px(6.)).rounded(px(R_8)).bg(bg_raised()).flex().flex_col()
                     .child(ui::nav(SharedString::from(format!("archive-{}", c.id)), false)
                         .child(if archived { "Restore chat" } else { "Archive chat" })
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))))
+                        .accessible_click(if archived { "Restore chat" } else { "Archive chat" }, true, cx.listener(move |this, _: &ClickEvent, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))))
                     .child(ui::nav(SharedString::from(format!("delete-{}", c.id)), false).text_color(danger()).child("Delete chat…")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_deletion(false, delete_id.clone(), delete_title.clone(), cx)))));
+                        .accessible_click("Delete chat", true, cx.listener(move |this, _: &ClickEvent, _, cx| this.open_deletion(false, delete_id.clone(), delete_title.clone(), cx)))));
             }
         }
         if self.show_archived || archived_count > 0 {
@@ -2054,7 +2077,7 @@ impl Workspace {
                     )
                     .child(div().flex_1())
                     .child(ui::icon_btn("search", "search", false))
-                    .child(ui::icon_btn("collapse-sidebar", "sidebar", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    .child(ui::icon_btn("collapse-sidebar", "sidebar", false).accessible_click("Hide sidebar", true, cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.sidebar = false;
                         cx.notify();
                     }))),
@@ -2088,7 +2111,7 @@ impl Workspace {
                                     .line_height(px(18.))
                                     .child("⌘N"),
                             )
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            .accessible_click("New chat", true, cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.new_standalone_chat(cx);
                                 window.focus(&this.composer.focus_handle(cx));
                             })),
@@ -2127,7 +2150,7 @@ impl Workspace {
                     .when(sessions_open, |d| d.child(sessions)),
             )
             .child(ui::nav("settings", false).child("Settings")
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                .accessible_click("Settings", true, cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.settings_open = true;
                     this.chat_menu = None;
                     this.load_settings_archived(cx);
@@ -2171,7 +2194,7 @@ impl Workspace {
             .border_b_1()
             .border_color(border())
             .when(sidebar_hidden, |d| {
-                d.child(ui::icon_btn("show-sidebar", "sidebar", false).ml(px(-8.)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                d.child(ui::icon_btn("show-sidebar", "sidebar", false).ml(px(-8.)).accessible_click("Show sidebar", true, cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.sidebar = true;
                     cx.notify();
                 })))
@@ -2190,12 +2213,12 @@ impl Workspace {
                     .child(title),
             )
             .when(has_chat, |d| {
-                d.child(ui::icon_btn("chat-options", "more", self.options_menu).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                d.child(ui::icon_btn("chat-options", "more", self.options_menu).accessible_click("Chat options", true, cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.options_menu = !this.options_menu;
                     cx.notify();
                 })))
             })
-            .child(ui::icon_btn("rtoggle", "sidebar-right", self.details).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            .child(ui::icon_btn("rtoggle", "sidebar-right", self.details).accessible_click("Toggle details", true, cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.details = !this.details;
                 cx.notify();
             })))
@@ -2240,9 +2263,9 @@ impl Workspace {
                     .child(div().flex_1().min_w_0().child(ui::nav_title(chat.title.clone()))
                         .child(div().text_size(fs_12()).text_color(text_subtle()).child(project)))
                     .child(ui::nav(SharedString::from(format!("settings-restore-{}", chat.id)), false).w(px(76.)).child("Restore")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_chat_archived(restore_id.clone(), false, cx))))
+                        .accessible_click_in("settings", "Restore chat", true, cx.listener(move |this, _: &ClickEvent, _, cx| this.set_chat_archived(restore_id.clone(), false, cx))))
                     .child(ui::nav(SharedString::from(format!("settings-delete-{}", chat.id)), false).w(px(76.)).text_color(danger()).child("Delete…")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_deletion(false, delete_id.clone(), delete_title.clone(), cx)))));
+                        .accessible_click("Delete chat", true, cx.listener(move |this, _: &ClickEvent, _, cx| this.open_deletion(false, delete_id.clone(), delete_title.clone(), cx)))));
             }
         } else { list = list.child("Loading archived chats…"); }
         Some(div().id("settings-overlay").absolute().inset_0().flex().items_center().justify_center().bg(gpui::rgba(0x0000_0099))
@@ -2250,19 +2273,19 @@ impl Workspace {
             .child(div().w(px(620.)).max_w_full().h(px(480.)).max_h_full().p(px(20.)).rounded(px(R_12))
                 .bg(bg_raised()).border_1().border_color(border_strong()).shadow_lg().flex().flex_col().gap(px(16.))
                 .child(div().flex().items_center().justify_between().child(div().text_size(fs_16()).text_color(text_strong()).child("Settings"))
-                    .child(ui::icon_btn("settings-close", "x", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    .child(ui::icon_btn("settings-close", "x", false).accessible_click_in("settings", "Close settings", true, cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.settings_open = false;
                         cx.notify();
                     }))))
                 .child(div().flex().gap(px(8.))
                     .child(ui::nav("settings-archived-tab", !self.settings_memory).child("Archived chats")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        .accessible_click_in("settings", "Archived chats", true, cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.settings_memory = false;
                             this.load_settings_archived(cx);
                             cx.notify();
                         })))
                     .child(ui::nav("settings-memory-tab", self.settings_memory).child("Memory")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        .accessible_click_in("settings", "Memory", true, cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.settings_memory = true;
                             this.load_memory(cx);
                             cx.notify();
@@ -2360,14 +2383,15 @@ impl Workspace {
                 }
             }
         }
-        activity = activity.child(div().text_size(fs_12()).text_color(text_subtle()).child("Recorded edits, not a Git diff. Commands may change other files."))
-            .child(ui::pill("refresh-chat-activity").child("Refresh activity").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_chat_activity(cx))));
+        activity = activity.child(div().text_size(fs_12()).text_color(text_subtle()).child("Activity from this chat. Review folder changes to inspect the current Git diff."))
+            .when(self.chat.is_some() && self.folder().is_some(), |d| d.child(ui::pill("review-folder-changes").child("Review folder changes").accessible_click("Review folder changes", true, cx.listener(|this, _: &ClickEvent, _, cx| this.open_change_review(cx)))))
+            .when(self.chat.is_some(), |d| d.child(ui::pill("refresh-chat-activity").child("Refresh activity").accessible_click("Refresh activity", true, cx.listener(|this, _: &ClickEvent, _, cx| this.load_chat_activity(cx)))));
         if let Some(error) = self.chat_context.as_ref().and_then(|v| v["error"].as_str()) { activity = activity.child(div().text_size(fs_12()).text_color(warning()).child(error.to_string())); }
         let workspace = self.access.as_ref().and_then(|a| a.workspace.as_ref());
         let path = workspace.map(|w| w.root.clone()).filter(|p| !p.is_empty());
         let mut context = div().id("project-context-scroll").flex_1().min_h(px(0.)).overflow_y_scroll().px(px(20.)).py(px(12.)).flex().flex_col().gap(px(12.)).child(activity)
             .child(div().text_color(text_strong()).child("Workspace"))
-            .child(div().text_size(fs_12()).child(path.clone().unwrap_or_else(|| "No folder connected. Describe the project and Umbrous will look for it.".into())))
+            .child(div().text_size(fs_12()).child(path.clone().unwrap_or_else(|| "No folder connected. Chat normally, or choose a folder to work with files.".into())))
             .child(div().text_size(fs_12()).child(format!("Access: {}", self.access_pill_label())))
             .child(div().text_size(fs_12()).child(format!("Model: {}", self.selected_model_label())));
         if let Some(path) = path {
@@ -2465,7 +2489,7 @@ impl Workspace {
                 .child(ui::hover_icon(if on { "check" } else { "x" }, &"mem-use".into(), if on { success() } else { text_subtle() }, text_strong()))
                 .child(div().text_size(fs_13()).text_color(text_default()).group_hover("mem-use", |s| s.text_color(text_strong()))
                     .child(if on { "Used in replies" } else { "Off for the next replies" }))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                .accessible_click_in("settings", if on { "Turn memory off" } else { "Turn memory on" }, true, cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.use_memory = !this.use_memory;
                     logfile::event("ui.memory_toggle", &[("on", this.use_memory.to_string())]);
                     cx.notify();
@@ -2475,7 +2499,9 @@ impl Workspace {
             return col.into_any_element();
         }
         let Some(view) = self.memory.clone() else {
-            return col.child(note(self.memory_error.clone().unwrap_or_else(|| "Loading…".into()))).into_any_element();
+            return col.child(note(self.memory_error.clone().unwrap_or_else(|| "Loading…".into())))
+                .when(self.memory_error.is_some(), |d| d.child(ui::pill("memory-retry").mx(px(20.)).child("Retry loading memory").accessible_click_in("settings", "Retry loading memory", true, cx.listener(|this, _: &ClickEvent, _, cx| this.load_memory(cx)))))
+                .into_any_element();
         };
         let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
         // M7: suggestions from tasks, waiting for you. Not in memory, never
@@ -2523,7 +2549,7 @@ impl Workspace {
                                 .line_height(px(18.))
                                 .text_color(text_strong())
                                 .child(c.text.clone())
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                .accessible_click_in("settings", format!("Edit memory suggestion: {}", c.text), true, cx.listener(move |this, _: &ClickEvent, window, cx| {
                                     this.begin_memory_input(MemTarget::Accept(id_edit.clone()), window, cx);
                                 })),
                         )
@@ -2534,9 +2560,9 @@ impl Workspace {
                                 .flex()
                                 .gap(px(6.))
                                 .pt(px(3.))
-                                .child(button(format!("cand-{}-accept", c.id), "Accept").on_click(cx.listener(
+                                .child(button(format!("cand-{}-accept", c.id), "Accept").accessible_click_in("settings", format!("Accept memory suggestion: {}", c.text), true, cx.listener(
                                     move |this, _: &ClickEvent, _, cx| this.accept_candidate(id_ok.clone(), None, cx))))
-                                .child(button(format!("cand-{}-reject", c.id), "Reject").on_click(cx.listener(
+                                .child(button(format!("cand-{}-reject", c.id), "Reject").accessible_click_in("settings", format!("Reject memory suggestion: {}", c.text), true, cx.listener(
                                     move |this, _: &ClickEvent, _, cx| this.reject_candidate(id_no.clone(), cx)))),
                         ),
                 );
@@ -2544,10 +2570,11 @@ impl Workspace {
         }
         let sections: [(&'static str, &'static str, String, &Vec<api::MemoryItem>); 2] = [
             ("personal", "mem-add-personal", "Personal".to_string(), &view.personal),
-            ("project", "mem-add-project", format!("This project: {project}"), &view.project),
+            ("project", "mem-add-project", if project.is_empty() { "This chat".into() } else { format!("This project: {project}") }, &view.project),
         ];
         for (store, add_id, label, items) in sections {
-            let plus = ui::icon_btn(add_id, "plus", false).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            if store == "project" && self.project_id.is_none() { continue; }
+            let plus = ui::icon_btn(add_id, "plus", false).accessible_click_in("settings", format!("Add {store} memory"), true, cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.begin_memory_input(MemTarget::Add(store), window, cx);
             }));
             col = col.child(title(if store == "personal" { "mem-h-personal" } else { "mem-h-project" }, label, Some(plus)));
@@ -2566,7 +2593,7 @@ impl Workspace {
                 let (id_edit, id_del) = (m.id.clone(), m.id.clone());
                 let mut tag = format!("{} · {}", m.id, m.kind);
                 if off {
-                    tag.push_str(" · not for this project");
+                    tag.push_str(if self.project_id.as_deref().map(|p| !p.starts_with("prj_session_")).unwrap_or(false) { " · not for this project" } else { " · not for this chat" });
                 }
                 col = col.child(
                     div()
@@ -2586,7 +2613,7 @@ impl Workspace {
                                 .child(div().text_size(fs_13()).line_height(px(18.))
                                     .text_color(if off { text_subtle() } else { text_strong() }).child(m.text.clone()))
                                 .child(div().text_size(fs_12()).text_color(text_subtle()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(tag))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                .accessible_click_in("settings", format!("Edit memory: {}", m.text), true, cx.listener(move |this, _: &ClickEvent, window, cx| {
                                     this.begin_memory_input(MemTarget::Edit(id_edit.clone()), window, cx);
                                 })),
                         )
@@ -2604,7 +2631,7 @@ impl Workspace {
                                 .when(armed, |d| d.text_color(danger()).child("Delete?"))
                                 .when(!armed, |d| d.child(ui::hover_icon("x", &gid, text_subtle(), text_strong())))
                                 .hover(|s| s.bg(bg_hover()))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                .accessible_click_in("settings", if armed { "Confirm delete memory" } else { "Delete memory" }, true, cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     if this.memory_armed.as_deref() == Some(id_del.as_str()) {
                                         this.delete_memory(id_del.clone(), cx);
                                     } else {
@@ -2663,7 +2690,7 @@ impl Workspace {
         col = col.child(div().flex().items_center().justify_between().h(px(30.)).px(px(20.)).text_size(fs_13())
             .text_color(text_default()).child("Start fresh")
             .child(Self::small_button("reset-close", "Cancel".into(), false)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_reset(cx)))));
+                .accessible_click_in("reset", "Cancel", !ui.working, cx.listener(|this, _: &ClickEvent, _, cx| this.close_reset(cx)))));
         if let Some(done) = &ui.done {
             col = col.child(div().px(px(20.)).py(px(4.)).text_size(fs_13()).text_color(success()).child(done.summary()));
             for k in &done.kept {
@@ -2688,8 +2715,8 @@ impl Workspace {
                         .when(on, |d| d.bg(accent()).flex().items_center().justify_center()
                             .child(ui::icon_sized("check", 10.).text_color(text_strong()))),
                 )
-                .child(div().flex_1().min_w_0().text_size(fs_13()).line_height(px(18.)).text_color(text_strong()).child(label))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_reset(what.clone(), cx)))
+                .child(div().flex_1().min_w_0().text_size(fs_13()).line_height(px(18.)).text_color(text_strong()).child(label.clone()))
+                .accessible_click_in("reset", format!("{}: {}", if on { "Selected" } else { "Not selected" }, label), true, cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_reset(what.clone(), cx)))
         };
         let c = &ui.choice;
         if ui.preview.is_some() {
@@ -2697,7 +2724,7 @@ impl Workspace {
             // in view and nothing can be ticked behind it. Changing the
             // selection drops the preview; a new one is needed to delete.
             col = col.child(div().px(px(20.)).pt(px(4.)).child(Self::small_button("reset-change", "Change selection".into(), false)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.change_reset_selection(cx)))));
+                .accessible_click_in("reset", "Change selection", !ui.working, cx.listener(|this, _: &ClickEvent, _, cx| this.change_reset_selection(cx)))));
         } else {
             col = col.child(head(format!("Chats in {project}")));
             match &ui.chats {
@@ -2740,7 +2767,7 @@ impl Workspace {
             col = col.child(div().pt(px(8.)).child(tick("reset-fresh".into(), "Start a new chat afterwards".into(), c.start_fresh, false,
                                                          ResetTick::StartFresh, cx)));
             col = col.child(div().px(px(20.)).pt(px(6.)).child(Self::small_button("reset-preview", "Preview".into(), false)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.preview_reset(cx)))));
+                .accessible_click_in("reset", "Preview deletion", !ui.working, cx.listener(|this, _: &ClickEvent, _, cx| this.preview_reset(cx)))));
         }
         if let Some(err) = &ui.error {
             col = col.child(div().px(px(20.)).py(px(4.)).text_size(fs_12()).text_color(danger()).child(err.clone()));
@@ -2771,10 +2798,10 @@ impl Workspace {
                 let mut row = div().flex().gap(px(6.)).pt(px(6.));
                 if p.blocked.is_empty() {
                     row = row.child(Self::small_button("reset-confirm", format!("Delete {n} item{}", if n == 1 { "" } else { "s" }).into(), true)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_reset(cx))));
+                        .accessible_click_in("reset", format!("Delete {n} items permanently"), !ui.working, cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_reset(cx))));
                 }
                 row = row.child(Self::small_button("reset-cancel", "Cancel".into(), false)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_reset(cx))));
+                    .accessible_click_in("reset", "Cancel", !ui.working, cx.listener(|this, _: &ClickEvent, _, cx| this.close_reset(cx))));
                 box_ = box_.child(row);
                 // What stays comes after Delete, so a short list keeps Delete in
                 // view at the default window size; it is the same text as before.
@@ -2820,7 +2847,7 @@ impl Workspace {
             notices.push(div().flex().flex_col().gap(px(12.))
                 .child(div().text_size(px(28.)).text_color(text_strong()).child("What would you like to work on?"))
                 .child(div().text_size(fs_14()).child("Ask anything, or choose a folder to work with its files."))
-                .child(ui::pill("start-project").child("Start working with a folder").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_project_setup(cx))))
+                .child(ui::pill("start-project").h(px(36.)).bg(bg_selected()).text_color(text_strong()).child("Start working with a folder").accessible_click("Start working with a folder", true, cx.listener(|this, _: &ClickEvent, _, cx| this.start_project_setup(cx))))
                 .into_any_element());
         }
         if let Some(check) = self.render_compatibility(cx) { notices.push(check); }
@@ -2943,7 +2970,7 @@ impl Workspace {
             .bg(if active { text_strong() } else { bg_selected() })
             .when(active, |d| d.cursor_pointer())
             .child(ui::icon(if running { "stop" } else { "arrow-up" }).text_color(if active { bg_app() } else { text_subtle() }))
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            .accessible_click(if running { "Stop reply" } else { "Send message" }, active, cx.listener(|this, _: &ClickEvent, window, cx| {
                 if this.run.is_some() {
                     this.stop_reply(cx);
                 } else {
@@ -2989,7 +3016,7 @@ impl Workspace {
                                     .child(pill_label)
                                     .children(self.render_model_controls(cx))
                                     .child(ui::hover_icon("chevron-down", &"model-pill".into(), pill_color, pill_hover))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    .accessible_click("Choose model and reasoning", true, cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.access_menu = false;
                                         if this.model_menu {
                                             this.model_menu = false;
@@ -3068,6 +3095,10 @@ pub const TITLEBAR: f32 = 28.;
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use theme::*;
+        crate::accessibility::begin_frame(if self.full_access_confirm.is_some() { "full-access" }
+            else if self.permissions_open { "permissions" } else if self.review_open { "review" }
+            else if self.deletion.is_some() { "deletion" } else if self.reset.is_some() { "reset" }
+            else if self.settings_open { "settings" } else { "main" }, self.view);
         let t0 = Instant::now();
         let wide = window.viewport_size().width >= px(1180.); // the page's @media (max-width:1180px)
         // reveal_end scrolls with the heights the list measured last frame, so a row that
@@ -3090,6 +3121,11 @@ impl Render for Workspace {
             .id("workspace")
             .key_context("Workspace")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+                this.settings_open = true;
+                this.load_settings_archived(cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::escape))
@@ -3144,12 +3180,13 @@ impl Render for Workspace {
                 .child(main)
                 .when(self.details && wide, |d| d.child(self.render_right_panel(cx)))
         };
+        let review = self.render_change_review(cx);
         let permissions = self.render_permissions(cx);
         let confirm = self.render_full_access_confirm(cx);
         let settings = self.render_settings(cx);
         let reset = self.render_reset_dialog(cx);
         let deletion = self.render_deletion(cx);
-        let el = root.relative().child(app).children(settings).children(reset).children(deletion).children(permissions).children(confirm);
+        let el = root.relative().child(app).children(settings).children(reset).children(deletion).children(review).children(permissions).children(confirm);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.perf.render_count += 1;
         self.perf.render_ms_total += ms;

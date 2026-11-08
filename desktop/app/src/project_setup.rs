@@ -2,13 +2,13 @@
 use super::*;
 use theme::*;
 
-fn permission_text(profile: &str) -> &'static str {
+pub(super) fn permission_text(profile: &str) -> &'static str {
     match profile {
         "workspace_read" => "Can read files",
         "ask_before_read" => "Asks before reading files",
         "code_ask_commands" => "Can edit; asks before commands",
         "workspace_code" => "Can run commands without asking",
-        _ => "Custom project permissions",
+        _ => "Custom permissions",
     }
 }
 
@@ -125,22 +125,22 @@ impl Workspace {
         match step {
             0 => {
                 card = card.child(div().child("Choose the model you want to work with using the model control below."))
-                    .child(ui::pill("setup-model-next").child(format!("Use {}", self.selected_model_label())).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    .child(ui::pill("setup-model-next").child(format!("Use {}", self.selected_model_label())).accessible_click(format!("Use {}", self.selected_model_label()), true, cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.setup_model_next(cx);
                     })));
             }
             1 => {
-                card = card.child(div().child("Choose the folder this project can access."))
-                    .child(ui::pill("setup-folder").child("Choose folder…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.choose_folder("workspace_read", cx))));
+                card = card.child(div().child("Choose the folder this chat can access."))
+                    .child(ui::pill("setup-folder").child("Choose folder…").accessible_click("Choose folder", true, cx.listener(|this, _: &ClickEvent, _, cx| this.choose_folder("workspace_read", cx))));
                 if let Some(folder) = self.folder() {
                     card = card.child(div().text_size(fs_12()).child(folder.root.clone()))
-                        .child(ui::pill("setup-use-folder").child("Use this folder").on_click(cx.listener(|this, _: &ClickEvent, _, cx| { this.setup_step = Some(2); cx.notify(); })));
+                        .child(ui::pill("setup-use-folder").child("Use this folder").accessible_click("Use this folder", true, cx.listener(|this, _: &ClickEvent, _, cx| { this.setup_step = Some(2); cx.notify(); })));
                 }
             }
             2 => {
                 for (i, (profile, _, _)) in access_controls::LEVELS.iter().enumerate() {
                     let profile = *profile;
-                    card = card.child(ui::pill(["setup-read", "setup-write", "setup-full"][i]).child(permission_text(profile)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose_level(profile, cx))));
+                    card = card.child(ui::pill(["setup-read", "setup-write", "setup-full"][i]).child(permission_text(profile)).accessible_click(permission_text(profile), true, cx.listener(move |this, _: &ClickEvent, _, cx| this.choose_level(profile, cx))));
                 }
                 card = card.child(div().text_size(fs_12()).text_color(warning()).child("Commands run as you and are not sandboxed, including commands you approve."));
             }
@@ -148,7 +148,7 @@ impl Workspace {
             _ => { card = card.child(div().child("Your folder, access, and model compatibility are set. Type your request below.")); }
         }
         if let Some(error) = &self.access_error { card = card.child(div().text_color(danger()).child(error.clone())); }
-        card = card.child(ui::pill("setup-chat-only").child(if step == 4 { "Done" } else { "Continue chatting" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| { this.setup_step = None; cx.notify(); })));
+        card = card.child(ui::pill("setup-chat-only").child(if step == 4 { "Done" } else { "Continue chatting" }).accessible_click(if step == 4 { "Done" } else { "Continue chatting" }, true, cx.listener(|this, _: &ClickEvent, _, cx| { this.setup_step = None; cx.notify(); })));
         Some(card.into_any_element())
     }
 
@@ -160,20 +160,20 @@ impl Workspace {
         let detail = if busy { self.probe_state.as_ref().and_then(|v| v["detail"].as_str()).unwrap_or("Connecting…") }
             else { current.and_then(|v| v["detail"].as_str()).unwrap_or("This model's tool compatibility has not been verified. You can still use ordinary chat.") };
         let mut card = div().w_full().p(px(12.)).rounded(px(R_12)).border_1().border_color(border()).flex().flex_col().gap(px(8.))
-            .child(div().text_color(if failed { warning() } else { text_default() }).child(detail.to_string()));
+            .child(div().relative().text_color(if failed { warning() } else { text_default() }).child(detail.to_string()).child(crate::accessibility::text("main", "compatibility-status", detail.to_string())));
         if busy {
             card = card.child(div().text_size(fs_12()).child("Connecting → Tool call → Tool result. This can take up to six minutes."))
-                .child(ui::pill("cancel-compatibility").child(if self.probe_cancel_requested { "Cancelling…" } else { "Cancel check" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_probe(cx))));
+                .child(ui::pill("cancel-compatibility").child(if self.probe_cancel_requested { "Cancelling…" } else { "Cancel check" }).accessible_click("Cancel compatibility check", !self.probe_cancel_requested, cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_probe(cx))));
         } else {
             let retry_connection = current.map(|v| matches!(v["stage"].as_str(), Some("connection" | "error" | "provider_unavailable" | "timeout"))).unwrap_or(false);
             card = card.child(div().flex().flex_wrap().gap(px(8.))
-                .child(ui::pill("retry-compatibility").child(if retry_connection { "Retry connection" } else { "Check compatibility" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.check_tools(cx))))
-                .child(ui::pill("compatibility-model").child("Choose another model").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_models(true, cx)))));
+                .child(ui::pill("retry-compatibility").child(if retry_connection { "Retry connection" } else { "Check compatibility" }).accessible_click(if retry_connection { "Retry connection" } else { "Check compatibility" }, true, cx.listener(|this, _: &ClickEvent, _, cx| this.check_tools(cx))))
+                .child(ui::pill("compatibility-model").child("Choose another model").accessible_click("Choose another model", true, cx.listener(|this, _: &ClickEvent, _, cx| this.load_models(true, cx)))));
         }
         Some(card.into_any_element())
     }
 
-    pub(super) fn render_folder_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_folder_pill(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
         let folder = self.folder()?;
         let path = folder.root.clone();
         Some(ui::pill("composer-folder").max_w(px(150.)).overflow_hidden().child(ui::icon("folder")).child(folder.name.clone())
@@ -217,12 +217,12 @@ impl Workspace {
         for (i, grant) in grants.iter().enumerate() {
             let id = grant["id"].as_str().unwrap_or("").to_string();
             let name = grant["capability"].as_str().unwrap_or("Permission").to_string();
-            card = card.child(div().flex().items_center().gap(px(12.)).child(div().flex_1().child(name))
-                .child(div().id(("revoke-grant", i)).px(px(10.)).py(px(6.)).rounded(px(R_8)).cursor_pointer().hover(|s| s.bg(bg_hover())).child("Revoke").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.revoke_permission(id.clone(), cx)))));
+            card = card.child(div().flex().items_center().gap(px(12.)).child(div().flex_1().child(name.clone()))
+                .child(div().id(("revoke-grant", i)).px(px(10.)).py(px(6.)).rounded(px(R_8)).cursor_pointer().hover(|s| s.bg(bg_hover())).child("Revoke").accessible_click_in("permissions", format!("Revoke {name}"), true, cx.listener(move |this, _: &ClickEvent, _, cx| this.revoke_permission(id.clone(), cx)))));
         }
         card = card.child(div().text_size(fs_12()).child("Full access still allows commands after grants are revoked. Change the access level to require approval. Commands are not sandboxed."));
         if let Some(error) = &self.access_error { card = card.child(div().text_color(danger()).child(error.clone())); }
-        card = card.child(ui::pill("permissions-close").child("Done").on_click(cx.listener(|this, _: &ClickEvent, _, cx| { this.permissions_open = false; cx.notify(); })));
+        card = card.child(ui::pill("permissions-close").child("Done").accessible_click_in("permissions", "Close permissions", true, cx.listener(|this, _: &ClickEvent, _, cx| { this.permissions_open = false; cx.notify(); })));
         Some(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(gpui::rgba(0x00000099))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(card).into_any_element())
     }

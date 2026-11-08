@@ -5,6 +5,7 @@
 //! (backend.rs). The agent, its API, chat history and projects stay in Python
 //! (umbrous/), reached over the same protected loopback API the browser used.
 
+mod accessibility;
 mod actions;
 mod api;
 mod assets;
@@ -77,6 +78,7 @@ fn menus() -> Vec<Menu> {
             name: "Umbrous".into(),
             items: vec![
                 MenuItem::action("About Umbrous", About),
+                MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
@@ -191,6 +193,7 @@ fn main() {
         actions::bind(cx);
         cx.set_menus(menus());
         let window = open_main_window(started.take().expect("run once"), cx);
+        accessibility::install(window, cx);
         let backend = window.update(cx, |ws, _, _| ws.backend.clone()).expect("workspace");
 
         // Every way of quitting (Cmd-Q, the menu, the Dock, logout) ends here.
