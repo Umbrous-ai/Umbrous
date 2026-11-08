@@ -13,10 +13,12 @@ sleep 1500
 expect messages 0
 expect chat none
 expect running false
-# 2. back to it: the partial reply was saved as stopped
+# 2. back to it: the stream is still live until explicitly stopped
 open_chat Tell me a long story
 sleep 1500
 expect messages 2
+expect running true
+stop
 expect last_meta Stopped
 # 3. another chat mid-stream: its transcript stays its own
 send Continue the story please
@@ -28,6 +30,8 @@ expect messages 2
 expect last_meta umbra-large
 # 4. another project mid-stream
 open_chat Tell me a long story
+expect running true
+stop
 send One more paragraph
 wait_streaming
 select_project Docs site
@@ -49,6 +53,8 @@ sleep 1000
 expect chat Design a tool
 # 7. archive while a reply streams: the reply is stopped and saved first
 open_chat Tell me a long story
+expect running true
+stop
 send Final words
 wait_streaming
 archive
@@ -72,7 +78,7 @@ open_chat_nowait Draft the 0.4
 sleep 1000
 expect chat Draft the 0.4
 expect opening none
-# 10. A -> B -> A while A's reply streams: back on A, the stopped reply is there
+# 10. A -> B -> A while A streams: reconnect without cancelling it
 open_chat Design a tool
 sleep 300
 send Another chapter
@@ -81,8 +87,9 @@ open_chat_nowait Fix tool router
 open_chat_nowait Design a tool
 sleep 2000
 expect chat Design a tool
-expect running false
+expect running true
 expect messages 4
+stop
 expect last_meta Stopped
 expect opening none
 record end

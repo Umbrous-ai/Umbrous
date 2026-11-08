@@ -299,7 +299,7 @@ class Handler(HistoryRoutes, AccessRoutes, MemoryRoutes, TaskRoutes, ModelRoutes
                 status = MEMORY_STATUS.get(exc.code, HISTORY_STATUS.get(exc.code, 400))
                 self._send_json(status, {"error": exc.code, "message": exc.message})
                 return status, exc.code
-        if path in ("/api/reset", "/api/reset/preview"):
+        if path in ("/api/reset", "/api/reset/preview", "/api/delete"):
             return self._reset(path)
         if path == "/api/projects" or path == "/api/chats" or path.startswith("/api/chats/"):
             try:

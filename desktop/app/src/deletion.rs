@@ -50,18 +50,20 @@ impl Workspace {
     pub fn confirm_deletion(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.deletion.as_mut() else { return };
         let Some(preview) = dialog.preview.as_ref() else { return };
-        if dialog.deleting || preview.empty || !preview.blocked.is_empty() { return; }
-        let body = json!({"selection": dialog.selection(), "preview_id": preview.preview_id});
+        if dialog.deleting || preview.empty { return; }
+        let body = json!({"kind": if dialog.project { "project" } else { "chat" }, "id": dialog.id});
         dialog.deleting = true;
         dialog.error = None;
         let seq = self.deletion_seq;
-        self.api_call(cx, move |api| api.post::<api::ResetDone>("/api/reset", body), move |this, result, cx| {
+        self.api_call(cx, move |api| api.post_long::<api::ResetDone>("/api/delete", body), move |this, result, cx| {
             if this.deletion_seq != seq { return; }
             match result {
                 Ok(done) => {
                     // Remove the exact returned ids immediately, including archived
                     // rows; a slow refresh must not leave another Delete to click.
                     let gone = |id: &str| done.items.iter().any(|item| item.id == id);
+                    this.background_runs.retain(|b| !gone(&b.run.chat_id));
+                    if this.run.as_ref().map(|r| gone(&r.chat_id)).unwrap_or(false) { this.run = None; }
                     if this.chat.as_ref().map(|c| gone(&c.id)).unwrap_or(false)
                         || this.project_id.as_ref().map(|id| gone(id)).unwrap_or(false) {
                         this.new_chat(cx);
@@ -93,7 +95,7 @@ impl Workspace {
         use theme::*;
         let dialog = self.deletion.as_ref()?;
         let title = if dialog.project { "Delete project?" } else { "Delete chat?" };
-        let ready = dialog.preview.as_ref().map(|p| !p.empty && p.blocked.is_empty()).unwrap_or(false);
+        let ready = dialog.preview.as_ref().map(|p| !p.empty).unwrap_or(false);
         let description = if dialog.project {
             let count = dialog.preview.as_ref().map(|p| p.items.iter().filter(|i| i.item_type == "chat").count());
             match count {
@@ -114,7 +116,7 @@ impl Workspace {
             content = content.child(div().text_color(text_subtle()).child("Loading…"));
         }
         if dialog.preview.as_ref().map(|p| !p.blocked.is_empty()).unwrap_or(false) {
-            content = content.child(div().text_color(warning()).child("A reply is running. Cancel, stop the reply, then try again."));
+            content = content.child(div().text_color(warning()).child("Running work in this item will be stopped and then deleted."));
         }
         content = content.child(div().flex().justify_end().gap(px(8.))
             .child(ui::pill("delete-cancel").child("Cancel")

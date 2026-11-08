@@ -50,6 +50,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 from umbrous.persistence.session import session
 from pathlib import Path
 from typing import Callable, Dict, ContextManager, List, Optional
@@ -286,6 +287,64 @@ class Reset:
         return kept
 
     # ---------------------------------------------------------------- confirm
+    def delete_target(self, kind: str, target: str, locks, runs) -> dict:
+        """Delete a confirmed chat/project, stopping its runs first.
+
+        Unlike selective Start fresh, this confirms the identity of a container,
+        including messages it receives while the dialog is open. Hold chat locks
+        through deletion so stopped streams cannot save after the rows disappear.
+        """
+        if kind not in ("chat", "project"):
+            raise ResetError("Choose a chat or project to delete.", "bad_selection")
+        sel = normalize({"chats" if kind == "chat" else "delete_projects": [target]})
+        deadline = time.monotonic() + 30
+        while True:
+            preview = self.preview(sel)
+            if preview["empty"]:
+                raise ResetError("This item has already been deleted.", "nothing_selected")
+            ids = sorted(i["id"] for i in preview["items"] if i["type"] == "chat")
+            held = []
+            try:
+                for cid in ids:
+                    lock = locks.get(cid)
+                    # Repeat cancellation to cover a run registering after its
+                    # chat lock was taken but before the first cancellation.
+                    while True:
+                        runs.cancel_chats([cid])
+                        if lock.acquire(timeout=0.05):
+                            held.append(lock)
+                            break
+                        if time.monotonic() >= deadline:
+                            raise ResetError("The task is still stopping. Try deleting again shortly.", "chat_busy")
+                with self._db() as c:
+                    c.execute("PRAGMA secure_delete = ON")
+                    c.execute("BEGIN IMMEDIATE")
+                    try:
+                        current = self._preview(c, sel, None)
+                        current_ids = {i["id"] for i in current["items"] if i["type"] == "chat"}
+                        if not current_ids.issubset(set(ids)):
+                            # A new chat joined this project while stopping the
+                            # old ones. Release the transaction before waiting.
+                            c.execute("ROLLBACK")
+                            if time.monotonic() >= deadline:
+                                raise ResetError("New work is still starting in this project. Try again shortly.", "chat_busy")
+                            continue
+                        deleted = self._delete(c, current)
+                        c.execute("COMMIT")
+                    except BaseException:
+                        if c.in_transaction:
+                            c.execute("ROLLBACK")
+                        raise
+                # Keep lock identities: requests already waiting on them must
+                # not race a replacement lock after the deleted id is reused.
+                return {"done": True, "deleted": deleted,
+                        "items": [{"type": i["type"], "id": i["id"]} for i in current["items"]],
+                        "kept": current["kept"], "not_touched": current["not_touched"],
+                        "backups": BACKUPS, "start_fresh": False}
+            finally:
+                for lock in reversed(held):
+                    lock.release()
+
     def confirm(self, selection: object, preview_id: str, locks=None) -> dict:
         """Delete exactly what preview `preview_id` showed, or nothing.
 

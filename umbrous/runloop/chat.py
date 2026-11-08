@@ -247,7 +247,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
         message = pending.user_text
         model_name = model_name or pending.model
 
-    run_id, cancel = runs.start()
+    run_id, cancel = runs.start(chat_id)
     started = time.monotonic()
     outcome, text_parts = "error", []
     task_id: Optional[str] = None

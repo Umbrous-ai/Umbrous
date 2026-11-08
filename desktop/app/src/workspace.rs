@@ -76,6 +76,19 @@ struct Run {
     memory_ids: Vec<String>,
 }
 
+/// An offscreen stream stays connected. Its events are replayed on return;
+/// completed streams are loaded from persisted history instead.
+struct BackgroundRun {
+    run: Run,
+    chat: Option<api::ChatInfo>,
+    msgs: Vec<Msg>,
+    context: Option<(u64, u64)>,
+    approval: Option<PendingApproval>,
+    notice: Option<(String, MetaKind, bool)>,
+    load_access: bool,
+    events: Vec<StreamMsg>,
+}
+
 /// What the Memory section's inline field is for (M6).
 #[derive(Clone, Debug, PartialEq)]
 pub enum MemTarget {
@@ -173,6 +186,7 @@ pub struct Workspace {
     project_input: Option<Entity<Composer>>,
     project_error: Option<String>,
     run: Option<Run>,
+    background_runs: Vec<BackgroundRun>,
     pub(crate) notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
     /// M5: the open chat's last task, if the runtime was stopped in the middle
     /// of it and it can be resumed: shown as a notice with a Resume button.
@@ -374,6 +388,7 @@ impl Workspace {
             project_input: None,
             project_error: None,
             run: None,
+            background_runs: Vec::new(),
             notice: None,
             interrupted: None,
             load_access_after_stream: false,
@@ -422,6 +437,7 @@ impl Workspace {
                 self.phase = Phase::Failed(f);
                 self.api = None;
                 self.run = None;
+                self.background_runs.clear();
                 cx.notify();
             }
             BackendEvent::Ready { origin, launch_code, .. } => {
@@ -538,14 +554,15 @@ impl Workspace {
                     return;
                 }
                 if let Ok((a, b)) = r {
-                    // keep the open chat's title and state in step with the list
+                    this.chats = a;
+                    this.archived = b;
+                    this.merge_running_chats();
+                    // Keep the open chat's title in step with the merged list.
                     if let Some(cur) = this.chat.as_mut() {
-                        if let Some(fresh) = a.iter().chain(b.iter()).find(|c| c.id == cur.id) {
+                        if let Some(fresh) = this.chats.iter().chain(this.archived.iter()).find(|c| c.id == cur.id) {
                             *cur = fresh.clone();
                         }
                     }
-                    this.chats = a;
-                    this.archived = b;
                 }
             },
         );
@@ -906,11 +923,11 @@ impl Workspace {
         }
     }
 
-    /// Replace the transcript: stop following any reply that is streaming (the
-    /// runtime saves what arrived as "stopped"), and invalidate every pending
-    /// stream, parse or transcript response made for the old view.
+    /// Replace the visible transcript while keeping its stream alive offscreen.
+    /// Invalidate pending parse/transcript responses for the old view.
     fn begin_view(&mut self, cx: &mut Context<Self>) -> u64 {
         self.detach_run(cx);
+        self.rebuild_rows();
         self.view += 1;
         self.parse_in_flight = false;
         self.opening = None;
@@ -920,19 +937,67 @@ impl Workspace {
         self.view
     }
 
-    /// Stop a running reply and forget it. Its stream thread ends at its next
-    /// event, which closes the connection; the runtime then stops the model
-    /// and keeps the partial reply.
-    fn detach_run(&mut self, cx: &mut Context<Self>) {
-        self.approval = None; // Stop closes the request in the runtime as well
+    fn detach_run(&mut self, _cx: &mut Context<Self>) {
         if let Some(run) = self.run.take() {
-            // cancel_sent before stop: the stream thread must never see Stop without it
-            run.cancel_sent.store(run.run_id.is_some(), Ordering::SeqCst);
-            run.stop.store(true, Ordering::SeqCst);
-            if let Some(run_id) = run.run_id.clone() {
-                self.api_call(cx, move |api| api.post::<Value>("/api/chat/cancel", json!({ "run_id": run_id })), |_, _, _| {});
+            self.background_runs.push(BackgroundRun {
+                run, chat: self.chat.take(), msgs: std::mem::take(&mut self.msgs),
+                context: self.context.take(), approval: self.approval.take(), notice: self.notice.take(),
+                load_access: std::mem::take(&mut self.load_access_after_stream), events: Vec::new(),
+            });
+        } else {
+            self.approval = None;
+        }
+    }
+
+    fn background_events(&mut self, token: u64, batch: Vec<StreamMsg>, ended: bool, cx: &mut Context<Self>) {
+        let Some(index) = self.background_runs.iter().position(|b| b.run.token == token) else { return };
+        let background = &mut self.background_runs[index];
+        let mut created = false;
+        for event in &batch {
+            if let StreamMsg::Event(ev) = event {
+                if let Some(id) = ev.get("run_id").and_then(Value::as_str) {
+                    background.run.run_id = Some(id.into());
+                }
+                match ev.get("type").and_then(Value::as_str) {
+                    Some("approval_required") => background.approval = PendingApproval::from_event(ev),
+                    Some("tool_result") => background.approval = None,
+                    _ => {}
+                }
+                if ev.get("type").and_then(Value::as_str) == Some("chat_created") {
+                    if let Ok(mut chat) = serde_json::from_value::<api::ChatInfo>(ev["chat"].clone()) {
+                        if let Some(user) = background.msgs.get(background.run.msg_ix.saturating_sub(1)) {
+                            chat.title = user.text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect();
+                        }
+                        background.run.chat_id = chat.id.clone();
+                        background.chat = Some(chat);
+                        created = true;
+                    }
+                }
             }
-            logfile::event("ui.run_detached", &[]);
+        }
+        background.events.extend(batch);
+        if ended {
+            let chat = self.background_runs.remove(index).chat.map(|c| c.id);
+            self.stale_run_ended(chat, cx);
+        } else if created {
+            if self.project_id.is_none() {
+                self.project_id = self.background_runs[index].chat.as_ref().map(|c| c.project_id.clone());
+            }
+            self.load_projects(None, cx);
+        }
+        cx.notify();
+    }
+
+    fn merge_running_chats(&mut self) {
+        let running = self.background_runs.iter().filter_map(|b| b.chat.as_ref())
+            .chain(self.chat.as_ref().filter(|_| self.run.is_some())).cloned().collect::<Vec<_>>();
+        for chat in running {
+            if self.project_id.as_deref() != Some(chat.project_id.as_str()) { continue; }
+            if let Some(row) = self.chats.iter_mut().find(|c| c.id == chat.id) {
+                if row.title == "New chat" { row.title = chat.title; }
+            } else {
+                self.chats.insert(0, chat);
+            }
         }
     }
 
@@ -965,6 +1030,25 @@ impl Workspace {
             return;
         }
         let view = self.begin_view(cx);
+        if let Some(index) = self.background_runs.iter().position(|b| b.run.chat_id == id) {
+            let background = self.background_runs.remove(index);
+            self.chat = background.chat;
+            self.project_id = self.chat.as_ref().map(|c| c.project_id.clone());
+            self.msgs = background.msgs;
+            self.context = background.context;
+            self.approval = background.approval;
+            self.notice = background.notice;
+            self.load_access_after_stream = background.load_access;
+            self.interrupted = None;
+            self.pending_access = None;
+            self.run = Some(background.run);
+            self.rebuild_rows();
+            self.composer.update(cx, |c, cx| c.set_disabled(false, cx));
+            self.apply_stream(background.events, cx);
+            self.load_access(cx);
+            cx.notify();
+            return;
+        }
         self.opening = Some(id.clone());
         self.loading_chat = true;
         let t0 = Instant::now();
@@ -1044,8 +1128,8 @@ impl Workspace {
     fn set_chat_archived(&mut self, id: String, archive: bool, cx: &mut Context<Self>) {
         self.options_menu = false;
         self.chat_menu = None;
-        if archive && self.run.as_ref().map(|r| r.chat_id == id).unwrap_or(false) {
-            self.stop_reply(cx); // the reply is saved first; the runtime refuses archive while it runs
+        if archive {
+            self.stop_chat_reply(&id, cx); // archive stops work; navigation does not
         }
         let path = format!("/api/chats/{}/{}", id, if archive { "archive" } else { "unarchive" });
         self.api_call(
@@ -1227,9 +1311,9 @@ impl Workspace {
                 let applied = this.update(cx, |this, cx| {
                     if this.run.as_ref().map(|r| r.token) == Some(token) {
                         this.apply_stream(batch, cx);
+                    } else if this.background_runs.iter().any(|b| b.run.token == token) {
+                        this.background_events(token, batch, ended, cx);
                     } else if ended {
-                        // A reply you left. The runtime has saved what arrived; refresh
-                        // the lists, and the transcript if you are looking at that chat.
                         this.stale_run_ended(chat_of_run, cx);
                     }
                 });
@@ -1246,6 +1330,7 @@ impl Workspace {
         let t0 = Instant::now();
         self.perf.stream_batches += 1;
         let Some(ix) = self.run.as_ref().map(|r| r.msg_ix).filter(|&ix| ix < self.msgs.len()) else { return };
+        let sent_title: String = self.msgs[ix.saturating_sub(1)].text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect();
         let mut ended = false;
         let mut refresh_lists = false;
         for m in batch {
@@ -1262,12 +1347,14 @@ impl Workspace {
                             msg.meta = "Finding the right workspace…".into();
                         }
                         "chat_created" => {
-                            if let Ok(c) = serde_json::from_value::<api::ChatInfo>(ev["chat"].clone()) {
+                            if let Ok(mut c) = serde_json::from_value::<api::ChatInfo>(ev["chat"].clone()) {
+                                c.title = sent_title.clone();
                                 if let Some(run) = self.run.as_mut() {
                                     run.chat_id = c.id.clone();
                                 }
                                 self.project_id = Some(c.project_id.clone());
                                 self.chat = Some(c);
+                                refresh_lists = true;
                             }
                         }
                         "start" => {
@@ -1504,8 +1591,19 @@ impl Workspace {
         self.run.is_some()
     }
 
+    #[cfg(feature = "e2e")]
+    pub fn background_count(&self) -> usize { self.background_runs.len() }
+
     pub fn stop_reply(&mut self, cx: &mut Context<Self>) {
         if let Some(run) = self.run.as_ref() {
+            let id = run.chat_id.clone();
+            self.stop_chat_reply(&id, cx);
+        }
+    }
+
+    fn stop_chat_reply(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if let Some(run) = self.run.as_ref().filter(|r| r.chat_id == chat_id)
+            .or_else(|| self.background_runs.iter().find(|b| b.run.chat_id == chat_id).map(|b| &b.run)) {
             // cancel_sent before stop: the stream thread must never see Stop without it
             run.cancel_sent.store(run.run_id.is_some(), Ordering::SeqCst);
             run.stop.store(true, Ordering::SeqCst);
@@ -1761,7 +1859,8 @@ impl Workspace {
         for c in self.chats.iter().chain(self.archived.iter().filter(|_| self.show_archived)) {
             let id = c.id.clone();
             let is_current = current.as_deref() == Some(&c.id);
-            let streaming = self.run.as_ref().map(|r| r.chat_id == c.id).unwrap_or(false);
+            let streaming = self.run.as_ref().map(|r| r.chat_id == c.id).unwrap_or(false)
+                || self.background_runs.iter().any(|b| b.run.chat_id == c.id);
             let mut row = ui::nav(SharedString::from(format!("c-{}", c.id)), is_current);
             row = if c.archived {
                 // `.nav.archived .t`: subtle, italic
@@ -1770,7 +1869,11 @@ impl Workspace {
                 row.child(ui::nav_title(c.title.clone()))
             };
             if !c.archived {
-                row = if streaming { row.child(ui::dot(accent())) } else { row.child(ui::nav_count(ago(&c.updated_at))) };
+                let approval = (is_current && self.approval.is_some())
+                    || self.background_runs.iter().any(|b| b.run.chat_id == c.id && b.approval.is_some());
+                row = if approval { row.child(ui::nav_count("Approval").text_color(warning())) }
+                    else if streaming { row.child(ui::dot(accent())) }
+                    else { row.child(ui::nav_count(ago(&c.updated_at))) };
             }
             let menu_id = id.clone();
             let archive_id = id.clone();

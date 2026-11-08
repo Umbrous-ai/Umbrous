@@ -58,7 +58,10 @@ class TaskRoutes:
                 out = rt.reset.preview(body.get("selection"), lambda cid: rt.chat_locks.get(cid).locked())
                 self._send_json(200, out)
                 return 200, "reset_preview"
-            out = rt.reset.confirm(body.get("selection"), str(body.get("preview_id") or ""), rt.chat_locks)
+            if path == "/api/delete":
+                out = rt.reset.delete_target(body.get("kind"), body.get("id"), rt.chat_locks, rt.runs)
+            else:
+                out = rt.reset.confirm(body.get("selection"), str(body.get("preview_id") or ""), rt.chat_locks)
         except ResetError as exc:
             status = RESET_STATUS.get(exc.code, 400)
             payload = {"error": exc.code, "message": exc.message}

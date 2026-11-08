@@ -1,0 +1,87 @@
+wait_ready 30
+wait_models
+select_model background:3b
+send Background A
+wait_streaming
+new_chat
+expect messages 0
+expect background_runs 1
+select_model quick:3b
+send Foreground B
+wait_reply 60
+expect messages 2
+expect background_runs 1
+open_chat Background A
+expect running true
+expect messages 2
+new_chat
+add_project Other
+expect background_runs 1
+select_project General
+open_chat Background A
+expect running true
+wait_reply 60
+sleep 500
+expect background_runs 0
+open_chat Foreground B
+expect messages 2
+expect running false
+# Delete a chat running offscreen, without first stopping it.
+new_chat
+select_model background:3b
+send Delete background C
+wait_streaming
+new_chat
+expect background_runs 1
+delete_open chat Delete background C
+delete_confirm
+expect deletion closed
+expect sessions_lack Delete background C
+expect background_runs 0
+# Delete the open running project; another project's stream must continue.
+select_project Other
+send Keep Other E
+wait_streaming
+select_project General
+send Delete project D
+wait_streaming
+delete_open project General
+delete_confirm
+expect deletion closed
+expect projects_lack General
+select_project Other
+open_chat Keep Other E
+expect running true
+stop
+wait_idle 10
+expect running false
+expect background_runs 0
+# Pending approval belongs to its chat and survives navigation.
+new_chat
+attach_folder ask_before_read @OUT@/source
+select_model workspace-reader:3b
+check_tools
+send read readme.txt
+wait_approval 20
+new_chat
+expect background_runs 1
+open_chat read readme.txt
+expect running true
+expect approval fs.read
+approve once
+wait_reply 20
+expect last_text Background approval restored
+expect approval none
+# Deleting while an offscreen task waits for approval also stops it.
+new_chat
+set_access ask_before_read
+send read blocked.txt
+wait_approval 20
+new_chat
+delete_open chat read blocked.txt
+delete_confirm
+expect deletion closed
+expect background_runs 0
+expect sessions_lack read blocked.txt
+record end
+quit

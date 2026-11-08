@@ -12,13 +12,28 @@ It never removes the attached source directory or any file in it. Personal
 memory, other projects, task records and receipts remain. Even the last project
 can be deleted; **Create project** is then shown in the sidebar.
 
-The runtime uses the existing authenticated `/api/reset/preview` and `/api/reset`
-endpoints. A selection with `delete_projects: [project_id]` includes the project's
-chats and memory and deletes its database references in the same transaction.
-An empty project still has a previewable project item. Active replies block
-removal. Concurrent changes invalidate the preview instead of silently expanding
-the deletion. Normal deletion has one confirmation, not a preview wizard followed
-by a result dialog. A second review is needed only if the contents actually change.
+The dialog uses `/api/reset/preview` for its description and the authenticated
+`/api/delete` endpoint with the confirmed chat/project ID to delete. Running work
+in that container is cancelled first; deletion waits for it to stop and save its
+final state, then removes the data under the same chat locks. Incoming messages
+do not trigger another confirmation. Project deletion includes chats created
+while it is stopping work. Unrelated chats keep running, and source files remain.
+The selective **Start fresh** reset retains its separate exact-preview contract.
+
+## Background sessions
+
+Switching chats, selecting another project, and New chat keep active streams
+connected. Running chats remain marked in the sidebar; returning restores the
+live transcript and any pending approval. Other chats can run concurrently.
+Explicit Stop still cancels the selected task. Archive stops the archived chat;
+deleting stops the selected container's work. Closing the app still shuts down
+its local runtime; this change does not add an operating-system background service.
+
+Verification: `python3 -m unittest tests.test_running_deletion` covers active
+chat/project deletion, late run registration, isolation and no resurrection.
+`desktop/e2e/validate-background.sh WORKDIR` checks navigation, return, concurrent
+streams, deleting a background chat and deleting a running project in a disposable
+native app, then independently checks its stored data.
 
 ## References reviewed on 2026-11-08
 

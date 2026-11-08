@@ -29,18 +29,21 @@ class RunRegistry:
 
     def __init__(self) -> None:
         self._runs: Dict[str, CancelToken] = {}
+        self._chats: Dict[str, str] = {}
         self._lock = threading.Lock()
 
-    def start(self) -> "tuple[str, CancelToken]":
+    def start(self, chat_id: str = "") -> "tuple[str, CancelToken]":
         run_id = "run_" + secrets.token_hex(8)
         token = CancelToken()
         with self._lock:
             self._runs[run_id] = token
+            self._chats[run_id] = chat_id
         return run_id, token
 
     def finish(self, run_id: str) -> None:
         with self._lock:
             self._runs.pop(run_id, None)
+            self._chats.pop(run_id, None)
 
     def cancel(self, run_id: str) -> bool:
         with self._lock:
@@ -49,6 +52,13 @@ class RunRegistry:
             return False
         token.cancel()
         return True
+
+    def cancel_chats(self, chat_ids) -> None:
+        ids = set(chat_ids)
+        with self._lock:
+            tokens = [token for rid, token in self._runs.items() if self._chats.get(rid) in ids]
+        for token in tokens:
+            token.cancel()
 
     def cancel_all(self) -> None:
         with self._lock:
