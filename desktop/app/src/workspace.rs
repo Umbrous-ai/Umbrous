@@ -1744,7 +1744,7 @@ impl Workspace {
         if self.chats.is_empty() {
             // `.side-empty`
             let text = if self.project_id.is_none() {
-                "Create a project to start a chat.".into()
+                "No chats yet. Send a message to get started.".into()
             } else if archived_count > 0 {
                 format!("No active chats in {pname}. {archived_count} archived.")
             } else {
