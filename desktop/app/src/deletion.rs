@@ -63,6 +63,7 @@ impl Workspace {
                     // rows; a slow refresh must not leave another Delete to click.
                     let gone = |id: &str| done.items.iter().any(|item| item.id == id);
                     this.background_runs.retain(|b| !gone(&b.run.chat_id));
+                    this.unread_results.retain(|id, _| !gone(id));
                     if this.run.as_ref().map(|r| gone(&r.chat_id)).unwrap_or(false) { this.run = None; }
                     if this.chat.as_ref().map(|c| gone(&c.id)).unwrap_or(false)
                         || this.project_id.as_ref().map(|id| gone(id)).unwrap_or(false) {

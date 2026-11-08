@@ -187,6 +187,7 @@ pub struct Workspace {
     project_error: Option<String>,
     run: Option<Run>,
     background_runs: Vec<BackgroundRun>,
+    unread_results: std::collections::HashMap<String, bool>,
     pub(crate) notice: Option<(String, MetaKind, bool)>, // text, kind, offers Retry (Ollama)
     /// M5: the open chat's last task, if the runtime was stopped in the middle
     /// of it and it can be resumed: shown as a notice with a Resume button.
@@ -389,6 +390,7 @@ impl Workspace {
             project_error: None,
             run: None,
             background_runs: Vec::new(),
+            unread_results: std::collections::HashMap::new(),
             notice: None,
             interrupted: None,
             load_access_after_stream: false,
@@ -408,7 +410,7 @@ impl Workspace {
             access_seq: 0,
             access_error: None,
             sidebar: true,
-            details: true,
+            details: false,
             card_menu: false,
             projects_open: true,
             sessions_open: true,
@@ -977,7 +979,20 @@ impl Workspace {
         }
         background.events.extend(batch);
         if ended {
-            let chat = self.background_runs.remove(index).chat.map(|c| c.id);
+            let background = self.background_runs.remove(index);
+            let chat = background.chat.map(|c| c.id);
+            // Only a terminal event proves completion; transport loss does not.
+            let outcome = background.events.iter().rev().find_map(|event| match event {
+                StreamMsg::Event(ev) => match ev.get("type").and_then(Value::as_str) {
+                    Some("done") => Some(true),
+                    Some("error") => Some(false),
+                    _ => None,
+                },
+                _ => None,
+            });
+            if let (Some(id), Some(success)) = (&chat, outcome) {
+                self.unread_results.insert(id.clone(), success);
+            }
             self.stale_run_ended(chat, cx);
         } else if created {
             if self.project_id.is_none() {
@@ -1021,6 +1036,7 @@ impl Workspace {
     }
 
     fn open_chat_inner(&mut self, id: String, force: bool, cx: &mut Context<Self>) {
+        self.unread_results.remove(&id);
         // A → B → A: while B is loading, A is still on screen but no longer what
         // you asked for, so clicking A again must open A (and cancel B).
         let showing = self.opening.is_none() && self.run.is_none()
@@ -1469,11 +1485,11 @@ impl Workspace {
                     let ended_early = msg.meta.ends_with('…');
                     if let Some(e) = err {
                         if ended_early {
-                            msg.meta = e.message;
+                            msg.meta = format!("Connection lost: {} Work may still be running. Reopen this chat to check its saved result.", e.message);
                             msg.meta_kind = MetaKind::Bad;
                         }
                     } else if ended_early {
-                        msg.meta = "Stopped.".into();
+                        msg.meta = "Connection closed before a final result. Work may still be running; reopen this chat to check.".into();
                         msg.meta_kind = MetaKind::Warn;
                     }
                     // the runtime keeps text that had arrived, with its memory ids (Stop or a
@@ -1593,6 +1609,9 @@ impl Workspace {
 
     #[cfg(feature = "e2e")]
     pub fn background_count(&self) -> usize { self.background_runs.len() }
+
+    #[cfg(feature = "e2e")]
+    pub fn unread_count(&self) -> usize { self.unread_results.len() }
 
     pub fn stop_reply(&mut self, cx: &mut Context<Self>) {
         if let Some(run) = self.run.as_ref() {
@@ -1873,6 +1892,10 @@ impl Workspace {
                     || self.background_runs.iter().any(|b| b.run.chat_id == c.id && b.approval.is_some());
                 row = if approval { row.child(ui::nav_count("Approval").text_color(warning())) }
                     else if streaming { row.child(ui::dot(accent())) }
+                    else if let Some(success) = self.unread_results.get(&c.id) {
+                        row.child(ui::nav_count(if *success { "Done" } else { "Needs attention" })
+                            .text_color(if *success { accent() } else { warning() }))
+                    }
                     else { row.child(ui::nav_count(ago(&c.updated_at))) };
             }
             let menu_id = id.clone();
@@ -2261,35 +2284,34 @@ impl Workspace {
     fn render_right_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         use theme::*;
         let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_else(|| "Umbrous".into());
-        let row = |id: &'static str| {
-            div().id(id).group(id).flex().items_center().gap(px(14.)).h(px(30.)).px(px(20.))
-        };
         let title_row = |title: SharedString, button: gpui::Stateful<gpui::Div>| {
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .h(px(30.))
-                .px(px(20.))
-                .text_size(fs_13())
-                .text_color(text_default())
-                .child(title)
-                .child(button.mr(px(-6.)))
+            div().flex().items_center().justify_between().h(px(30.)).px(px(20.))
+                .text_size(fs_13()).text_color(text_default()).child(title).child(button)
         };
-        // Changes: what this session changed in your files. Nothing can change
-        // files yet (tools arrive in M3), so it reads +0 −0 rather than invent numbers.
-        let changes = row("card-changes")
-            .child(ui::icon("diff").text_color(text_strong()))
-            .child(div().flex_1().text_size(fs_13()).text_color(text_strong()).child("Changes"))
-            .child(div().flex().gap(px(6.)).text_size(fs_13()).child(div().text_color(success()).child("+0")).child(div().text_color(danger()).child("-0")));
-        let web = row("card-web")
-            .child(ui::icon("globe").text_color(text_default()))
-            .child(div().text_size(fs_13()).text_color(text_default()).child("Web search"));
-        // View all lists every source once there are more than fit here (M3)
-        let all = row("card-all")
-            .child(ui::hover_icon("connectors", &"card-all".into(), text_subtle(), text_default()))
-            .child(div().text_size(fs_13()).text_color(text_subtle()).group_hover("card-all", |s| s.text_color(text_default())).child("View all"))
-;
+        let workspace = self.access.as_ref().and_then(|a| a.workspace.as_ref());
+        let path = workspace.map(|w| w.root.clone()).filter(|p| !p.is_empty());
+        let mut context = div().px(px(20.)).py(px(12.)).flex().flex_col().gap(px(12.))
+            .child(div().text_color(text_strong()).child("Workspace"))
+            .child(div().text_size(fs_12()).child(path.clone().unwrap_or_else(|| "No folder connected. Describe the project and Umbrous will look for it.".into())))
+            .child(div().text_size(fs_12()).child(format!("Access: {}", self.access_pill_label())))
+            .child(div().text_size(fs_12()).child(format!("Model: {}", self.selected_model_label())));
+        if let Some(path) = path {
+            context = context.child(ui::pill("reveal-workspace").child("Show folder")
+                .on_click(move |_, _, cx| cx.reveal_path(std::path::Path::new(&path))));
+        }
+        let status = if self.approval.is_some() { "Waiting for your approval" }
+            else if self.run.is_some() { "Working — you can switch chats" }
+            else { "Ready" };
+        context = context.child(div().text_color(text_strong()).child("Activity"))
+            .child(div().text_size(fs_12()).child(status));
+        for background in &self.background_runs {
+            let id = background.run.chat_id.clone();
+            let title = background.chat.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "New chat".into());
+            let state = if background.approval.is_some() { "Approval needed" } else { "Working" };
+            context = context.child(ui::nav(SharedString::from(format!("activity-{id}")), false)
+                .child(ui::nav_title(title)).child(ui::nav_count(state))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_chat(id.clone(), cx))));
+        }
         let mut menu = None;
         if self.card_menu {
             let item = |id: &'static str, label: &'static str| {
@@ -2329,12 +2351,7 @@ impl Workspace {
                 this.card_menu = !this.card_menu;
                 cx.notify();
             }))))
-            .child(changes)
-            .child(div().mx(px(20.)).mt(px(7.)).mb(px(6.)).h(px(1.)).bg(card_divider()))
-            // Adding sources needs the tools that arrive in M3; the + is shown, as in the reference
-            .child(title_row("Sources".into(), ui::icon_btn("card-add-source", "plus", false)))
-            .child(web)
-            .child(all)
+            .child(context)
             .children(menu)
             .into_any_element()
     }
@@ -2724,16 +2741,10 @@ impl Workspace {
         let archived = self.chat.as_ref().map(|c| c.archived).unwrap_or(false);
         let mut notices: Vec<AnyElement> = vec![];
         if self.msgs.is_empty() && !self.loading_chat {
-            let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
-            notices.push(
-                ui::notice(None)
-                    .child(div().flex_1().min_w_0().child(if self.project_id.is_none() {
-                        "Send a message to start a chat. It will be saved in General.".to_string()
-                    } else { format!(
-                        "New chat in {project}. Ollama models run on this Mac. ChatGPT models send the conversation and tool results to OpenAI using your subscription. Chats are saved on this Mac."
-                    ) }))
-                    .into_any_element(),
-            );
+            notices.push(div().flex().flex_col().gap(px(12.))
+                .child(div().text_size(px(28.)).text_color(text_strong()).child("What would you like to work on?"))
+                .child(div().text_size(fs_14()).child("Ask a question, describe a change, or name a project. Umbrous will find the workspace when needed."))
+                .into_any_element());
         }
         if !archived && self.project_id.is_some() && self.access.as_ref().map(|a| a.workspace.is_none()).unwrap_or(false) {
             notices.push(
@@ -2798,7 +2809,7 @@ impl Workspace {
                 .child(div().w_full().max_w(px(696.)).mx_auto().flex().flex_col().gap(px(SP_16)).children(notices))
         };
         if self.msgs.is_empty() {
-            return div().flex_1().min_h_0().child(notice_col(notices, SP_48)).into_any_element();
+            return div().flex_1().min_h_0().flex().flex_col().justify_end().pb(px(SP_24)).child(notice_col(notices, SP_24)).into_any_element();
         }
         let host = cx.entity();
         let state = self.list.clone();
@@ -2898,7 +2909,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(ui::icon_btn("attach", "clip", false))
+
                             // this chat's access, on the left like Codex's permission pill
                             .child(self.render_access_control(cx))
                             .child(
@@ -3057,6 +3068,7 @@ impl Render for Workspace {
                 .child(self.render_header(cx))
                 .child(self.render_transcript(cx))
                 .child(self.render_composer(cx))
+                .when(self.msgs.is_empty() && !self.loading_chat, |d| d.child(div().flex_1().min_h_0()))
                 .children(self.render_options_menu(cx));
             app.when(self.sidebar, |d| d.child(self.render_sidebar(cx)))
                 .child(main)

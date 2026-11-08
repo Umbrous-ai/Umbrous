@@ -460,6 +460,9 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             wait_until(cx, window, 15, "profile", move |ws| ws.access.as_ref().and_then(|a| a.workspace.as_ref())
                 .map(|w| w.profile == want).unwrap_or(false)).await?;
         }
+        "wait_background_idle" => {
+            wait_until(cx, window, arg.parse().unwrap_or(60), "background work finished", |ws| ws.background_count() == 0).await?;
+        }
         "wait_idle" => {
             wait_until(cx, window, arg.parse().unwrap_or(60), "no reply running", |ws| !ws.is_running()).await?;
         }
@@ -470,6 +473,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "chat" => ws.chat.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| "none".into()),
                 "running" => ws.is_running().to_string(),
                 "background_runs" => ws.background_count().to_string(),
+                "unread_results" => ws.unread_count().to_string(),
                 "last_meta" => ws.msgs.last().map(|m| m.meta.clone()).unwrap_or_default(),
                 "last_text" => ws.msgs.last().map(|m| m.text.clone()).unwrap_or_default(),
                 "no_text" => (!ws.msgs.iter().any(|m| m.text.contains(val))).to_string(),

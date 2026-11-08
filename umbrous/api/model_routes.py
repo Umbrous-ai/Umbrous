@@ -65,13 +65,21 @@ class ModelRoutes:
         self.send_header("Connection", "close")
         self.end_headers()
         last = "ok"
+        attached = True
         try:
             for event in events:
                 if event["type"] == "error":
                     last = event["code"]
-                self.wfile.write((json.dumps(event) + "\n").encode("utf-8"))
-                self.wfile.flush()
-        except OSError:  # the page closed the connection: stop the model too
+                if attached:
+                    try:
+                        self.wfile.write((json.dumps(event) + "\n").encode("utf-8"))
+                        self.wfile.flush()
+                    except OSError:
+                        # The runtime owns accepted work. Keep consuming without
+                        # buffering: run_chat persists the result and releases its
+                        # lock normally. Explicit Stop/Delete still cancels it.
+                        attached = False
+                        log_event(log, "chat.client_detached", chat_id=str(body.get("chat_id", "")))
+        finally:
             events.close()
-            return 200, "client_gone"
         return 200, "chat_" + last

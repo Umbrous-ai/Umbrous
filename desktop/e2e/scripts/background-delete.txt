@@ -20,9 +20,13 @@ expect background_runs 1
 select_project General
 open_chat Background A
 expect running true
-wait_reply 60
-sleep 500
+new_chat
+wait_background_idle 60
 expect background_runs 0
+expect unread_results 1
+open_chat Background A
+expect unread_results 0
+expect running false
 open_chat Foreground B
 expect messages 2
 expect running false

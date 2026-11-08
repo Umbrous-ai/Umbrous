@@ -63,7 +63,7 @@ impl Composer {
         Composer {
             focus: cx.focus_handle(),
             content: String::new(),
-            placeholder: "Message a local model…".into(),
+            placeholder: "Ask Umbrous to do something…".into(),
             compact: false,
             selected: 0..0,
             reversed: false,

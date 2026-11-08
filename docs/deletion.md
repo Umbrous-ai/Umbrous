@@ -82,3 +82,17 @@ request attaches that folder with Workspace write and continues the same turn;
 commands still require approval. Existing connected workspaces retain their
 access settings. Missing or ambiguous targets produce a specific question.
 Ordinary chat does not attach a folder.
+
+## Client detach and completion visibility
+
+Accepted replies now continue in the runtime if their HTTP observer disconnects.
+The request worker consumes the run without buffering further events; normal
+persistence, explicit Stop, timeout, and stop-and-delete remain in force. This
+is not a replay or retry of the user's request. A runtime shutdown still ends
+work; this change does not install a background OS service or add live-stream
+reattachment. Reopening a chat reads its saved history.
+
+Replies completed while another chat is open display Done (or Needs attention
+for an error) until opened. These unread markers last for the current app
+process. They are cleared for deleted chats. A connection ending without a
+terminal event is not reported as a successful completion.
