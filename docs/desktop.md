@@ -9,8 +9,9 @@ projects, `config.json` and the `bin/umbrous` command line are unchanged and
 shared.
 
 Ollama remains a separate app. Install it from ollama.com and pull a model
-(`ollama pull qwen2.5:3b`). Umbrous says so in the window when Ollama is not
-running or has no models.
+(`ollama pull qwen2.5:3b`) for local inference. Alternatively, connect ChatGPT
+through the official Codex CLI and select a cloud model, reasoning level, and
+Standard or Fast in the model menu. See [ChatGPT setup](chatgpt-provider.md).
 
 ## Build
 

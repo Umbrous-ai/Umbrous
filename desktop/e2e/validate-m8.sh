@@ -26,7 +26,7 @@ ditto "$ROOT/dist/Umbrous-e2e.app" "$E2E" || abort "could not copy the e2e app"
 H="$W/h-m8"; PORT=18564
 python3 "$ROOT/desktop/e2e/stress.py" fake-memory $PORT >/dev/null 2>&1 & FAKE=$!; sleep 1
 kill -0 "$FAKE" 2>/dev/null || abort "the fake Ollama did not start (port $PORT in use?)"
-mkdir -p "$H" && echo "{\"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json" || abort "could not write $H/config.json"
+mkdir -p "$H" && echo "{\"codex_enabled\": false, \"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json" || abort "could not write $H/config.json"
 U() { PYTHONPATH="$ROOT" python3 -m umbrous --home "$H" "$@"; }
 U memory add personal "My codename is ZEBRA-SHIP-731" >/dev/null || abort "could not add personal memory"
 U memory add personal "I like answers in British English" --kind preference >/dev/null || abort "could not add personal memory"

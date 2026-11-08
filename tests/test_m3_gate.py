@@ -132,6 +132,28 @@ class GateUnitTests(unittest.TestCase):
         self.assertEqual((out.decision, out.code), ("denied", "stale_approval"))
         self.assertNotIn("garden", out.model_text)
 
+    def test_persistent_grant_rejects_changed_approval_scope(self):
+        self.access.set_profile("prj_general", "ask_before_read")
+        def change_workspace():
+            other = Path(self.tmp.name) / "other"
+            other.mkdir()
+            (other / "readme.txt").write_text("different workspace secret")
+            self.access.attach("prj_general", str(other), "ask_before_read")
+        ask, _ = self.answer_with("grant", before=change_workspace)
+        out = self.run_call("read_file", ask=ask, path="readme.txt")
+        self.assertEqual((out.decision, out.code), ("denied", "stale_approval"))
+        self.assertNotIn("different workspace secret", out.model_text)
+        self.assertEqual(self.access.grants("prj_general"), [])
+
+    def test_workspace_change_between_evaluation_and_execution_is_refused(self):
+        def changed(event):
+            if event == "started":
+                self.access.detach("prj_general")
+        out = self.gate.run(self.task, "prj_general", None, Call("read_file", {"path": "readme.txt"}),
+                            observer=changed)
+        self.assertEqual((out.decision, out.code), ("denied", "stale_policy"))
+        self.assertNotIn("garden", out.model_text)
+
     def test_outside_and_excluded_never_show_an_approval_card(self):
         self.access.set_profile("prj_general", "ask_before_read")
         never = lambda v, a: self.fail("an approval card was shown for a hard block")  # noqa: E731

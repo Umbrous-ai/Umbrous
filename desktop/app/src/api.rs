@@ -9,7 +9,7 @@
 use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone)]
@@ -104,7 +104,7 @@ impl Api {
     /// Returns when the runtime closes the stream. Blocking: run it off the UI thread.
     /// `resume`: an interrupted task to run again (M5) instead of sending `message`.
     /// `use_memory`: false sends the reply without memory items (M6), to compare.
-    pub fn chat_stream(&self, chat_id: &str, model: &str, message: &str, resume: Option<&str>, use_memory: bool,
+    pub fn chat_stream(&self, chat_id: &str, model: &str, message: &str, resume: Option<&str>, use_memory: bool, controls: &ModelControls,
                        mut on_event: impl FnMut(Value) -> bool) -> Result<()> {
         let mut body = match resume {
             Some(task) => json!({"chat_id": chat_id, "model": model, "resume_task": task}),
@@ -112,6 +112,10 @@ impl Api {
         };
         if !use_memory {
             body["use_memory"] = json!(false);
+        }
+        if model.starts_with("codex/") {
+            if let Some(effort) = &controls.reasoning_effort { body["reasoning_effort"] = json!(effort); }
+            body["speed"] = json!(controls.speed);
         }
         let resp = self
             .stream_agent
@@ -572,11 +576,49 @@ pub struct Transcript {
 pub struct ModelInfo {
     pub name: String,
     #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub reasoning_efforts: Vec<String>,
+    #[serde(default)]
+    pub default_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub speeds: Vec<String>,
+    #[serde(default)]
     pub parameter_size: String,
     pub context_length: Option<u64>,
     #[serde(default)]
     pub tool_capable: bool,
 }
+
+impl ModelInfo {
+    pub fn is_cloud(&self) -> bool { self.provider == "codex" || self.name.starts_with("codex/") }
+    pub fn label(&self) -> &str { if self.display_name.is_empty() { &self.name } else { &self.display_name } }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ModelControls {
+    pub reasoning_effort: Option<String>,
+    pub speed: String,
+}
+impl Default for ModelControls {
+    fn default() -> Self { Self { reasoning_effort: None, speed: "standard".into() } }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CodexStatus {
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub authenticated: bool,
+    #[serde(default)]
+    pub auth_type: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+#[derive(Debug, Deserialize)]
+pub struct CodexLogin { pub auth_url: String }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Models {

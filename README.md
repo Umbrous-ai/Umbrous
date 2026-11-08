@@ -2,9 +2,11 @@
 
 A local-first agent harness. Status: **M9, coding in a project folder: Umbrous edits files, runs the project's commands, fixes what fails, and continues an interrupted coding task without losing or repeating its changes** (built on M5's recovery; commands run as you and are not sandboxed, see docs/m9-coding.md).
 
+Use local Ollama models or connect your ChatGPT subscription through the official Codex CLI. Choose a model, its advertised reasoning level, and Standard or Fast in the model menu. ChatGPT is an explicit cloud choice: conversation context, selected memories, and approved tool results are sent to OpenAI. See [ChatGPT setup and limits](docs/chatgpt-provider.md).
+
 ```sh
 bin/umbrous          # start the local runtime and open the app (Python 3.9+, no dependencies)
-bin/umbrous models   # installed Ollama models, tool-call labels, exposure check
+bin/umbrous models   # available models, tool-call labels, local exposure check
 bin/umbrous workspace PROJECT FOLDER   # give a project's chats read-only access to one folder
 bin/umbrous workspace PROJECT FOLDER --profile workspace_code   # or let them edit files and run commands there (M9)
 bin/umbrous receipts --last 10         # what tools did
@@ -27,5 +29,7 @@ desktop/scripts/build-native.sh   # build dist/Umbrous.app and its .dmg (docs/de
 - [docs/m8-reset.md](docs/m8-reset.md): Start fresh: preview, cancel, a changed preview, what stays (task records, receipts, backups), derived caches
 - [docs/m9-coding.md](docs/m9-coding.md): coding in a folder: "work on /path", the edit and command tools, conflicts, the coding loop and report, recovery and resume of changes and commands, working on Umbrous itself, what is not sandboxed
 - [docs/desktop.md](docs/desktop.md): Umbrous.app for macOS (native GPUI interface, bundled Python): build, validation, measurements, limits
+- [docs/chatgpt-provider.md](docs/chatgpt-provider.md): ChatGPT sign-in, model/reasoning/speed controls, cloud context, and provider isolation
+- [docs/architecture.md](docs/architecture.md): runtime boundaries and the repository-wide refactor
 - [docs/receipts.md](docs/receipts.md): receipt format and redaction rules
 - [prototypes/](prototypes/): the front-end prototype the app is built on

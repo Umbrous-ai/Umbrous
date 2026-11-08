@@ -32,11 +32,11 @@ import secrets
 import sqlite3
 import threading
 import unicodedata
-from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from umbrous.timeutil import utc_now as _now
+from umbrous.persistence.session import session
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import ContextManager, List, Optional
 
 from umbrous.context.assemble import Turn
 
@@ -55,9 +55,6 @@ class HistoryError(ValueError):
         if code:
             self.code = code
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def name_key(name: str) -> str:
@@ -137,14 +134,8 @@ class HistoryStore:
         self.db_path = Path(db_path)
         self._write_lock = threading.Lock()
 
-    @contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=5)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
-            yield conn
-        finally:
-            conn.close()
+    def _db(self) -> ContextManager[sqlite3.Connection]:
+        return session(self.db_path)
 
     # ---------------------------------------------------------------- projects
     def list_projects(self) -> List[Project]:

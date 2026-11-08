@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Protocol, Tuple
 
 
 class ModelError(Exception):
@@ -61,6 +61,11 @@ class ModelInfo:
     quantization: str = ""
     context_length: Optional[int] = None      # from the model itself, if known
     advertised_capabilities: Tuple[str, ...] = ()  # what Ollama says (e.g. "tools"); not proof
+    provider: str = "ollama"
+    display_name: str = ""
+    reasoning_efforts: Tuple[str, ...] = ()
+    default_reasoning_effort: str = ""
+    speeds: Tuple[str, ...] = ("standard",)
 
 
 @dataclass(frozen=True)
@@ -125,3 +130,14 @@ class ChatDone:
     prompt_tokens: Optional[int] = None
     reply_tokens: Optional[int] = None
     done_reason: str = ""
+
+
+class ModelAdapter(Protocol):
+    """Provider boundary; tool calls are proposals, never executed by an adapter."""
+
+    def version(self) -> str: ...
+    def list_models(self): ...
+    def show(self, model: ModelInfo) -> ModelInfo: ...
+    def chat_stream(self, model: str, messages: list, *, options=None, cancel=None,
+                    deadlines=None, tools=None) -> Iterator: ...
+    def chat_once(self, model: str, messages: list, *, tools=None, options=None, timeout=180.0) -> dict: ...

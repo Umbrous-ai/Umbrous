@@ -46,9 +46,9 @@ import hashlib
 import json
 import re
 import sqlite3
-from contextlib import contextmanager
+from umbrous.persistence.session import session
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional
+from typing import Callable, Dict, ContextManager, List, Optional
 
 CHAT_ID = re.compile(r"^chat_[A-Za-z0-9_-]{8,64}$")
 MEM_ID = re.compile(r"^mem_[0-9a-f]{16}$")
@@ -112,14 +112,8 @@ class Reset:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
 
-    @contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=5)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
-            yield conn
-        finally:
-            conn.close()
+    def _db(self) -> ContextManager[sqlite3.Connection]:
+        return session(self.db_path)
 
     # ---------------------------------------------------------------- preview
     def preview(self, selection: object, busy: Optional[Callable[[str], bool]] = None) -> dict:

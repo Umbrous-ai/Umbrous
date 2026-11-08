@@ -51,11 +51,11 @@ from __future__ import annotations
 import logging
 import queue
 import re
-import secrets
 import threading
 import time
 from typing import Dict, Iterator, List, Optional
 
+from umbrous.runloop.coordination import ChatLocks, RunRegistry
 from umbrous.config import Config
 from umbrous.context.assemble import MessageTooLong, assemble, estimate_tokens
 from umbrous.memory.retrieve import Selection, select
@@ -67,6 +67,7 @@ from umbrous.history.store import HistoryError, HistoryStore
 from umbrous.logging_setup import log_event
 from umbrous.model.base import CancelToken, Cancelled, ChatDelta, ChatDone, ChatToolCalls, Deadlines, ModelError
 from umbrous.model.router import ModelRouter
+from umbrous.model.settings import GenerationSettings
 from umbrous.receipts.model import new_action_id, new_task_id
 from umbrous import selfsource
 from umbrous.tasks.recover import resume_brief, resume_info, scope_check
@@ -86,54 +87,9 @@ class ChatBusy(Exception):
     message = "This chat is already waiting for a reply. Stop it or wait for it to finish."
 
 
-class ChatLocks:
-    """One lock per chat id: a chat waits for at most one reply at a time."""
-
-    def __init__(self) -> None:
-        self._locks: Dict[str, threading.Lock] = {}
-        self._lock = threading.Lock()
-
-    def get(self, chat_id: str) -> threading.Lock:
-        with self._lock:
-            return self._locks.setdefault(chat_id, threading.Lock())
-
-    def forget(self, chat_ids) -> None:
-        """M8: a reset chat no longer exists; drop its lock."""
-        with self._lock:
-            for cid in chat_ids:
-                self._locks.pop(cid, None)
-
-
 # status stored with a kept partial reply, by error code
 PARTIAL_STATUS = {"cancelled": "stopped", "timeout": "timeout", "stream_interrupted": "interrupted",
                   "task_time_limit": "timeout"}
-
-
-class RunRegistry:
-    """Running replies by run id, so a separate request can stop one."""
-
-    def __init__(self) -> None:
-        self._runs: Dict[str, CancelToken] = {}
-        self._lock = threading.Lock()
-
-    def start(self) -> "tuple[str, CancelToken]":
-        run_id = "run_" + secrets.token_hex(8)
-        token = CancelToken()
-        with self._lock:
-            self._runs[run_id] = token
-        return run_id, token
-
-    def finish(self, run_id: str) -> None:
-        with self._lock:
-            self._runs.pop(run_id, None)
-
-    def cancel(self, run_id: str) -> bool:
-        with self._lock:
-            token = self._runs.get(run_id)
-        if token is None:
-            return False
-        token.cancel()
-        return True
 
 
 MAX_CALLS_PER_ROUND = 8      # tool calls run from one model turn; more are refused (with receipts)
@@ -194,7 +150,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
              approvals: bool = False, tasks: Optional[TaskStore] = None,
              resume_task: Optional[str] = None, memory: Optional[Memory] = None,
              use_memory: bool = True, review: Optional[Review] = None,
-             commands: Optional[CommandRegistry] = None) -> Iterator[dict]:
+             commands: Optional[CommandRegistry] = None, reasoning_effort=None, speed=None) -> Iterator[dict]:
     """`approvals`: the client can show approval cards and answer them (the
     browser page says so). Without it, a read that needs approval is refused at
     once with `approval_unavailable` instead of waiting for an answer that
@@ -214,6 +170,11 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
     as `candidates`, waiting for you; nothing is written to memory here. Not
     with `use_memory=False`, not when `memory_suggestions` is off, and never
     after a reply that did not complete. A failure here never fails the reply."""
+    try:
+        generation = GenerationSettings.parse(reasoning_effort, speed)
+    except ModelError as exc:
+        yield {"type": "error", "code": exc.code, "message": exc.message, "partial": False}
+        return
     if resume_task is not None:
         if not isinstance(resume_task, str) or not TASK_ID_RE.match(resume_task) or tasks is None:
             yield {"type": "error", "code": "no_such_task", "message": "That task does not exist.", "partial": False}
@@ -332,6 +293,8 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                 return
         try:
             model = router.resolve(model_name)
+            generation_options = generation.for_model(model)
+            adapter = router.adapter_for(model.name)
             # M3: tools are offered only when the chat's project has a workspace
             # AND this exact model (by digest) passed the tool-call probe.
             ws = gate.access.workspace(chat_info.project_id) if gate else None
@@ -449,9 +412,10 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             tools_info["off_reason"] = (f"{model.name} has not passed the tool check, so it cannot use the "
                                         "workspace. Run Check tools in the model menu, or pick a verified model.")
         yield {"type": "start", "run_id": run_id, "model_requested": model.name, "context": plan.summary(),
-               "task_id": task_id, "tools": tools_info, "resume_of": resume_task, "memory": mem.summary()}
+               "task_id": task_id, "tools": tools_info, "resume_of": resume_task, "memory": mem.summary(),
+               "provider": model.provider, "generation": generation_options}
 
-        options = {"num_ctx": plan.window, "num_predict": plan.reply_tokens}
+        options = {"num_ctx": plan.window, "num_predict": plan.reply_tokens, **generation_options}
         messages = list(plan.messages)
         used = plan.estimated_tokens
         if old is not None and coding:
@@ -479,7 +443,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                 if trun:
                     trun.step_started(offer)
                 step_text, calls, done = [], [], None
-                for piece in router.adapter.chat_stream(model.name, messages, options=options, cancel=cancel,
+                for piece in adapter.chat_stream(model.name, messages, options=options, cancel=cancel,
                                                         deadlines=deadlines_from(config),
                                                         tools=ollama_tools(tool_names) if offer else None):
                     if isinstance(piece, ChatDelta):
@@ -612,7 +576,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                 yield {"type": "suggesting"}
                 queued, dropped = _suggest(router, review, config, model.name, chat_info.project_id, chat_id,
                                            task_id, message, "".join(text_parts), trun.evidence, cancel,
-                                           plan.window)
+                                           plan.window, generation_options)
                 trun.memory_suggestions = {"queued": [{"id": c.id, "store": c.store, "kind": c.kind,
                                                        "basis": c.basis} for c in queued], "dropped": dropped}
             final = end_task("completed", None)
@@ -672,14 +636,15 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
 
 def _suggest(router: ModelRouter, review: Review, config: Config, model_name: str, project_id: str, chat_id: str,
              task_id: str, message: str, reply: str, evidence: list, cancel: CancelToken,
-             window: int) -> "tuple[list, Dict[str, int]]":
+             window: int, generation_options: Optional[dict] = None) -> "tuple[list, Dict[str, int]]":
     """M7: one model call for memory suggestions, then the review queue's
     checks. Never raises: the reply is already saved, and a failure here only
     means no suggestions (counted under `dropped`)."""
     parts: List[str] = []
     try:
-        for piece in router.adapter.chat_stream(model_name, propose_messages(message, reply),
-                                                options={"num_ctx": window, "num_predict": 400}, cancel=cancel,
+        for piece in router.adapter_for(model_name).chat_stream(model_name, propose_messages(message, reply),
+                                                options={"num_ctx": window, "num_predict": 400,
+                                                         **(generation_options or {})}, cancel=cancel,
                                                 deadlines=deadlines_from(config), tools=None):
             if isinstance(piece, ChatDelta):
                 parts.append(piece.text)

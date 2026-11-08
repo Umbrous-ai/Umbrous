@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
-from umbrous.gate.access import ALLOW, ASK, BLOCK, COMMANDS, PROFILES, WRITES, AccessStore, Workspace
+from umbrous.gate.access import ALLOW, ASK, BLOCK, COMMANDS, PROFILES, WRITES, AccessError, AccessStore, Workspace
 from umbrous.receipts.model import EvidenceRef, Receipt, new_action_id
 from umbrous.receipts.redaction import default_redactor
 from umbrous.receipts.store import ReceiptStore
@@ -232,6 +232,7 @@ class Verdict:
     clean_args: dict = field(default_factory=dict)
     binding: str = ""                # what a one-time approval is bound to
     via: str = ""                    # profile | grant | approval
+    policy_version: Optional[int] = None
 
     @property
     def resource(self) -> str:
@@ -418,7 +419,7 @@ class Gate:
         binding = hashlib.sha256(json.dumps({"action": action, "args": clean, "project": project_id,
                                              "policy": ws.policy_version}, sort_keys=True).encode()).hexdigest()
         rule = PROFILES[ws.profile]["rules"].get(action, BLOCK)
-        base = dict(action=action, parts=parts, clean_args=clean, binding=binding)
+        base = dict(action=action, parts=parts, clean_args=clean, binding=binding, policy_version=ws.policy_version)
         label = PROFILES[ws.profile]["label"]
         if rule == ALLOW:
             return Verdict(ALLOW, "allowed", f"Allowed by the {label} profile.", via="profile", **base)
@@ -466,7 +467,11 @@ class Gate:
                 return self._finish(task_id, action_id, project_id, chat_id, verdict, started, "denied",
                                     "approval_" + choice if choice != "deny" else "denied_by_you", text)
             if choice == "grant":
-                self.access.grant(project_id, verdict.action)
+                try:
+                    self.access.grant(project_id, verdict.action, expected_policy_version=verdict.policy_version)
+                except AccessError as exc:
+                    return self._finish(task_id, action_id, project_id, chat_id, verdict, started, "denied",
+                                        "stale_approval", str(exc))
             elif choice == "once":
                 self._approved[approval_id] = verdict.binding
             # Re-check at execution: the profile, workspace or grants may have changed
@@ -501,6 +506,9 @@ class Gate:
     def _execute(self, task_id, action_id, project_id, chat_id, v: Verdict, started,
                  cancelled: Callable[[], bool] = lambda: False, ctx: Optional[ToolContext] = None) -> Outcome:
         ws: Workspace = self.access.workspace(project_id)
+        if ws is None or ws.policy_version != v.policy_version:
+            return self._finish(task_id, action_id, project_id, chat_id, v, started, "denied",
+                                "stale_policy", "The workspace or profile changed before the tool could run.")
         a = v.clean_args
         ctx = ctx if ctx is not None else ToolContext()
         observed: dict = {}

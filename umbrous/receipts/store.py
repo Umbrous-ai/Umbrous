@@ -11,9 +11,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from contextlib import contextmanager
+from umbrous.persistence.session import session
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import ContextManager, List, Optional
 
 from umbrous.receipts.model import Receipt
 
@@ -23,13 +23,8 @@ class ReceiptStore:
         self.db_path = Path(db_path)
         self._lock = threading.Lock()
 
-    @contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=5)
-        try:
-            yield conn
-        finally:
-            conn.close()
+    def _db(self) -> ContextManager[sqlite3.Connection]:
+        return session(self.db_path, foreign_keys=False)
 
     def add(self, receipt: Receipt, project_id: Optional[str], chat_id: Optional[str]) -> dict:
         record = receipt.to_record()

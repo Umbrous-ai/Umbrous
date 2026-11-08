@@ -30,6 +30,7 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 _ALLOWED_KEYS = {
     "host", "port", "log_level", "open_browser",
+    "codex_enabled",
     # M1: local model chat
     "ollama_url", "system_prompt", "recent_turns", "context_tokens", "reply_tokens",
     "first_token_timeout_s", "idle_timeout_s", "total_timeout_s",
@@ -76,6 +77,7 @@ class Config:
     port: int = DEFAULT_PORT  # 0 lets the OS pick a free port (used by tests)
     log_level: str = "INFO"
     open_browser: bool = True
+    codex_enabled: bool = True   # discovery only; cloud inference requires selecting a codex/ model
     # M1: local model chat. See docs/m1-chat.md.
     ollama_url: str = DEFAULT_OLLAMA_URL   # must be loopback; Umbrous never sends chats elsewhere
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -197,6 +199,8 @@ def _validate(values: Mapping[str, Any]) -> dict:
         raise ConfigError("open_browser must be true or false")
     if "memory_suggestions" in out and not isinstance(out["memory_suggestions"], bool):
         raise ConfigError("memory_suggestions must be true or false")
+    if "codex_enabled" in out and not isinstance(out["codex_enabled"], bool):
+        raise ConfigError("codex_enabled must be true or false")
     return out
 
 

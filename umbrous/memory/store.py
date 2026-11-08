@@ -33,11 +33,11 @@ import json
 import secrets
 import sqlite3
 import threading
-from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from umbrous.timeutil import utc_now as _now
+from umbrous.persistence.session import session
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence
+from typing import ContextManager, List, Optional, Sequence
 
 from umbrous.receipts.redaction import default_redactor
 
@@ -57,9 +57,6 @@ class MemoryError_(ValueError):
         if code:
             self.code = code
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def new_memory_id() -> str:
@@ -104,14 +101,8 @@ class _Repo:
         self.db_path = Path(db_path)
         self._lock = threading.Lock()
 
-    @contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=5)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
-            yield conn
-        finally:
-            conn.close()
+    def _db(self) -> ContextManager[sqlite3.Connection]:
+        return session(self.db_path)
 
     def _kind(self, kind: object) -> str:
         if kind not in self.kinds:

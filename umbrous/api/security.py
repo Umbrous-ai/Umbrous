@@ -37,7 +37,7 @@ TOKEN_HEADER = "X-Umbrous-Token"
 LAUNCH_HEADER = "X-Umbrous-Launch"
 LAUNCH_CODE_TTL = 120.0  # seconds
 
-PUBLIC_PATHS = frozenset({"/", "/runtime-bridge.js", "/chat.js"})
+PUBLIC_PATHS = frozenset({"/", "/runtime-bridge.js", "/chat.js", "/model-controls.js"})
 CLAIM_PATH = "/api/session/claim"
 
 

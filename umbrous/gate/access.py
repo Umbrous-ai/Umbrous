@@ -20,11 +20,11 @@ import os
 import secrets
 import sqlite3
 import threading
-from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from umbrous.timeutil import utc_now as _now
+from umbrous.persistence.session import session
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, ContextManager, List, Optional
 
 CAPABILITIES = ("fs.list", "fs.read", "fs.search", "fs.find", "fs.write", "fs.edit", "cmd.run", "cmd.check")
 ALLOW, ASK, BLOCK = "allow", "ask", "block"
@@ -76,9 +76,6 @@ class AccessError(ValueError):
         self.message = message
         self.code = code
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -135,14 +132,8 @@ class AccessStore:
         self.home = Path(umbrous_home)
         self._lock = threading.Lock()
 
-    @contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=5)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
-            yield conn
-        finally:
-            conn.close()
+    def _db(self) -> ContextManager[sqlite3.Connection]:
+        return session(self.db_path)
 
     def _project_exists(self, c: sqlite3.Connection, project_id: str) -> None:
         if c.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
@@ -190,9 +181,15 @@ class AccessStore:
         if profile not in PROFILES:
             raise AccessError(f"Unknown profile {profile!r}.", "bad_profile")
         with self._lock, self._db() as c:
-            if c.execute("UPDATE workspaces SET profile = ? WHERE project_id = ?", (profile, project_id)).rowcount == 0:
-                raise AccessError("This project has no workspace.", "no_workspace")
-            self._bump(c, project_id)
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                if c.execute("UPDATE workspaces SET profile = ? WHERE project_id = ?", (profile, project_id)).rowcount == 0:
+                    raise AccessError("This project has no workspace.", "no_workspace")
+                self._bump(c, project_id)
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
         return self.workspace(project_id)
 
     def detach(self, project_id: str) -> None:
@@ -211,20 +208,33 @@ class AccessStore:
                 raise
 
     # ---------------------------------------------------------------- grants
-    def grant(self, project_id: str, capability: str) -> Grant:
+    def grant(self, project_id: str, capability: str, *, expected_policy_version: Optional[int] = None) -> Grant:
         if capability not in CAPABILITIES:
             raise AccessError(f"Unknown capability {capability!r}.", "bad_capability")
-        ws = self.workspace(project_id)
-        if ws is None:
-            raise AccessError("This project has no workspace.", "no_workspace")
-        existing = self.active_grant(project_id, capability)
-        if existing:
-            return existing
-        gid = "grt_" + secrets.token_hex(8)
         with self._lock, self._db() as c:
-            c.execute("INSERT INTO grants (id, project_id, capability, policy_version, granted_at) VALUES (?, ?, ?, ?, ?)",
-                      (gid, project_id, capability, ws.policy_version, _now()))
-        return self.active_grant(project_id, capability)
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                row = c.execute("SELECT COALESCE(a.version, 0) FROM workspaces w LEFT JOIN access_policy a "
+                                "ON a.project_id = w.project_id WHERE w.project_id = ?", (project_id,)).fetchone()
+                if row is None:
+                    raise AccessError("This project has no workspace.", "no_workspace")
+                if expected_policy_version is not None and row[0] != expected_policy_version:
+                    raise AccessError("The workspace or profile changed after approval was requested.", "stale_approval")
+                existing = c.execute("SELECT id, project_id, capability, granted_at FROM grants "
+                                     "WHERE project_id = ? AND capability = ? AND revoked_at IS NULL",
+                                     (project_id, capability)).fetchone()
+                if existing:
+                    result = Grant(*existing)
+                else:
+                    result = Grant("grt_" + secrets.token_hex(8), project_id, capability, _now())
+                    c.execute("INSERT INTO grants (id, project_id, capability, policy_version, granted_at) "
+                              "VALUES (?, ?, ?, ?, ?)",
+                              (result.id, project_id, capability, row[0], result.granted_at))
+                c.execute("COMMIT")
+                return result
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
 
     def active_grant(self, project_id: str, capability: str) -> Optional[Grant]:
         with self._db() as c:

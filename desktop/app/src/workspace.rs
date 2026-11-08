@@ -27,6 +27,9 @@ use crate::theme;
 use crate::ui;
 use crate::transcript::{self, MetaKind, Msg, Pos, Role, Row, Selection, SelectionHost};
 
+#[path = "model_controls.rs"]
+mod model_controls;
+
 const STREAM_BATCH: Duration = Duration::from_millis(33);
 /// At most this many frames of render-time correction after one reveal_end.
 const REVEAL_FRAMES: u8 = 10;
@@ -134,6 +137,10 @@ pub struct Workspace {
     pub models: Option<api::Models>,
     pub model: Option<String>,
     model_menu: bool,
+    model_preferences: model_controls::Preferences,
+    model_preferences_loaded: bool,
+    codex_status: api::CodexStatus,
+    codex_login_busy: bool,
     options_menu: bool,
     pub composer: Entity<Composer>,
     project_input: Option<Entity<Composer>>,
@@ -316,6 +323,10 @@ impl Workspace {
             models: None,
             model: None,
             model_menu: false,
+            model_preferences: model_controls::Preferences::default(),
+            model_preferences_loaded: false,
+            codex_status: api::CodexStatus::default(),
+            codex_login_busy: false,
             options_menu: false,
             composer,
             project_input: None,
@@ -1063,45 +1074,9 @@ impl Workspace {
         let _ = window;
     }
 
-    // ---------- models ----------
-    pub fn load_models(&mut self, open_menu: bool, cx: &mut Context<Self>) {
-        self.models_seq += 1;
-        let seq = self.models_seq;
-        self.api_call(cx, |api| api.get::<api::Models>("/api/models"), move |this, r, _| {
-            if seq != this.models_seq {
-                return;
-            }
-            let m = r.unwrap_or_else(|e| api::Models { reachable: false, version: None, error: Some(e.message), models: vec![] });
-            if !m.reachable {
-                this.notice = Some((m.error.clone().unwrap_or_else(|| "Ollama is not running.".into()), MetaKind::Warn, true));
-            } else if matches!(this.notice, Some((_, _, true))) {
-                this.notice = None;
-            }
-            if m.reachable {
-                if let Some(sel) = &this.model {
-                    if !m.models.iter().any(|x| &x.name == sel) {
-                        this.notice = Some((format!("The model {sel} is no longer installed. Pick a model to continue."), MetaKind::Warn, false));
-                        this.model = None;
-                    }
-                }
-                if this.model.is_none() && this.notice.is_none() {
-                    this.model = m.models.iter().find(|x| x.tool_capable).or(m.models.first()).map(|x| x.name.clone());
-                }
-            }
-            this.models = Some(m);
-            if open_menu {
-                this.model_menu = true;
-            }
-        });
-    }
-
-    fn ollama_up(&self) -> bool {
-        self.models.as_ref().map(|m| m.reachable).unwrap_or(false)
-    }
-
     fn can_send(&self) -> bool {
         matches!(self.phase, Phase::Ready)
-            && self.ollama_up()
+            && self.provider_up()
             && self.model.is_some()
             && self.run.is_none()
             && !self.chat.as_ref().map(|c| c.archived).unwrap_or(false)
@@ -1130,6 +1105,7 @@ impl Workspace {
         self.interrupted = None;
         let model = self.model.clone().unwrap();
         let use_memory = self.use_memory;
+        let controls = self.current_model_controls();
         let project_id = self.project_id.clone().unwrap_or_else(|| "prj_general".into());
         let existing = self.chat.as_ref().map(|c| c.id.clone());
         let existing_for_ui = existing.clone();
@@ -1190,7 +1166,7 @@ impl Workspace {
                         }
                     },
                 };
-                let r = api2.chat_stream(&chat_id, &model, &text, resume.as_deref(), use_memory, |ev| {
+                let r = api2.chat_stream(&chat_id, &model, &text, resume.as_deref(), use_memory, &controls, |ev| {
                     let more = api::keep_reading(stop.load(Ordering::SeqCst), cancel_sent.load(Ordering::SeqCst),
                                                  ev.get("type").and_then(Value::as_str).unwrap_or(""));
                     let _ = tx.unbounded_send(StreamMsg::Event(ev));
@@ -2453,7 +2429,7 @@ impl Workspace {
             notices.push(
                 ui::notice(None)
                     .child(div().flex_1().min_w_0().child(format!(
-                        "New chat in {project}. It talks to a model running in Ollama on this Mac; nothing leaves this machine. It is saved on this Mac once you send the first message."
+                        "New chat in {project}. Ollama models run on this Mac. ChatGPT models send the conversation and tool results to OpenAI using your subscription. Chats are saved on this Mac."
                     )))
                     .into_any_element(),
             );
@@ -2574,12 +2550,12 @@ impl Workspace {
     /// `.composer-dock` + `.composer`: raised box, strong border, radius 12, padding 12.
     fn render_composer(&mut self, cx: &mut Context<Self>) -> AnyElement {
         use theme::*;
-        let up = self.ollama_up();
+        let up = self.provider_up();
         let pill_label = match (&self.models, up) {
-            (None, _) => "Checking Ollama…".to_string(),
-            (Some(_), false) => "Ollama not running".to_string(),
-            (Some(m), true) if m.models.is_empty() => "No models installed".to_string(),
-            (Some(_), true) => self.model.clone().unwrap_or_else(|| "Pick a model".into()),
+            (None, _) => "Checking models…".to_string(),
+            (Some(_), false) => if self.model.as_deref().map(|m| m.starts_with("codex/")).unwrap_or(false) { "ChatGPT unavailable" } else { "Ollama not running" }.to_string(),
+            (Some(m), true) if m.models.is_empty() => "No models available".to_string(),
+            (Some(_), true) => self.selected_model_label(),
         };
         let running = self.run.is_some();
         let can_send = self.can_send() && !self.composer.read(cx).text().trim().is_empty();
@@ -2588,74 +2564,7 @@ impl Workspace {
         let pill_color = if ollama_down { warning() } else { text_default() };
         let pill_hover = if ollama_down { warning() } else { text_strong() };
 
-        let mut menu = None;
-        if self.model_menu {
-            // `.model-menu`: bottom 36, left 32, 380 wide, raised, strong border, radius 12, padding 6
-            let mut m = div()
-                .absolute()
-                .bottom(px(36.))
-                .left(px(32.))
-                .w(px(380.))
-                .p(px(6.))
-                .rounded(px(R_12))
-                .bg(bg_raised())
-                .border_1()
-                .border_color(border_strong())
-                .shadow_lg()
-                .flex()
-                .flex_col();
-            let empty = |t: &str| div().p(px(8.)).text_size(fs_12()).text_color(text_subtle()).child(t.to_string());
-            match &self.models {
-                Some(ms) if !ms.reachable => m = m.child(empty("Ollama is not running. Start it, then reopen this menu.")),
-                Some(ms) if ms.models.is_empty() => m = m.child(empty("No models installed. In a terminal: ollama pull qwen2.5:3b")),
-                Some(ms) => {
-                    for (i, md) in ms.models.iter().enumerate() {
-                        let name = md.name.clone();
-                        let label = if md.tool_capable { "tool calls verified" } else { "plain chat only" };
-                        let sub = [md.parameter_size.clone(), md.context_length.map(|c| format!("ctx {}", fmt_k(c))).unwrap_or_default(), label.to_string()]
-                            .into_iter()
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>()
-                            .join(" · ");
-                        let on = self.model.as_deref() == Some(&md.name);
-                        m = m.child(
-                            div()
-                                .id(("mm-row", i))
-                                .flex()
-                                .flex_col()
-                                .px(px(8.))
-                                .py(px(6.))
-                                .rounded(px(R_8))
-                                .cursor_pointer()
-                                .when(on, |d| d.bg(bg_selected()))
-                                .hover(|s| s.bg(bg_selected()))
-                                .child(div().text_size(fs_13()).text_color(text_strong()).child(md.name.clone()))
-                                .child(div().text_size(fs_12()).text_color(text_subtle()).child(sub))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    this.model = Some(name.clone());
-                                    this.model_menu = false;
-                                    if matches!(this.notice, Some((_, MetaKind::Warn, false))) {
-                                        this.notice = None;
-                                    }
-                                    cx.notify();
-                                })),
-                        );
-                    }
-                }
-                None => {}
-            }
-            m = m.child(
-                div()
-                    .mt(px(4.))
-                    .p(px(8.))
-                    .border_t_1()
-                    .border_color(border())
-                    .text_size(fs_12())
-                    .text_color(text_subtle())
-                    .child("Only installed models are listed. Umbrous never switches models for you."),
-            );
-            menu = Some(m);
-        }
+        let menu = self.render_model_menu(cx);
 
         // `.send`: 28px circle; strong when enabled, selected/subtle when disabled
         let active = can_send || running;
@@ -2721,6 +2630,7 @@ impl Workspace {
                                         }
                                     })),
                             )
+                            .children(self.render_model_controls(cx))
                             .child(ui::pill("tools-pill").child(ui::hover_icon("sliders", &"tools-pill".into(), text_default(), text_strong())).child("Tools · 4"))
                             .child(send)
                             .children(menu),

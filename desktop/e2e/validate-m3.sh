@@ -25,7 +25,7 @@ H="$W/h-m3"; PORT=18559
 python3 "$ROOT/desktop/e2e/stress.py" fake-workspace $PORT >/dev/null 2>&1 & FAKE=$!; sleep 1
 kill -0 "$FAKE" 2>/dev/null || abort "the fake Ollama did not start (port $PORT in use?)"
 WS=$(python3 "$ROOT/desktop/e2e/stress.py" seed-workspace "$W/m3-fixture") && [ -d "$WS" ] || abort "could not create the test workspace"
-mkdir -p "$H" && echo "{\"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json" || abort "could not write $H/config.json"
+mkdir -p "$H" && echo "{\"codex_enabled\": false, \"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json" || abort "could not write $H/config.json"
 U() { PYTHONPATH="$ROOT" python3 -m umbrous --home "$H" "$@"; }
 U probe workspace-reader:3b >/dev/null || abort "tool check on the fake model"
 U workspace General "$WS" --profile ask_before_read >/dev/null || abort "could not attach the workspace"

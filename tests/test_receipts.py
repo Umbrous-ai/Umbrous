@@ -105,6 +105,12 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(out["refresh_tokens"], "[REDACTED:field]")
         self.assertEqual(out["max_tokens"], 512)
 
+    def test_provider_credential_key_spellings(self):
+        keys = ("accessToken", "refreshToken", "clientSecret", "apiKey", "access-token", "privateKey", "Set-Cookie")
+        out = self.r.redact_obj({"provider": {key: "opaque-value" for key in keys}, "outputTokens": 12})
+        self.assertEqual(out["provider"], {key: "[REDACTED:field]" for key in keys})
+        self.assertEqual(out["outputTokens"], 12)
+
     def test_ordinary_text_is_untouched(self):
         text = "Read docs/a.md (120 bytes), tokens used: 512, see https://example.com/path"
         self.assertEqual(self.r.redact(text), text)

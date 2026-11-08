@@ -31,7 +31,7 @@ class RunningRuntime:
         self._tmp = tempfile.TemporaryDirectory()
         self.home = self._given_home or Path(self._tmp.name) / "home"
         make_private_dir(self.home)
-        self.config = load_config(self.home, {"port": 0, **self.overrides})
+        self.config = load_config(self.home, {"port": 0, "codex_enabled": False, **self.overrides})
         self.log_stream = io.StringIO()
         setup_logging(self.config, stream=self.log_stream)
         self.conn = db.connect(self.config.db_path)

@@ -49,16 +49,16 @@ echo "### e2e build: UI checks"
 e2e persist-1 persist-1.txt "$W/h-persist"
 e2e persist-2 persist-2.txt "$W/h-persist"
 e2e crash crash.txt "$W/h-crash"
-mkdir -p "$W/h-noollama"; echo '{"ollama_url": "http://127.0.0.1:9"}' > "$W/h-noollama/config.json"
+mkdir -p "$W/h-noollama"; echo '{"codex_enabled": false, "ollama_url": "http://127.0.0.1:9"}' > "$W/h-noollama/config.json"
 e2e no-ollama states.txt "$W/h-noollama"
 python3 "$ROOT/desktop/e2e/stress.py" fake-empty 18557 >/dev/null 2>&1 & FAKE=$!; sleep 1
-mkdir -p "$W/h-nomodels"; echo '{"ollama_url": "http://127.0.0.1:18557"}' > "$W/h-nomodels/config.json"
+mkdir -p "$W/h-nomodels"; echo '{"codex_enabled": false, "ollama_url": "http://127.0.0.1:18557"}' > "$W/h-nomodels/config.json"
 e2e no-models states.txt "$W/h-nomodels"; kill $FAKE
 
 echo "### regression: navigation while a reply streams, stale responses"
 python3 "$ROOT/desktop/e2e/stress.py" fake-ollama 18558 >/dev/null 2>&1 & FAKE=$!; sleep 1
 python3 "$ROOT/desktop/e2e/stress.py" seed-reference "$W/h-nav" >/dev/null
-echo '{"ollama_url": "http://127.0.0.1:18558"}' > "$W/h-nav/config.json"
+echo '{"codex_enabled": false, "ollama_url": "http://127.0.0.1:18558"}' > "$W/h-nav/config.json"
 e2e nav-stream nav-stream.txt "$W/h-nav"; kill $FAKE
 if grep -q '"error"' "$W"/*.jsonl 2>/dev/null; then fail "e2e assertions failed:"; grep -h '"error"' "$W"/*.jsonl; fi
 echo "### M3: Ask before read in the app, the switch, reads (validate-m3.sh)"

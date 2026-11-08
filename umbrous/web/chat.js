@@ -24,9 +24,14 @@
     return e;
   };
 
+  const modelControls = window.UmbrousModelControls;
+  if (!modelControls) return; // Fail closed if the controls module did not load.
+  const preferences = new modelControls.Preferences();
+  let codexStatus = {};
+  let loginBusy = false;
   let api = null;
   let models = [];
-  let selected = null;     // exact model name; never changed behind your back
+  let selected = preferences.selected;     // exact model name; never changed behind your back
   let chatId = null;       // the open chat; null until the first message creates it (M2)
   let chatArchived = false;
   let projects = [];
@@ -34,7 +39,7 @@
   let showArchived = false;
   let view = 0;            // bumped on every chat switch, so a late answer for an old view is ignored
   let run = null;          // { runId, controller } while a reply is streaming
-  let ollamaUp = false;
+  let providersUp = false;
   let autoPicked = false;  // a default may be picked on the first load only; never again
   let downNotice = null;   // the single "Ollama is not running" notice with its Retry button
 
@@ -102,7 +107,7 @@
     if (run) { send.disabled = false; send.title = 'Stop'; setIcon(STOP); return; }
     send.title = 'Send';
     setIcon(ARROW);
-    send.disabled = !($('#input').value.trim() && selected && ollamaUp && !chatArchived);
+    send.disabled = !($('#input').value.trim() && selected && selectedAvailable() && !chatArchived);
   }
 
   // ---------- Details panel ----------
@@ -121,29 +126,99 @@
     if (m.probe) return 'Plain chat only';
     return 'Tool calls not checked';
   }
+  function currentModel() { return models.find((m) => m.name === selected); }
+  function selectedAvailable() { const m = currentModel(); return providersUp && !!m && preferences.supports(m); }
   function renderPill() {
     const name = $('#model-pill-name');
     if (!name) return;
-    if (!ollamaUp) name.textContent = 'Ollama not running';
-    else if (!models.length) name.textContent = 'No models installed';
-    else name.textContent = selected || 'Pick a model';
+    if (!providersUp) name.textContent = selected && selected.startsWith('codex/') ? 'ChatGPT unavailable' : 'Ollama not running';
+    else if (!models.length) name.textContent = 'No models available';
+    else name.textContent = currentModel()?.display_name || selected || 'Pick a model';
+    let summary = $('#inference-controls');
+    if (summary) summary.remove();
+    const model = currentModel();
+    if (modelControls.isCloud(model)) {
+      const settings = preferences.forModel(model);
+      summary = el('button', 'pill', 'Reasoning · ' + (settings.reasoning_effort || 'default') + ' · ' + (settings.speed === 'fast' ? 'Fast' : 'Standard'));
+      summary.type = 'button';
+      summary.id = 'inference-controls';
+      summary.title = 'ChatGPT subscription · conversation and tool results are sent to OpenAI';
+      summary.onclick = (e) => { e.stopPropagation(); openMenu(); };
+      $('#model-pill').after(summary);
+    }
     syncSend();
+  }
+  function inferenceOptions(model) {
+    const box = el('div', 'mm-foot');
+    const settings = preferences.forModel(model);
+    for (const [field, title, values] of [
+      ['reasoning_effort', 'Reasoning effort', model.reasoning_efforts || []],
+      ['speed', 'Speed', ['standard', 'fast']],
+    ]) {
+      const label = el('label', 'mm-sub', title + ' ');
+      const select = el('select', 'pill');
+      select.id = field === 'speed' ? 'speed-select' : 'reasoning-select';
+      select.setAttribute('aria-label', title);
+      const allowed = field === 'speed' ? model.speeds || [] : values;
+      if (settings[field] && !allowed.includes(settings[field])) {
+        const missing = el('option', '', settings[field] + ' (unavailable)');
+        missing.value = settings[field]; missing.disabled = true; missing.selected = true; select.appendChild(missing);
+      }
+      for (const value of values) {
+        const option = el('option', '', value === 'fast' ? 'Fast' : value === 'standard' ? 'Standard' : value);
+        option.value = value; option.disabled = !allowed.includes(value); option.selected = settings[field] === value;
+        select.appendChild(option);
+      }
+      if (!values.length) { const option = el('option', '', 'Model default'); option.value = ''; select.appendChild(option); select.disabled = true; }
+      select.onchange = () => { preferences.change(model, field, select.value); renderPill(); };
+      label.appendChild(select); box.appendChild(label);
+    }
+    box.appendChild(el('div', 'mm-sub', 'ChatGPT subscription · Fast uses more allowance. Conversation and tool results are sent to OpenAI.'));
+    if (!preferences.supports(model)) box.appendChild(el('div', 'mm-sub', 'Choose supported settings before sending; the saved choice is unavailable.'));
+    return box;
+  }
+  async function connectChatGPT() {
+    if (loginBusy) return;
+    loginBusy = true; openMenu();
+    try {
+      const result = await getJson('/api/providers/codex/login', { json: {} });
+      const url = modelControls.loginUrl(result.auth_url);
+      if (!url) throw new Error('The provider returned an unexpected sign-in address. Nothing was opened.');
+      const n = notice('Continue in the official sign-in page, then Refresh the model menu. Credentials stay with Codex. ', '');
+      const link = el('a', 'ext', 'Sign in with ChatGPT');
+      link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      n.appendChild(link);
+      // An explicit link also works when browsers block asynchronous popups.
+      window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (error) { notice(error.message || 'Could not start sign-in.', 'bad'); }
+    finally { loginBusy = false; openMenu(); }
   }
   function closeMenu() { const m = $('#model-menu'); if (m) m.remove(); }
   function openMenu() {
     closeMenu();
     const menu = el('div', 'model-menu');
     menu.id = 'model-menu';
-    if (!ollamaUp) menu.appendChild(el('div', 'mm-empty', 'Ollama is not running. Start it, then reopen this menu.'));
-    else if (!models.length) menu.appendChild(el('div', 'mm-empty', 'No models installed. In a terminal: ollama pull qwen2.5:3b'));
+    const account = el('div', 'mm-foot');
+    const login = el('button', 'pill', loginBusy ? 'Opening sign-in…' : codexStatus.authenticated ? 'ChatGPT connected' : 'Connect ChatGPT');
+    login.type = 'button'; login.id = 'connect-chatgpt'; login.disabled = loginBusy;
+    login.onclick = connectChatGPT;
+    const refresh = el('button', 'pill', 'Refresh'); refresh.type = 'button'; refresh.id = 'refresh-models';
+    refresh.onclick = () => loadModels(true);
+    account.append(login, refresh);
+    if (codexStatus.error) account.appendChild(el('div', 'mm-sub', codexStatus.error));
+    if (codexStatus.available === false) account.appendChild(el('div', 'mm-sub', 'ChatGPT requires the Codex CLI. Install or enable it, then Refresh.'));
+    menu.appendChild(account);
+    if (!models.length) menu.appendChild(el('div', 'mm-empty', 'No models available. Start Ollama for local models, or connect ChatGPT.'));
     for (const m of models) {
       const row = el('div', 'mm-row' + (m.name === selected ? ' on' : ''));
       const pick = el('button', 'mm-pick');
       pick.type = 'button';
-      pick.appendChild(el('span', 'mm-name', m.name));
-      pick.appendChild(el('span', 'mm-sub', [m.parameter_size, m.context_length ? 'ctx ' + fmtK(m.context_length) : '', modelLabel(m)].filter(Boolean).join(' · ')));
+      pick.appendChild(el('span', 'mm-name', m.display_name || m.name));
+      pick.appendChild(el('span', 'mm-sub', [modelControls.isCloud(m) ? 'ChatGPT · cloud' : 'Ollama · local', m.parameter_size, m.context_length ? 'ctx ' + fmtK(m.context_length) : '', modelLabel(m)].filter(Boolean).join(' · ')));
       if (m.probe && !m.probe.passed) pick.title = m.probe.detail;
-      pick.onclick = () => { selected = m.name; closeMenu(); renderPill(); };
+      pick.onclick = () => { selected = m.name; preferences.choose(selected); closeMenu(); renderPill();
+        if (modelControls.isCloud(m)) notice('ChatGPT uses your subscription. The conversation, selected memories, and approved tool results are sent to OpenAI.', '');
+      };
       const check = el('button', 'mm-check', m.probe ? 'Re-check' : 'Check tools');
       check.type = 'button';
       check.title = 'Run a real tool-call round trip with a harmless test tool';
@@ -162,8 +237,9 @@
       row.appendChild(pick);
       row.appendChild(check);
       menu.appendChild(row);
+      if (m.name === selected && modelControls.isCloud(m)) menu.appendChild(inferenceOptions(m));
     }
-    const foot = el('div', 'mm-foot', 'Only installed models are listed. Umbrous never switches models for you.');
+    const foot = el('div', 'mm-foot', 'Choose the provider and model explicitly. Umbrous never switches models for you.');
     menu.appendChild(foot);
     $('#model-pill').after(menu);
   }
@@ -176,22 +252,24 @@
     } catch (_) {
       j = { reachable: false, error: 'The Umbrous runtime is not answering.', models: [] };
     }
-    ollamaUp = !!j.reachable;
+    try { codexStatus = await getJson('/api/providers/codex'); } catch (_) { codexStatus = {}; }
+    providersUp = !!j.reachable;
     models = j.models || [];
-    if (!ollamaUp) {
+    if (!providersUp) {
       // Ollama is down: keep the chosen model as it is (it may come back), offer Retry.
       ollamaDown(j.error);
     } else {
       if (downNotice) { downNotice.remove(); downNotice = null; }
       if (selected && !models.some((m) => m.name === selected)) {
         // The chosen model disappeared: say so and wait for an explicit choice.
-        notice(`The model ${selected} is no longer installed. Pick a model to continue.`, 'warn');
+        notice(`The model ${selected} ${selected.startsWith("codex/") ? "is unavailable" : "is no longer installed"}. Pick a model to continue.`, 'warn');
         selected = null;
       }
       // Only on the very first load is a default picked (shown in the pill before
       // anything is sent). After that, a missing choice stays missing until you pick.
       if (!selected && !autoPicked && models.length) {
-        selected = (models.find((m) => m.tool_capable) || models[0]).name;
+        const local = models.filter((m) => !modelControls.isCloud(m));
+        selected = (local.find((m) => m.tool_capable) || local[0] || {}).name || null;
       }
     }
     autoPicked = true;
@@ -207,7 +285,7 @@
     return n;
   }
   function ollamaDown(message) {
-    ollamaUp = false;
+    providersUp = false;
     renderPill();
     if (downNotice && downNotice.isConnected) {          // one notice at a time, moved to the end
       downNotice.firstChild.textContent = message || 'Ollama is not running.';
@@ -1111,7 +1189,7 @@
   function setComposer() {
     const input = $('#input');
     input.disabled = chatArchived;
-    input.placeholder = chatArchived ? 'Archived chats are read-only. Restore it to continue.' : 'Message a local model…';
+    input.placeholder = chatArchived ? 'Archived chats are read-only. Restore it to continue.' : 'Message the selected model…';
     syncSend();
   }
   function showSessionProject() { const sp = $('#sess-project'); if (sp) sp.textContent = projectName(projectId); }
@@ -1139,14 +1217,13 @@
     n.id = 'new-chat-notice';
     t.appendChild(n);
     newChatNotice();
-    if (api && !ollamaUp) loadModels();
+    if (api && !providersUp) loadModels();
     markCurrent();
   }
 
   function newChatNotice() {
     const n = $('#new-chat-notice');
-    if (n) n.textContent = `New chat in ${projectName(projectId)}. It talks to a model running in Ollama on this Mac; ` +
-      'nothing leaves this machine. It is saved on this Mac once you send the first message.';
+    if (n) n.textContent = `New chat in ${projectName(projectId)}. Ollama runs locally. ChatGPT sends the conversation and tool results to OpenAI using your subscription. Chats are saved on this Mac.`;
   }
 
   function renderStoredReply(m, receipts, tasks) {
@@ -1289,6 +1366,10 @@
   }
 
   async function send(q, resumeTask) {
+    // Capture the choices before asynchronous chat creation; later menu changes
+    // affect the next request, never one already submitted.
+    const requestModel = selected;
+    const requestControls = modelControls.isCloud(currentModel()) ? preferences.forModel(currentModel()) : {};
     const t = thread();
     const u = el('div', 'msg-u');
     u.style.marginTop = '48px';
@@ -1300,7 +1381,7 @@
     const steps = el('div', 'tool-steps');
     steps.hidden = true;
     const answer = el('p', 'answer plain');
-    const meta = el('div', 'reply-meta', 'Waiting for ' + selected + '…');
+    const meta = el('div', 'reply-meta', 'Waiting for ' + requestModel + '…');
     reply.append(ctxNote, steps, answer, meta);
     const pending = [];   // step rows waiting for their result, oldest first
     t.appendChild(reply);
@@ -1318,7 +1399,8 @@
         if (mine !== view) return;
         chatId = j.chat.id;
       }
-      const body = { chat_id: chatId, model: selected, approvals: true };
+      const body = { chat_id: chatId, model: requestModel, approvals: true };
+      Object.assign(body, requestControls);
       if (resumeTask) body.resume_task = resumeTask; else body.message = q;
       if (!useMemory) body.use_memory = false;
       const r = await api.fetch('/api/chat', { json: body, signal: controller.signal });
@@ -1369,7 +1451,7 @@
             closeApprovals(steps, 'Answered.');
             const row = pending.shift();
             if (row) { settleStep(row, ev.decision, ev.summary || ev.message, ev.notice); row.title = ev.receipt_id; stepDetail(row, ev); }
-            meta.textContent = selected + ' is answering…';
+            meta.textContent = requestModel + ' is answering…';
           } else if (ev.type === 'delta') {
             answer.appendChild(document.createTextNode(ev.text));
             scrollDown();
@@ -1381,7 +1463,7 @@
             const secs = (ev.ms / 1000).toFixed(1) + 's';
             const toks = ev.prompt_tokens != null ? `${ev.prompt_tokens} in (est. ${ev.estimated_prompt_tokens}) · ${ev.reply_tokens} out` : '';
             meta.textContent = [ev.model, toks, secs].filter(Boolean).join(' · ');
-            meta.title = 'Exact model reported by Ollama for this reply';
+            meta.title = 'Exact model reported by the provider for this reply';
             const sm = $('#sess-model'); if (sm) sm.textContent = ev.model;
             const src = sourcesLine(ev.evidence);
             if (src) reply.appendChild(src);
@@ -1449,7 +1531,7 @@
       e.preventDefault();
       if (run) { stop(); return; }
       const q = input.value.trim();
-      if (!q || !selected || !ollamaUp || chatArchived) return;
+      if (!q || !selected || !selectedAvailable() || chatArchived) return;
       input.value = '';
       send(q);
     };

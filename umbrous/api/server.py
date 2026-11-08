@@ -67,62 +67,46 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
-from urllib.parse import parse_qs
 
 from umbrous import MILESTONE, __version__
+from umbrous.api.history_routes import HistoryRoutes
+from umbrous.api.access_routes import AccessRoutes
+from umbrous.api.memory_routes import MemoryRoutes
+from umbrous.api.task_routes import TaskRoutes
+from umbrous.api.model_routes import ModelRoutes
+from umbrous.api.contracts import (ACCESS_PATH, APPROVAL_PATH, ACCESS_STATUS,
+                                   MEMORY_STATUS, HISTORY_STATUS, BASE_HEADERS)
 from umbrous.api.security import CLAIM_PATH, LAUNCH_HEADER, AccessPolicy, evaluate
 from umbrous.config import Config, ensure_loopback
 from umbrous.logging_setup import log_event
-from umbrous.model.base import Deadlines
 from umbrous.model.exposure import ExposureReport, check_exposure
-from umbrous.model.ollama import OllamaAdapter
 from umbrous.model.router import ModelRouter
+from umbrous.model.factory import create_router
 from umbrous.receipts.redaction import default_redactor
 from umbrous.gate.access import AccessError, AccessStore
-from umbrous.gate.gate import Gate, GateError
+from umbrous.gate.gate import Gate
 from umbrous.history.store import HistoryError, HistoryStore
 from umbrous.memory.review import Review
 from umbrous.memory.store import Memory, MemoryError_
 from umbrous.receipts.store import ReceiptStore
-from umbrous.reset import Reset, ResetError
-from umbrous.runloop.chat import ChatLocks, RunRegistry, run_chat
+from umbrous.reset import Reset
+from umbrous.runloop.coordination import ChatLocks, RunRegistry
 from umbrous.tools.run import CommandRegistry
-from umbrous.tasks.recover import recover, resume_info
+from umbrous.tasks.recover import recover
 from umbrous.tasks.store import TaskStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PAGE_PATH = REPO_ROOT / "prototypes" / "umbrous-harness.html"
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
-STATIC_FILES = {"/runtime-bridge.js": WEB_DIR / "runtime-bridge.js", "/chat.js": WEB_DIR / "chat.js"}
+STATIC_FILES = {"/runtime-bridge.js": WEB_DIR / "runtime-bridge.js",
+                "/chat.js": WEB_DIR / "chat.js",
+                "/model-controls.js": WEB_DIR / "model-controls.js"}
 MAX_BODY = 256 * 1024  # a chat message is capped at 32,000 characters (up to ~6 bytes each as JSON)
 
 log = logging.getLogger("umbrous.api")
 
-CHAT_PATH = re.compile(r"^/api/chats/(chat_[A-Za-z0-9_-]{8,64})(/archive|/unarchive)?$")
-PROJECT_ID_RE = re.compile(r"^prj_[A-Za-z0-9_-]{4,64}$")
-ACCESS_PATH = re.compile(r"^/api/projects/(prj_[A-Za-z0-9_-]{4,64})/"
-                         r"(access|workspace|workspace/detach|profile|grants/(grt_[0-9a-f]{16})/revoke)$")
-APPROVAL_PATH = re.compile(r"^/api/approvals/(apr_[0-9a-f]{16})$")
-TASK_ID_RE = re.compile(r"^tsk_[0-9a-f]{28}$")
-ACCESS_STATUS = {"no_such_project": 404, "no_workspace": 409, "no_such_grant": 404}
-MEMORY_PATH = re.compile(r"^/api/memory/(mem_[0-9a-f]{16})(/delete)?$")
-MEMORY_STATUS = {"no_such_memory": 404, "no_such_project": 404, "memory_full": 409,
-                 "no_such_candidate": 404, "already_decided": 409, "duplicate": 409}
-CANDIDATE_PATH = re.compile(r"^/api/memory/candidates/(cand_[0-9a-f]{16})(/accept|/reject)?$")
-RESET_STATUS = {"no_such_chat": 404, "no_such_memory": 404, "no_such_project": 404, "preview_changed": 409,
-                "chat_busy": 409}
-HISTORY_STATUS = {"no_such_project": 404, "no_such_chat": 404, "project_exists": 409, "bad_project_name": 400}
 
 _INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
-
-BASE_HEADERS = {
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
-    "Cache-Control": "no-store",
-    "X-Frame-Options": "DENY",
-    "Cross-Origin-Opener-Policy": "same-origin",
-    "Cross-Origin-Resource-Policy": "same-origin",
-}
 
 
 def content_security_policy(html: str) -> str:
@@ -163,10 +147,7 @@ class Runtime:
         self.page = PAGE_PATH.read_bytes()
         self.page_csp = content_security_policy(self.page.decode("utf-8"))
         self.static = {path: f.read_bytes() for path, f in STATIC_FILES.items()}
-        self.router = router or ModelRouter(
-            OllamaAdapter(config.ollama_url, Deadlines(first_token=config.first_token_timeout_s,
-                                                       idle=config.idle_timeout_s, total=config.total_timeout_s)),
-            config.db_path)
+        self.router = router or create_router(config)
         self.history = HistoryStore(config.db_path)
         self.access = AccessStore(config.db_path, config.home)
         self.receipts = ReceiptStore(config.db_path)
@@ -214,7 +195,7 @@ class Runtime:
         }
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(HistoryRoutes, AccessRoutes, MemoryRoutes, TaskRoutes, ModelRoutes, BaseHTTPRequestHandler):
     server_version = "Umbrous"
     sys_version = ""
     timeout = 15  # seconds; a stalled client cannot hold a thread forever
@@ -287,6 +268,8 @@ class Handler(BaseHTTPRequestHandler):
             status["exposure"] = rt.refresh_exposure().as_dict()
             self._send_json(200, status)
             return 200, "models"
+        if path in ("/api/providers/codex", "/api/providers/codex/login"):
+            return self._provider(path)
         if self.command == "POST" and path in ("/api/models/probe", "/api/chat", "/api/chat/cancel"):
             body = self._read_json()
             if body is None:
@@ -327,313 +310,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not_found"})
         return 404, "not_found"
 
-    def _tasks(self, path: str) -> Tuple[int, str]:
-        """Task state, for the report and the trace (M4). Read-only: tasks are
-        removed only by `bin/umbrous purge tasks`."""
-        rt = self.runtime
-        if self.command != "GET":
-            self._send_json(405, {"error": "method_not_allowed"})
-            return 405, "method_not_allowed"
-        if path == "/api/tasks":
-            q = parse_qs(self.path.split("?", 1)[1].split("#", 1)[0] if "?" in self.path else "")
-            chat_id = (q.get("chat_id") or [""])[0]
-            if not (chat_id and CHAT_PATH.match("/api/chats/" + chat_id)):
-                self._send_json(400, {"error": "give chat_id"})
-                return 400, "bad_query"
-            listed = rt.tasks.for_chat(chat_id)
-            for t in listed:     # M5: say whether an interrupted task can be resumed
-                if t["status"] == "unknown":
-                    t["resume"] = resume_info(rt.tasks, rt.history, t["task_id"])
-            self._send_json(200, {"tasks": listed})
-            return 200, "tasks"
-        task_id = path[len("/api/tasks/"):]
-        task = rt.tasks.get(task_id) if TASK_ID_RE.match(task_id) else None
-        if task is None:
-            self._send_json(404, {"error": "no_such_task"})
-            return 404, "no_such_task"
-        task["resume"] = resume_info(rt.tasks, rt.history, task_id, task)
-        self._send_json(200, task)
-        return 200, "task"
-
-    def _memory(self, path: str) -> Tuple[int, str]:
-        """The two memory stores (M6): inspect, add, edit, delete. Nothing here
-        reads or changes chats; deleting an item removes only that item."""
-        rt, cmd = self.runtime, self.command
-        mem, hist = rt.memory, rt.history
-
-        def exists(project_id: str) -> bool:
-            try:
-                hist.get_project(project_id)
-                return True
-            except HistoryError:
-                return False
-
-        if path == "/api/memory" and cmd == "GET":
-            q = parse_qs(self.path.split("?", 1)[1].split("#", 1)[0] if "?" in self.path else "")
-            project_id = (q.get("project_id") or [""])[0]
-            if project_id and not PROJECT_ID_RE.match(project_id):
-                self._send_json(400, {"error": "bad_project_id"})
-                return 400, "bad_project_id"
-            personal = []
-            for m in mem.personal.list():
-                d = m.as_dict()
-                d["applies"] = bool(project_id) and (m.scope == "all" or project_id in m.scope)
-                personal.append(d)
-            out = {"personal": personal, "project_id": project_id or None, "project": [],
-                   "limits": {"max_items": rt.config.memory_max_items, "max_tokens": rt.config.memory_tokens}}
-            if project_id:
-                hist.get_project(project_id)
-                out["project"] = [m.as_dict() for m in mem.project.list(project_id)]
-                out["candidates"] = [c.as_dict() for c in rt.review.list(project_id)]   # M7: waiting for you
-            else:
-                out["candidates"] = []
-            self._send_json(200, out)
-            return 200, "memory"
-        if path == "/api/memory/candidates" and cmd == "GET":
-            q = parse_qs(self.path.split("?", 1)[1].split("#", 1)[0] if "?" in self.path else "")
-            project_id = (q.get("project_id") or [""])[0] or None
-            status = (q.get("status") or ["pending"])[0]
-            if project_id and not PROJECT_ID_RE.match(project_id):
-                self._send_json(400, {"error": "bad_project_id"})
-                return 400, "bad_project_id"
-            if status not in ("pending", "accepted", "rejected", "all"):
-                self._send_json(400, {"error": "bad_status"})
-                return 400, "bad_status"
-            items = rt.review.list(project_id, None if status == "all" else status)
-            self._send_json(200, {"candidates": [c.as_dict() for c in items]})
-            return 200, "candidates"
-        if cmd != "POST":
-            self._send_json(405, {"error": "method_not_allowed"})
-            return 405, "method_not_allowed"
-        body = self._read_json()
-        if body is None:
-            self._send_json(400, {"error": "expected a JSON object with Content-Type: application/json"})
-            return 400, "bad_json"
-        if path == "/api/memory":
-            store = body.get("store")
-            if store == "personal":
-                item = mem.personal.add(body.get("text"), body.get("kind") or "fact", body.get("scope", "all"),
-                                        project_exists=exists)
-            elif store == "project":
-                project_id = str(body.get("project_id") or "")
-                if not PROJECT_ID_RE.match(project_id):
-                    self._send_json(400, {"error": "bad_project_id"})
-                    return 400, "bad_project_id"
-                item = mem.project.add(project_id, body.get("text"), body.get("kind") or "decision")
-            else:
-                self._send_json(400, {"error": "bad_store", "message": 'store is "personal" or "project"'})
-                return 400, "bad_store"
-            log_event(log, "memory.added", memory_id=item.id, store=item.store, kind=item.kind)  # never the text
-            self._send_json(201, {"item": item.as_dict()})
-            return 201, "memory_added"
-        cm = CANDIDATE_PATH.match(path)
-        if cm:
-            return self._candidate(cm.group(1), (cm.group(2) or "").lstrip("/"), body, exists)
-        m = MEMORY_PATH.match(path)
-        if not m:
-            self._send_json(404, {"error": "not_found"})
-            return 404, "not_found"
-        item_id, delete = m.group(1), bool(m.group(2))
-        item = mem.get(item_id)
-        if item is None:
-            raise MemoryError_("That memory item does not exist.", "no_such_memory")
-        if delete:
-            mem.delete(item_id)
-            log_event(log, "memory.deleted", memory_id=item_id, store=item.store)
-            self._send_json(200, {"deleted": item_id, "store": item.store})
-            return 200, "memory_deleted"
-        if item.store == "personal":
-            item = mem.personal.update(item_id, body.get("text"), body.get("kind"), body.get("scope"),
-                                       project_exists=exists)
-        else:
-            if "scope" in body or "project_id" in body:
-                raise MemoryError_("A project item stays in its project. Delete it and add it to the other "
-                                   "project instead.", "bad_scope")
-            item = mem.project.update(item_id, body.get("text"), body.get("kind"))
-        log_event(log, "memory.edited", memory_id=item_id, store=item.store)
-        self._send_json(200, {"item": item.as_dict()})
-        return 200, "memory_edited"
-
-    def _reset(self, path: str) -> Tuple[int, str]:
-        """M8: preview a selective reset, or confirm exactly a preview."""
-        rt = self.runtime
-        if self.command != "POST":
-            self._send_json(405, {"error": "method_not_allowed"})
-            return 405, "method_not_allowed"
-        body = self._read_json()
-        if body is None:
-            self._send_json(400, {"error": "expected a JSON object with Content-Type: application/json"})
-            return 400, "bad_json"
-        try:
-            if path == "/api/reset/preview":
-                out = rt.reset.preview(body.get("selection"), lambda cid: rt.chat_locks.get(cid).locked())
-                self._send_json(200, out)
-                return 200, "reset_preview"
-            out = rt.reset.confirm(body.get("selection"), str(body.get("preview_id") or ""), rt.chat_locks)
-        except ResetError as exc:
-            status = RESET_STATUS.get(exc.code, 400)
-            payload = {"error": exc.code, "message": exc.message}
-            if exc.preview is not None:
-                payload["preview"] = exc.preview
-            self._send_json(status, payload)
-            return status, exc.code
-        # ids and counts only, never titles or memory text
-        log_event(log, "reset.done", **{k: v for k, v in out["deleted"].items()},
-                  ids=[i["id"] for i in out["items"]][:50])
-        self._send_json(200, out)
-        return 200, "reset_done"
-
-    def _candidate(self, cand_id: str, action: str, body: dict, exists) -> Tuple[int, str]:
-        """M7: review one suggestion. Accept is the only way a suggestion
-        reaches memory, and it is checked again first."""
-        rev = self.runtime.review
-        edits = {k: body.get(k) for k in ("text", "kind", "store", "scope")}
-        if action == "reject":
-            cand = rev.reject(cand_id)
-            log_event(log, "memory.candidate_rejected", candidate_id=cand_id)   # never the text
-            self._send_json(200, {"candidate": cand.as_dict()})
-            return 200, "candidate_rejected"
-        if action == "accept":
-            cand, item = rev.accept(cand_id, project_exists=exists, **edits)
-            log_event(log, "memory.candidate_accepted", candidate_id=cand_id, memory_id=item.id, store=item.store,
-                      kind=item.kind, edited=cand.edited)
-            self._send_json(200, {"candidate": cand.as_dict(), "item": item.as_dict()})
-            return 200, "candidate_accepted"
-        cand = rev.edit(cand_id, project_exists=exists, **edits)
-        log_event(log, "memory.candidate_edited", candidate_id=cand_id)
-        self._send_json(200, {"candidate": cand.as_dict()})
-        return 200, "candidate_edited"
-
-    def _access(self, path: str) -> Tuple[int, str]:
-        """The access view, approvals and receipts (M3)."""
-        rt, cmd = self.runtime, self.command
-        if path == "/api/receipts":
-            if cmd != "GET":
-                self._send_json(405, {"error": "method_not_allowed"})
-                return 405, "method_not_allowed"
-            q = parse_qs(self.path.split("?", 1)[1].split("#", 1)[0] if "?" in self.path else "")
-            chat_id, task_id = (q.get("chat_id") or [""])[0], (q.get("task_id") or [""])[0]
-            if task_id and TASK_ID_RE.match(task_id):
-                records = rt.receipts.for_task(task_id)
-            elif chat_id and CHAT_PATH.match("/api/chats/" + chat_id):
-                records = rt.receipts.for_chat(chat_id)
-            else:
-                self._send_json(400, {"error": "give chat_id or task_id"})
-                return 400, "bad_query"
-            self._send_json(200, {"receipts": records})
-            return 200, "receipts"
-        m = APPROVAL_PATH.match(path)
-        if m:
-            if cmd != "POST":
-                self._send_json(405, {"error": "method_not_allowed"})
-                return 405, "method_not_allowed"
-            body = self._read_json()
-            if body is None:
-                self._send_json(400, {"error": "expected a JSON object with Content-Type: application/json"})
-                return 400, "bad_json"
-            try:
-                rt.gate.approvals.answer(m.group(1), str(body.get("choice", "")))
-            except GateError as exc:
-                self._send_json(409, {"error": "approval_closed", "message": str(exc)})
-                return 409, "approval_closed"
-            log_event(log, "gate.approval_answered", approval_id=m.group(1), choice=body.get("choice"))
-            self._send_json(200, {"ok": True})
-            return 200, "approval_answered"
-        m = ACCESS_PATH.match(path)
-        project_id, what = m.group(1), m.group(2)
-        rt.history.get_project(project_id)  # 404 for an unknown project
-        if what == "access":
-            if cmd != "GET":
-                self._send_json(405, {"error": "method_not_allowed"})
-                return 405, "method_not_allowed"
-            self._send_json(200, rt.access.view(project_id))
-            return 200, "access_view"
-        if cmd != "POST":
-            self._send_json(405, {"error": "method_not_allowed"})
-            return 405, "method_not_allowed"
-        body = self._read_json()
-        if body is None:
-            self._send_json(400, {"error": "expected a JSON object with Content-Type: application/json"})
-            return 400, "bad_json"
-        if what == "workspace":
-            rt.access.attach(project_id, body.get("root"), str(body.get("profile") or "workspace_read"))
-            reason = "workspace_attached"
-        elif what == "workspace/detach":
-            rt.access.detach(project_id)
-            reason = "workspace_detached"
-        elif what == "profile":
-            rt.access.set_profile(project_id, str(body.get("profile", "")))
-            reason = "profile_changed"
-        else:
-            rt.access.revoke(project_id, m.group(3))
-            reason = "grant_revoked"
-        log_event(log, "access." + reason, project_id=project_id)  # never the folder path
-        self._send_json(200, rt.access.view(project_id))
-        return 200, reason
-
-    def _history(self, path: str) -> Tuple[int, str]:
-        """Projects and chats (M2). Archive and unarchive are the only changes
-        to an existing chat; nothing here deletes."""
-        hist, cmd = self.runtime.history, self.command
-        if path == "/api/projects" and cmd == "GET":
-            self._send_json(200, {"projects": [p.as_dict() for p in hist.list_projects()]})
-            return 200, "projects"
-        if path == "/api/chats" and cmd == "GET":
-            query = parse_qs(self.path.split("?", 1)[1].split("#", 1)[0] if "?" in self.path else "")
-            project_id = (query.get("project_id") or [""])[0]
-            if not PROJECT_ID_RE.match(project_id):
-                self._send_json(400, {"error": "bad_project_id"})
-                return 400, "bad_project_id"
-            archived = (query.get("archived") or ["0"])[0] in ("1", "true")
-            self._send_json(200, {"project_id": project_id, "archived": archived,
-                                  "chats": [c.as_dict() for c in hist.list_chats(project_id, archived)]})
-            return 200, "chats"
-        match = CHAT_PATH.match(path)
-        if match and cmd == "GET" and not match.group(2):
-            chat = hist.get_chat(match.group(1))
-            self._send_json(200, {"chat": chat.as_dict(), "messages": [m.as_dict() for m in hist.messages(chat.id)]})
-            return 200, "chat"
-        if not match and path not in ("/api/projects", "/api/chats"):
-            self._send_json(404, {"error": "not_found"})
-            return 404, "not_found"
-        if cmd != "POST" or (match and not match.group(2)):  # e.g. DELETE: there is no delete
-            self._send_json(405, {"error": "method_not_allowed"})
-            return 405, "method_not_allowed"
-        body = self._read_json()
-        if body is None:
-            self._send_json(400, {"error": "expected a JSON object with Content-Type: application/json"})
-            return 400, "bad_json"
-        if path == "/api/projects":
-            project = hist.create_project(body.get("name"))
-            log_event(log, "history.project_created", project_id=project.id)
-            self._send_json(201, {"project": project.as_dict()})
-            return 201, "project_created"
-        if path == "/api/chats":
-            project_id = str(body.get("project_id", ""))
-            if not PROJECT_ID_RE.match(project_id):
-                self._send_json(400, {"error": "bad_project_id"})
-                return 400, "bad_project_id"
-            chat = hist.create_chat(project_id)
-            log_event(log, "history.chat_created", chat_id=chat.id, project_id=project_id)
-            self._send_json(201, {"chat": chat.as_dict()})
-            return 201, "chat_created"
-        archive = match.group(2) == "/archive"
-        chat_id = hist.get_chat(match.group(1)).id  # raises for an unknown chat
-        # Archiving takes the same per-chat lock as a reply. While a reply is
-        # running the archive is refused, so the reply is always saved first
-        # (the page stops the reply, waits for it to end, then archives).
-        lock = self.runtime.chat_locks.get(chat_id)
-        if not lock.acquire(blocking=False):
-            self._send_json(409, {"error": "chat_busy", "message": "A reply is still running in this chat. "
-                                  "Stop it or let it finish, then archive."})
-            return 409, "chat_busy"
-        try:
-            chat = hist.set_archived(chat_id, archive)
-        finally:
-            lock.release()
-        log_event(log, "history.chat_archived" if archive else "history.chat_unarchived", chat_id=chat.id)
-        self._send_json(200, {"chat": chat.as_dict()})
-        return 200, "archived" if archive else "unarchived"
 
     def _read_json(self) -> Optional[dict]:
         """Only JSON bodies are accepted. Requiring the JSON content type also
@@ -647,44 +323,6 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return data if isinstance(data, dict) else None
 
-    def _probe(self, body: dict) -> Tuple[int, str]:
-        from umbrous.model.base import ModelError
-        try:
-            result, model = self.runtime.router.probe(str(body.get("model", "")))
-        except ModelError as exc:
-            self._send_json(409, {"error": exc.code, "message": exc.message})
-            return 409, exc.code
-        self._send_json(200, {"model": model.name, "passed": result.passed, "stage": result.stage,
-                              "detail": result.detail, "ms": result.ms})
-        log_event(log, "model.probe", model=model.name, passed=result.passed, stage=result.stage, ms=result.ms)
-        return 200, "probe_passed" if result.passed else "probe_failed"
-
-    def _chat(self, body: dict) -> Tuple[int, str]:
-        """Stream the reply as JSON lines. No Content-Length: the response ends
-        when the connection closes (HTTP/1.0), which the page treats as the end."""
-        rt = self.runtime
-        events = run_chat(rt.config, rt.router, rt.history, rt.chat_locks, rt.runs, str(body.get("chat_id", "")),
-                          str(body.get("model", "")), body.get("message"), gate=rt.gate,
-                          approvals=body.get("approvals") is True, tasks=rt.tasks,
-                          resume_task=body.get("resume_task") if "resume_task" in body else None,
-                          memory=rt.memory, use_memory=body.get("use_memory") is not False, review=rt.review, commands=rt.commands)
-        self.send_response(200)
-        for k, v in BASE_HEADERS.items():
-            self.send_header(k, v)
-        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        last = "ok"
-        try:
-            for event in events:
-                if event["type"] == "error":
-                    last = event["code"]
-                self.wfile.write((json.dumps(event) + "\n").encode("utf-8"))
-                self.wfile.flush()
-        except OSError:  # the page closed the connection: stop the model too
-            events.close()
-            return 200, "client_gone"
-        return 200, "chat_" + last
 
     def _send(self, status: int, body: bytes, ctype: str, extra: Optional[Dict[str, str]] = None) -> None:
         self.send_response(status)
@@ -706,6 +344,13 @@ class LoopbackServer(ThreadingHTTPServer):
     # True lets a restart reuse the port while old connections sit in TIME_WAIT. It does not
     # let a second program listen on the same address and port; that still fails clearly.
     allow_reuse_address = True
+
+    def server_close(self) -> None:
+        runtime = getattr(self.RequestHandlerClass, "runtime", None)
+        if runtime is not None:
+            runtime.runs.cancel_all()
+            runtime.router.close()
+        super().server_close()
 
 
 def make_server(config: Config, schema_version: int, launches: int,

@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime, timezone
+from umbrous.timeutil import utc_now as _now
+from umbrous.persistence.session import open_connection
 from pathlib import Path
 from typing import Optional
 
@@ -293,9 +294,6 @@ class SchemaError(RuntimeError):
     pass
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
 
 def connect(path: Path) -> sqlite3.Connection:
     """Open (creating if needed, mode 0600) and migrate the database."""
@@ -304,10 +302,13 @@ def connect(path: Path) -> sqlite3.Connection:
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
         os.close(fd)
     os.chmod(path, 0o600)
-    conn = sqlite3.connect(str(path), isolation_level=None)  # we manage transactions explicitly
-    conn.execute("PRAGMA foreign_keys = ON")
-    migrate(conn)
-    return conn
+    conn = open_connection(path)
+    try:
+        migrate(conn)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def schema_version(conn: sqlite3.Connection) -> int:

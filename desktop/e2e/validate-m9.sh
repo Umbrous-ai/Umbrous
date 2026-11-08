@@ -30,7 +30,7 @@ python3 "$ROOT/desktop/e2e/stress.py" fake-coding $PORT >/dev/null 2>&1 & FAKE=$
 kill -0 "$FAKE" 2>/dev/null || abort "the fake Ollama did not start (port $PORT in use?)"
 A=$(python3 "$ROOT/desktop/e2e/stress.py" seed-coding-project "$W/m9-fixture/a") && [ -d "$A" ] || abort "could not create project A"
 B=$(python3 "$ROOT/desktop/e2e/stress.py" seed-coding-project "$W/m9-fixture/b") && [ -d "$B" ] || abort "could not create project B"
-mkdir -p "$H" && echo "{\"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json" || abort "could not write $H/config.json"
+mkdir -p "$H" && echo "{\"codex_enabled\": false, \"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H/config.json" || abort "could not write $H/config.json"
 U() { PYTHONPATH="$ROOT" python3 -m umbrous --home "$H" "$@"; }
 for m in coder:3b slow-coder:3b; do U probe "$m" >/dev/null || abort "tool check on $m"; done
 S="$ROOT/desktop/e2e/scripts"

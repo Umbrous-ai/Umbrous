@@ -37,10 +37,10 @@ import secrets
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
-from datetime import datetime, timezone
+from umbrous.timeutil import utc_now as _now
+from umbrous.persistence.session import session
 from pathlib import Path
-from typing import Any, Iterator, List, Optional
+from typing import Any, ContextManager, List, Optional
 
 
 from umbrous.receipts.redaction import default_redactor
@@ -60,9 +60,6 @@ MAX_TEXT = 300
 class TaskError(ValueError):
     pass
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _clip(obj: Any) -> Any:
@@ -85,14 +82,8 @@ class TaskStore:
         self.db_path = Path(db_path)
         self._lock = threading.Lock()
 
-    @contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=5)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
-            yield conn
-        finally:
-            conn.close()
+    def _db(self) -> ContextManager[sqlite3.Connection]:
+        return session(self.db_path)
 
     # ---------------------------------------------------------------- writing
     def create(self, task_id: str, project_id: Optional[str], chat_id: Optional[str], model: str, limits: dict,

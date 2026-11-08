@@ -1,0 +1,77 @@
+"""ModelRoutes; authentication and body limits remain in the common dispatcher."""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Tuple
+
+from umbrous.logging_setup import log_event
+from umbrous.runloop.chat import run_chat
+from umbrous.api.contracts import BASE_HEADERS
+
+log = logging.getLogger("umbrous.api")
+
+
+class ModelRoutes:
+    def _probe(self, body: dict) -> Tuple[int, str]:
+        from umbrous.model.base import ModelError
+        try:
+            result, model = self.runtime.router.probe(str(body.get("model", "")))
+        except ModelError as exc:
+            self._send_json(409, {"error": exc.code, "message": exc.message})
+            return 409, exc.code
+        self._send_json(200, {"model": model.name, "passed": result.passed, "stage": result.stage,
+                              "detail": result.detail, "ms": result.ms})
+        log_event(log, "model.probe", model=model.name, passed=result.passed, stage=result.stage, ms=result.ms)
+        return 200, "probe_passed" if result.passed else "probe_failed"
+
+    def _provider(self, path: str) -> Tuple[int, str]:
+        from umbrous.model.base import ModelError
+        codex = self.runtime.router.codex
+        login = path.endswith("/login")
+        if self.command != ("POST" if login else "GET"):
+            self._send_json(405, {"error": "method_not_allowed"})
+            return 405, "method_not_allowed"
+        if login and self._read_json() is None:
+            self._send_json(400, {"error": "expected a JSON object with Content-Type: application/json"})
+            return 400, "bad_json"
+        if codex is None:
+            self._send_json(409 if login else 200, {"available": False, "authenticated": False,
+                            "auth_type": None, "error": "ChatGPT is disabled in this runtime (codex_enabled)."})
+            return (409 if login else 200), "codex_disabled"
+        try:
+            out = codex.start_login() if login else codex.status()
+        except ModelError as exc:
+            self._send_json(409, {"error": exc.code, "message": exc.message})
+            return 409, exc.code
+        self._send_json(200, out)
+        return 200, "codex_login" if login else "codex_status"
+
+    def _chat(self, body: dict) -> Tuple[int, str]:
+        """Stream the reply as JSON lines. No Content-Length: the response ends
+        when the connection closes (HTTP/1.0), which the page treats as the end."""
+        rt = self.runtime
+        events = run_chat(rt.config, rt.router, rt.history, rt.chat_locks, rt.runs, str(body.get("chat_id", "")),
+                          str(body.get("model", "")), body.get("message"), gate=rt.gate,
+                          approvals=body.get("approvals") is True, tasks=rt.tasks,
+                          resume_task=body.get("resume_task") if "resume_task" in body else None,
+                          memory=rt.memory, use_memory=body.get("use_memory") is not False, review=rt.review,
+                          commands=rt.commands, reasoning_effort=body.get("reasoning_effort"), speed=body.get("speed"))
+        self.send_response(200)
+        for k, v in BASE_HEADERS.items():
+            self.send_header(k, v)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        last = "ok"
+        try:
+            for event in events:
+                if event["type"] == "error":
+                    last = event["code"]
+                self.wfile.write((json.dumps(event) + "\n").encode("utf-8"))
+                self.wfile.flush()
+        except OSError:  # the page closed the connection: stop the model too
+            events.close()
+            return 200, "client_gone"
+        return 200, "chat_" + last

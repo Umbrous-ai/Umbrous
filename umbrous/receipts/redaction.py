@@ -73,13 +73,13 @@ def _redact_assignment(m: "re.Match[str]") -> str:
 
 SENSITIVE_KEYS = frozenset({
     "password", "passwd", "secret", "token", "api_key", "apikey", "access_key",
-    "authorization", "cookie", "set-cookie", "x-umbrous-token", "x-umbrous-launch",
+    "authorization", "cookie", "set_cookie", "x_umbrous_token", "x_umbrous_launch",
     "session_token", "launch_code", "private_key", "credentials",
 })
 
 
 def _is_sensitive_key(key: str) -> bool:
-    k = key.lower().replace(" ", "_")
+    k = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower().replace(" ", "_").replace("-", "_")
     if k in COUNT_NAMES:
         return False
     return (k in SENSITIVE_KEYS or k.endswith(("_token", "_tokens", "_secret", "_secrets", "_password", "_passwords")))

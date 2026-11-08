@@ -24,8 +24,7 @@ import secrets
 import time
 from dataclasses import dataclass
 
-from umbrous.model.base import ModelError, ToolsUnsupported
-from umbrous.model.ollama import OllamaAdapter
+from umbrous.model.base import ModelAdapter, ModelError, ToolsUnsupported
 
 TOOL_NAME = "get_probe_code"
 TOOL = {
@@ -49,7 +48,7 @@ class ProbeResult:
     ms: int
 
 
-def run_probe(adapter: OllamaAdapter, model: str, timeout: float = 180.0) -> ProbeResult:
+def run_probe(adapter: ModelAdapter, model: str, timeout: float = 180.0) -> ProbeResult:
     started = time.monotonic()
     code = "UMB-" + secrets.token_hex(3).upper()
     options = {"temperature": 0}
