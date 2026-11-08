@@ -121,8 +121,7 @@ class TokenSavingTests(unittest.TestCase):
         self.assertIn(NOTES['navigation'], tools[0])
         self.assertIn(NOTES['stale'], tools[1])                              # a.py was edited later
         self.assertEqual(tools[2], read_b)                                   # b.py may still be edited from
-        self.assertIn('exited with status 1', tools[3])
-        self.assertIn(NOTES['command'], tools[3])
+        self.assertEqual(tools[3], run)          # command output is never shortened by unrelated later calls
         self.assertEqual(tools[4:], [wrap_untrusted('edited'), run])         # the newest rounds stay whole
         for t in tools:
             self.assertTrue(t.startswith('UNTRUSTED') and t.endswith('<<<END WORKSPACE DATA>>>'))
@@ -137,3 +136,50 @@ class TokenSavingTests(unittest.TestCase):
         self.assertEqual(trim(costly), 0)                  # would make far more be read again: wait
         self.assertEqual(costly[2]['content'], big)
         self.assertGreater(trim(costly, 0), 0)             # minimum 0 (over budget): always
+
+    def test_an_unresolved_failure_keeps_its_output_through_unrelated_steps(self):
+        fail = wrap_untrusted('run_command: pytest\nexited with status 1 after 2.0 s\n--- stdout (4,000 bytes) ---\n'
+                              + 'Traceback (most recent call last):\n  File "x.py", line 3\nAssertionError\n' * 60)
+        page = wrap_untrusted('read_file x.py lines 1-300 of 300.\n' + ''.join(f'{i}: v = {i}\n' for i in range(300)))
+        messages = ([{'role': 'user', 'content': 'fix the tests'}]
+                    + _round('run_command', {'command': 'pytest'}, fail)
+                    + _round('read_file', {'path': 'x.py'}, page)
+                    + _round('run_command', {'command': 'pwd'}, wrap_untrusted('run_command: pwd\nexited with status 0'))
+                    + _round('read_file', {'path': 'x.py'}, page)
+                    + _round('list_files', {}, wrap_untrusted('list_files .: 1 entries.\nx.py (9 B)')))
+        trim(messages, 0)
+        self.assertEqual(messages[2]['content'], fail)                  # no fix, no rerun: the traceback stays
+        self.assertEqual(messages[4]['content'], SUPERSEDED)            # the identical later read replaced it
+        again = messages + _round('run_command', {'command': 'pytest'}, fail)
+        trim(again, 0)
+        self.assertEqual(again[2]['content'], SUPERSEDED)               # the same command ran again: now it can go
+
+    def test_running_background_commands_keep_their_ids(self):
+        started = wrap_untrusted('run_command: npm run dev\nstill running after 2.0 s (id cmd_aaaa; check it with '
+                                 'check_command)\n--- stdout (2,000 bytes) ---\n' + 'ready\n' * 300)
+        second = started.replace('cmd_aaaa', 'cmd_bbbb')
+        messages = ([{'role': 'user', 'content': 'start it'}]
+                    + _round('run_command', {'command': 'npm run dev', 'background': True}, started)
+                    + _round('run_command', {'command': 'npm run dev', 'background': True}, second))
+        self.assertEqual(supersede(messages), 0)
+        self.assertIn('cmd_aaaa', messages[2]['content'])
+        run = SimpleNamespace(changes=[], actions={}, commands=[
+            {'command': 'npm run dev', 'status': 'running', 'exit': None, 'cmd_id': 'cmd_aaaa'},
+            {'command': 'npm run dev', 'status': 'running', 'exit': None, 'cmd_id': 'cmd_bbbb'},
+            {'command': 'check', 'status': 'exited', 'exit': 0, 'cmd_id': 'cmd_bbbb', 'check': True}])
+        data = json.loads(progress(run)['content'].split('\n', 1)[1])
+        self.assertEqual([c['cmd_id'] for c in data['running_commands']], ['cmd_aaaa'])
+
+    def test_the_cache_cost_counts_tool_arguments_and_the_record(self):
+        read = wrap_untrusted('read_file a.py lines 1-80 of 80.\n' + ''.join(f'{i}: a = {i}\n' for i in range(80)))
+        messages = ([{'role': 'user', 'content': 'go'}]
+                    + _round('read_file', {'path': 'a.py'}, read)
+                    + _round('write_file', {'path': 'big.py', 'content': 'x' * 40000}, wrap_untrusted('write_file ok'))
+                    + _round('read_file', {'path': 'a.py'}, read))
+        before = [dict(m) for m in messages]
+        self.assertEqual(trim(messages), 0)          # saving a few hundred tokens would resend ~10k of arguments
+        self.assertEqual(messages, before)
+        small = messages[:3] + _round('read_file', {'path': 'a.py'}, read)
+        record = {'role': 'system', 'content': 'Runtime progress record. ' + 'r' * 40000}
+        self.assertEqual(trim(small, after=[record]), 0)    # nor when the record that follows is large
+        self.assertGreater(trim(small), 0)

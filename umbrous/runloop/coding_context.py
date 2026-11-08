@@ -32,7 +32,13 @@ def progress(run):
                                  ('status', a.get('status')), ('code', a.get('code'))) if v not in (None, 'ok')}
               for a in list(run.actions.values())[-8:]
               if a.get('tool') not in ('edit_file', 'write_file', 'run_command') or a.get('status') != 'completed']
-    data = {'changes_total': len(run.changes), 'recent_changes': changes,
+    last = {}
+    for c in run.commands:
+        if c.get('cmd_id'):
+            last[c['cmd_id']] = c
+    # Background commands still running: their ids must survive any compaction (check or stop them).
+    running = [{'cmd_id': i, 'command': _clip(c.get('command'))} for i, c in last.items() if c.get('status') == 'running']
+    data = {'changes_total': len(run.changes), 'recent_changes': changes, 'running_commands': running,
             'commands_total': len(run.commands), 'recent_commands': commands,
             'recent_actions': recent, 'limits_hit': getattr(run, 'limits_hit', []),
             'changes_since_last_command': len(run.changes) - max([c.get('after_change', 0) for c in run.commands] or [0])}
@@ -71,13 +77,19 @@ def _ok(message):
     return content.startswith('UNTRUSTED') and content != SUPERSEDED
 
 
+def _running(message):
+    """A command result that left its process running in the background (its id is in it)."""
+    return '\nstill running after ' in message.get('content', '')
+
+
 def supersede(messages):
     """Replace a tool result in place when the identical call ran again later.
 
     The newest result always stays; earlier copies of the same file read, listing,
     search or command output are what a model re-requests most, and resending them
     every step is the largest avoidable cost of a long task. Results that were
-    refused or failed are kept, and so are results whose call changed something.
+    refused or failed are kept, and so are results whose call changed something, and
+    a command result whose process is still running (its id is how to check or stop it).
     Returns the estimated tokens saved."""
     pairs = [(i, _call_key(name, args)) for i, name, args, _ in _pairs(messages)]
     latest = {}
@@ -86,7 +98,7 @@ def supersede(messages):
             latest[key] = i
     saved = 0
     for i, key in pairs:
-        if key in latest and latest[key] != i and _ok(messages[i]):
+        if key in latest and latest[key] != i and _ok(messages[i]) and not _running(messages[i]):
             saved += estimate_tokens(messages[i]['content']) - estimate_tokens(SUPERSEDED)
             messages[i] = dict(messages[i], content=SUPERSEDED)
     return saved
@@ -98,7 +110,6 @@ _TAIL = '\n<<<END WORKSPACE DATA>>>'
 NOTES = {
     'navigation': '[Rest omitted after later steps; call it again if you need it.]',
     'stale': '[Content omitted: this file was changed later in this task; read it again for its current lines.]',
-    'command': '[Output omitted: a later command ran; its result and the progress record are below.]',
 }
 
 
@@ -119,8 +130,9 @@ def compact_old(messages):
 
     Only results older than the newest KEEP_ROUNDS rounds, and only:
       - listings, searches and name finds (the model has moved on; they are cheap to repeat);
-      - a read of a file that a later edit or write changed (its text is out of date);
-      - command output, once a later command ran (exit codes stay in the header and record).
+      - a read of a file that a later edit or write changed (its text is out of date).
+    Command output is never shortened here: a failure stays until the same command
+    runs again (supersede), whatever unrelated commands ran in between.
     A read the model may still edit from is kept in full. Returns the estimated tokens saved."""
     pairs = _pairs(messages)
     if not pairs:
@@ -137,8 +149,6 @@ def compact_old(messages):
         elif name == 'read_file' and any(n in ('edit_file', 'write_file') and a.get('path') == args.get('path')
                                          for n, a in later):
             short = _shorten(messages[i]['content'], 1, NOTES['stale'])
-        elif name in ('run_command', 'check_command') and any(n == 'run_command' for n, _ in later):
-            short = _shorten(messages[i]['content'], 2, NOTES['command'])
         if short is not None and len(short) < len(messages[i]['content']):
             saved += estimate_tokens(messages[i]['content']) - estimate_tokens(short)
             messages[i] = dict(messages[i], content=short)
@@ -148,20 +158,21 @@ def compact_old(messages):
 TRIM_MIN = 200       # estimated tokens a trim must save at least
 
 
-def trim(messages, minimum=TRIM_MIN):
+def trim(messages, minimum=TRIM_MIN, after=()):
     """Both of the above, in place, when they are worth it. Returns the tokens saved.
 
     Changing an earlier message makes a model server with a prompt cache process
     everything after it again. So a trim is applied only when it saves at least half
     of what it makes the server reprocess (it pays for itself within two steps), and
     at least `minimum`. Small savings are left to accumulate, keeping the prefix
-    stable for most steps."""
+    stable for most steps. What is reprocessed is counted as sent: messages with
+    their tool-call arguments, plus `after` (the progress record that follows)."""
     trial = list(messages)
     saved = supersede(trial) + compact_old(trial)
     if saved <= 0:
         return 0
     first = next(i for i, (m, t) in enumerate(zip(messages, trial)) if m is not t)
-    reprocessed = sum(estimate_tokens(m.get('content') or '') for m in trial[first:])
+    reprocessed = cost(trial[first:] + list(after))
     if minimum and (saved < minimum or saved * 2 < reprocessed):
         return 0
     messages[:] = trial
@@ -178,7 +189,7 @@ def fit(messages, budget, record):
     cached prompt instead of reading the whole task again at every step.
     """
     out = list(messages)
-    trim(out, 0 if cost(out + [record]) > budget else TRIM_MIN)
+    trim(out, 0 if cost(out + [record]) > budget else TRIM_MIN, after=[record])
     while cost(out + [record]) > budget:
         starts = [i for i, m in enumerate(out) if m.get('role') == 'assistant' and m.get('tool_calls')]
         if len(starts) > 1:

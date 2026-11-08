@@ -10,9 +10,9 @@ task so far, so anything repeated per step or per tool result is multiplied.
 | --- | --- | --- |
 | Progress record (coding) | First message, ahead of the system prompt, rebuilt every step: nothing in the request could be reused from a cache | Last message: the rest of the request is the same as the previous step's, so a server with prompt caching (Ollama's KV cache, OpenAI's prompt cache) only processes what is new |
 | Progress record content | File hashes, full commands, every action repeated, indented JSON | Path and kind of change, commands clipped to 120 characters, only actions not already listed (failures kept), compact JSON |
-| Repeated calls | An identical read, listing, search or command kept every earlier copy | The older copy becomes a one-line note; the newest stays. Changes and failed or refused results are never replaced (`coding_context.supersede`) |
-| Results later steps made redundant | Kept in full for the whole task | Outside the newest two rounds, a listing, search or name find, a read of a file edited since, and command output followed by a later command keep only their header line (`coding_context.compact_old`). A read the model may still edit from stays whole |
-| When older results are rewritten | — | Only when it saves at least half of what it makes the server reprocess, so the cached prefix stays stable on most steps (`coding_context.trim`); always when the task is over its budget |
+| Repeated calls | An identical read, listing, search or command kept every earlier copy | The older copy becomes a one-line note; the newest stays. Changes, failed or refused results and commands still running in the background are never replaced; running command ids are also kept in the progress record (`coding_context.supersede`) |
+| Results later steps made redundant | Kept in full for the whole task | Outside the newest two rounds, a listing, search or name find and a read of a file edited since keep only their header line (`coding_context.compact_old`). A read the model may still edit from stays whole, and command output stays until the same command runs again |
+| When older results are rewritten | — | Only when it saves at least half of what it makes the server reprocess (counted with tool-call arguments and the progress record), so the cached prefix stays stable on most steps (`coding_context.trim`); always when the task is over its budget |
 | Memory suggestions, workspace inventory | Long suggestion prompt; every candidate folder sent with its name and a false flag | Same rules in fewer words; only the path, and the Umbrous-source flag when true |
 | Tool definitions | Long descriptions per tool and parameter, `expected_sha256` offered though the default is always right | Short descriptions; shared rules stated once in the system prompt; `expected_sha256` still accepted, no longer offered |
 | Untrusted-data wrapper | Two-sentence preamble on every result | One short line; the markers and the rule in the system prompt are unchanged |
@@ -34,9 +34,9 @@ Umbrous sends, with tiktoken's o200k_base when installed (else Umbrous's
 | --- | --- | --- | --- | --- | --- | --- |
 | Chat without a folder, 3 messages | 3 | 2,077 | 1,762 | 15.2 % | 786 | 681 |
 | Read-only question (list, search, 2 reads) | 6 | 9,348 | 8,495 | 9.1 % | 4,305 | 4,028 |
-| Coding: add a function, fix, tests pass | 8 | 23,800 | 12,138 | 49.0 % | 17,431 | 3,900 |
-| Coding, longer (re-reads, re-runs) | 10 | 49,249 | 31,628 | 35.8 % | 40,350 | 11,440 |
-| **All four** | 27 | **84,474** | **54,023** | **36.0 %** | **62,872** | **20,049 (−68.1 %)** |
+| Coding: add a function, fix, tests pass | 8 | 23,800 | 12,128 | 49.0 % | 17,431 | 3,898 |
+| Coding, longer (re-reads, re-runs) | 10 | 49,249 | 31,637 | 35.8 % | 40,350 | 11,441 |
+| **All four** | 27 | **84,474** | **54,022** | **36.0 %** | **62,872** | **20,048 (−68.1 %)** |
 
 "Reprocessed" is the part of each request that differs from the start of the
 previous one: what a server with prompt caching has to read again.
