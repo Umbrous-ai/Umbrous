@@ -71,6 +71,8 @@ pub struct Msg {
     /// the text `blocks` was parsed from (lags `text` while streaming)
     pub parsed_len: usize,
     pub meta: String,
+    /// Present only while awaiting a terminal stream event.
+    pub activity_icon: Option<&'static str>,
     pub meta_kind: MetaKind,
     pub streaming: bool,
 }
@@ -404,7 +406,11 @@ pub fn render_row<H: SelectionHost>(host: &Entity<H>, row: Row, m: &Msg, sel: &S
             outer
                 .pt(px(SP_8))
                 .pb(px(SP_16))
-                .child(inner.text_size(fs_12()).line_height(px(18.)).text_color(color).child(m.meta.clone()))
+                .child(inner.text_size(fs_12()).line_height(px(18.)).text_color(color).child(
+                    div().flex().items_center().gap(px(8.))
+                        .when_some(m.activity_icon, |row, name| row.child(crate::ui::icon(name).text_color(color)))
+                        .child(m.meta.clone()),
+                ))
                 .into_any_element()
         }
     }
@@ -417,7 +423,7 @@ mod tests {
 
     fn msg(role: Role, text: &str) -> Msg {
         let blocks = if role == Role::User { markdown::plain(text) } else { markdown::parse(text) };
-        Msg { role, text: text.into(), parsed_len: text.len(), blocks: Arc::new(blocks), meta: String::new(), meta_kind: MetaKind::Normal, streaming: false }
+        Msg { role, text: text.into(), parsed_len: text.len(), blocks: Arc::new(blocks), meta: String::new(), activity_icon: None, meta_kind: MetaKind::Normal, streaming: false }
     }
 
     #[test]

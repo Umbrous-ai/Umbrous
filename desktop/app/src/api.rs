@@ -498,6 +498,18 @@ pub fn keep_reading(stopped: bool, cancel_sent: bool, ty: &str) -> bool {
     cancel_sent && !matches!(ty, "done" | "error")
 }
 
+pub fn activity_icon(tool: &str) -> &'static str {
+    match tool {
+        "read_file" => "doc",
+        "list_files" => "folder",
+        "search_files" | "find_files" => "search",
+        "write_file" | "edit_file" => "pen",
+        "run_command" => "terminal",
+        "check_command" => "shield-check",
+        _ => "bolt",
+    }
+}
+
 pub fn step_label(tool: &str, args: &Value) -> String {
     let s = |k: &str| args.get(k).and_then(Value::as_str).filter(|p| !p.is_empty());
     let path = s("path").unwrap_or(".");

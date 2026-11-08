@@ -474,6 +474,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "running" => ws.is_running().to_string(),
                 "background_runs" => ws.background_count().to_string(),
                 "unread_results" => ws.unread_count().to_string(),
+                "activity_icon" => ws.msgs.last().and_then(|m| m.activity_icon).unwrap_or("none").into(),
                 "last_meta" => ws.msgs.last().map(|m| m.meta.clone()).unwrap_or_default(),
                 "last_text" => ws.msgs.last().map(|m| m.text.clone()).unwrap_or_default(),
                 "no_text" => (!ws.msgs.iter().any(|m| m.text.contains(val))).to_string(),

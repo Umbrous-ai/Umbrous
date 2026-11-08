@@ -3,6 +3,8 @@ wait_models
 select_model background:3b
 send Background A
 wait_streaming
+expect last_meta Writing response…
+expect activity_icon pen
 new_chat
 expect messages 0
 expect background_runs 1
@@ -72,10 +74,13 @@ expect background_runs 1
 open_chat read readme.txt
 expect running true
 expect approval fs.read
+expect last_meta Approval needed
+expect activity_icon shield
 approve once
 wait_reply 20
 expect last_text Background approval restored
 expect approval none
+expect activity_icon none
 # Deleting while an offscreen task waits for approval also stops it.
 new_chat
 set_access ask_before_read

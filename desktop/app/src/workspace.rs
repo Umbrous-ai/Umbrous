@@ -1250,6 +1250,7 @@ impl Workspace {
             parsed_len: text.len(),
             text: text.clone(),
             meta: String::new(),
+            activity_icon: None,
             meta_kind: MetaKind::Normal,
             streaming: false,
         });
@@ -1258,7 +1259,8 @@ impl Workspace {
             text: String::new(),
             blocks: Arc::new(vec![]),
             parsed_len: 0,
-            meta: format!("Waiting for {model}…"),
+            meta: "Working…".into(),
+            activity_icon: Some("logo"),
             meta_kind: MetaKind::Normal,
             streaming: true,
         });
@@ -1360,7 +1362,8 @@ impl Workspace {
                             if let Some(run) = self.run.as_mut() {
                                 run.run_id = ev.get("run_id").and_then(Value::as_str).map(str::to_string);
                             }
-                            msg.meta = "Finding the right workspace…".into();
+                            msg.meta = "Finding workspace…".into();
+                            msg.activity_icon = Some("folder");
                         }
                         "chat_created" => {
                             if let Ok(mut c) = serde_json::from_value::<api::ChatInfo>(ev["chat"].clone()) {
@@ -1380,10 +1383,8 @@ impl Workspace {
                                     .map(|a| a.iter().filter_map(|m| m.get("id").and_then(Value::as_str)).map(str::to_string).collect())
                                     .unwrap_or_default();
                             }
-                            if let Some(m) = ev.get("model_requested").and_then(Value::as_str) {
-                                let again = if ev.get("resume_of").map(|v| !v.is_null()).unwrap_or(false) { " again (resumed)" } else { "" };
-                                msg.meta = format!("{m} is answering{again}…");
-                            }
+                            msg.meta = "Working…".into();
+                            msg.activity_icon = Some("logo");
                             let c = &ev["context"];
                             if let (Some(est), Some(win)) = (c["estimated_tokens"].as_u64(), c["window"].as_u64()) {
                                 self.context = Some((est, win));
@@ -1400,10 +1401,18 @@ impl Workspace {
                                 self.notice = Some((why.to_string(), MetaKind::Warn, false));
                             }
                         }
-                        "delta" => msg.text.push_str(ev.get("text").and_then(Value::as_str).unwrap_or("")),
+                        "delta" => {
+                            msg.text.push_str(ev.get("text").and_then(Value::as_str).unwrap_or(""));
+                            msg.meta = "Writing response…".into();
+                            msg.activity_icon = Some("pen");
+                        },
                         // M7: the reply is saved; the task looks for things to remember
-                        "suggesting" => msg.meta = "Looking for things to remember…".into(),
+                        "suggesting" => {
+                            msg.meta = "Finishing…".into();
+                            msg.activity_icon = Some("logo");
+                        },
                         "done" => {
+                            msg.activity_icon = None;
                             let g = |k: &str| ev.get(k).and_then(Value::as_u64);
                             let model = ev.get("model").and_then(Value::as_str).unwrap_or("").to_string();
                             let mut parts = vec![model];
@@ -1434,24 +1443,30 @@ impl Workspace {
                             refresh_lists = true;
                         }
                         "tool_call" => {
-                            // M4: say which step is running, so Stop has something to interrupt that you can see
-                            let step = ev.get("step").and_then(Value::as_u64).unwrap_or(0);
-                            let tool = ev.get("tool").and_then(Value::as_str).unwrap_or("a tool");
-                            msg.meta = format!("Proposed · Step {step}: {}…", api::step_label(tool, &ev["args"]));
+                            msg.meta = "Preparing action…".into();
+                            msg.activity_icon = Some("clock");
                         }
                         "tool_started" => {
                             let tool = ev.get("tool").and_then(Value::as_str).unwrap_or("a tool");
-                            msg.meta = format!("Working · {}…", api::step_label(tool, &ev["args"]));
+                            let label = api::step_label(tool, &ev["args"]);
+                            let mut chars = label.chars();
+                            let label = chars.next().map(|c| c.to_uppercase().to_string() + chars.as_str()).unwrap_or_default();
+                            msg.meta = format!("{label}…");
+                            msg.activity_icon = Some(api::activity_icon(tool));
                         }
                         "approval_required" => {
                             self.approval = PendingApproval::from_event(&ev);
-                            msg.meta = "Blocked · Review the action below, then approve or deny it.".into();
+                            msg.meta = "Approval needed".into();
+                            msg.activity_icon = Some("shield");
                         }
                         "tool_result" => {
                             // answered (here, by a time limit, or by Stop): the card has done its job
                             self.approval = None;
+                            msg.meta = "Working…".into();
+                            msg.activity_icon = Some("logo");
                         }
                         "error" => {
+                            msg.activity_icon = None;
                             let code = ev.get("code").and_then(Value::as_str).unwrap_or("error");
                             let text = ev.get("message").and_then(Value::as_str).unwrap_or("The reply failed.").to_string();
                             let partial = ev.get("partial").and_then(Value::as_bool).unwrap_or(false);
@@ -1486,7 +1501,7 @@ impl Workspace {
                 StreamMsg::Ended(err) => {
                     ended = true;
                     let Some(msg) = self.msgs.get_mut(ix) else { return };
-                    let ended_early = msg.meta.ends_with('…');
+                    let ended_early = msg.activity_icon.take().is_some();
                     if let Some(e) = err {
                         if ended_early {
                             msg.meta = format!("Connection lost: {} Work may still be running. Reopen this chat to check its saved result.", e.message);
@@ -1758,7 +1773,7 @@ fn stored_msg(m: &api::Message) -> Msg {
             other => (format!("{model} · Incomplete ({other}).{mem}"), MetaKind::Warn),
         }
     };
-    Msg { role, text: m.content.clone(), parsed_len: m.content.len(), blocks: Arc::new(blocks), meta, meta_kind: kind, streaming: false }
+    Msg { role, text: m.content.clone(), parsed_len: m.content.len(), blocks: Arc::new(blocks), meta, activity_icon: None, meta_kind: kind, streaming: false }
 }
 
 // ---------------- rendering ----------------

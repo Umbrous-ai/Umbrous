@@ -92,3 +92,7 @@ surfaces without adding a second agent architecture or copying competitor code.
   pane, and existing transcript. The composer returns to the bottom in a chat.
 - Visual evidence and numbered walkthrough are also saved outside the repo in
   the Codex visualizations folder under `harness-review/review.html`.
+
+### Compact live activity (2026-11-08)
+
+DeepSeek's [group-title rules](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-chat/src/client/conversation-nodes/README.md#group-title-rules) describe the current tool category rather than a numbered step. Umbrous now uses a single live line with its existing SVG assets: logo for work between actions, folder for workspace resolution/listing, document for reading, search for searching, pen for editing or responding, terminal for commands, and shield for approval. Proposed actions say “Preparing action”; only execution-start events show an action as running. Tool completion returns to “Working” so a finished command does not appear to keep running. Model identity remains in the composer and completion metadata; final verification warnings remain visible. Terminal events clear the live icon, and an unexpected stream end is detected independently of the label's punctuation.
