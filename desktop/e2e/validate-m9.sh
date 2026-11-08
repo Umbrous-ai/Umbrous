@@ -80,6 +80,7 @@ PY
 # not been tool-checked (the app runs the check), with a third project on Ask before commands.
 H2="$W/h-m9-approve"
 C=$(python3 "$ROOT/desktop/e2e/stress.py" seed-coding-project "$W/m9-fixture/c") && [ -d "$C" ] || abort "could not create project C"
+D=$(python3 "$ROOT/desktop/e2e/stress.py" seed-coding-project "$W/m9-fixture/d") && [ -d "$D" ] || abort "could not create project D"
 mkdir -p "$H2" && echo "{\"codex_enabled\": false, \"ollama_url\": \"http://127.0.0.1:$PORT\"}" > "$H2/config.json" || abort "could not write $H2/config.json"
 python3 "$ROOT/desktop/e2e/stress.py" fake-coding $PORT >/dev/null 2>&1 & FAKE=$!; sleep 1
 kill -0 "$FAKE" 2>/dev/null || abort "the fake Ollama did not start again (port $PORT in use?)"
@@ -89,5 +90,6 @@ cleanup; FAKE=""
 echo "receipts (approvals):"; PYTHONPATH="$ROOT" python3 -m umbrous --home "$H2" receipts --last 12 | grep -E "cmd\.run" || fail "no command receipts"
 PYTHONPATH="$ROOT" python3 -m umbrous --home "$H2" receipts --last 30 | grep -q "Approved once by you" || fail "no receipt for the once approval"
 PYTHONPATH="$ROOT" python3 -m umbrous --home "$H2" receipts --last 30 | grep -q "Allowed by a grant" || fail "no receipt for the grant"
+PYTHONPATH="$ROOT" python3 -m umbrous --home "$H2" receipts --last 30 | grep -q "denied_by_you" || fail "no receipt for the denied long command"
 [ $STATUS -eq 0 ] && echo "m9-coding: PASS" || echo "m9-coding: FAIL"
 exit $STATUS

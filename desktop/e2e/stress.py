@@ -117,11 +117,15 @@ def task_models():
 def coding_models():
     """M9: the coder (edits calc.py, runs the tests, fixes the failure) and a
     slow one whose test command first sleeps 30 s (to press Stop, or kill the
-    runtime, while a command runs)."""
+    runtime, while a command runs), and long-coder, whose test command is long."""
     from tests.fake_ollama import CODER_TEST, FakeModel, coder
     return [FakeModel("coder:3b", chunk_delay=0.01, agent=coder()),
             FakeModel("slow-coder:3b", chunk_delay=0.01, agent=coder("sleep 30; " + CODER_TEST)),
-            FakeModel("chatty:3b", tools="unsupported", chunk_delay=0.01, reply="Noted.")]
+            FakeModel("chatty:3b", tools="unsupported", chunk_delay=0.01, reply="Noted."),
+            # a test command longer than the step label's 80 characters, with a tail after a
+            # line break: the approval card must show all of it (validate-m9.sh, m9-approve)
+            FakeModel("long-coder:3b", chunk_delay=0.01, agent=coder(
+                "true " + "x" * 120 + " && " + CODER_TEST + "\necho approval-tail-7"))]
 
 
 def seed_coding_project(base: Path) -> None:

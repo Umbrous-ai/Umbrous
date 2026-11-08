@@ -57,5 +57,31 @@ expect approval none
 expect last_meta Task completed
 expect chat_access workspace_code
 expect access code_ask_commands
+# 4. a project with no folder: the level chosen while attaching one is this chat's only;
+#    the project's default (and so every other chat's) stays Read only
+add_project Fresh
+select_project Fresh
+new_chat
+expect access_pill No folder
+attach_folder workspace_code @OUT@/m9-fixture/d/proj
+expect chat_access workspace_code
+expect access workspace_read
+expect access_pill Full access
+new_chat
+expect chat_access default
+expect access_pill Read only
+# 5. the card shows the whole command, verbatim, even past 80 characters and a line break;
+#    Deny refuses it (project Fresh has no grant)
+set_access code_ask_commands
+select_model long-coder:3b
+check_tools
+send add a multiply function to calc.py and make the tests pass
+wait_approval 60
+expect approval_command echo approval-tail-7
+screenshot @OUT@/m9-approve-long.png
+approve deny
+# the stand-in model asks again after a refusal; Stop ends the task
+stop
+expect running false
 record end
 quit

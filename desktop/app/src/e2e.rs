@@ -224,6 +224,15 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             let want = p.map(str::to_string);
             wait_until(cx, window, 10, "chat access", move |ws| ws.chat_access() == want).await?;
         }
+        "attach_folder" => {
+            // what picking a folder in the system dialog does (the dialog itself is not driven)
+            let (level, root) = arg.split_once(' ').ok_or("attach_folder LEVEL PATH")?;
+            let p: &'static str = crate::workspace::access_levels().iter().copied().find(|p| *p == level)
+                .ok_or_else(|| format!("unknown access {level}"))?;
+            let root = root.to_string();
+            window.update(cx, |ws, _, cx| ws.attach_folder(root, p, cx)).ok();
+            wait_until(cx, window, 10, "folder attached", move |ws| ws.chat_access().as_deref() == Some(p)).await?;
+        }
         "choose_level" => {
             // what clicking a row of the access menu does (Full access opens its dialog)
             let p: &'static str = crate::workspace::access_levels().iter().copied().find(|p| *p == arg)
@@ -434,6 +443,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "user_meta_empty" => ws.msgs.iter().filter(|m| m.role == Role::User).all(|m| m.meta.is_empty()).to_string(),
                 "access" => ws.access.as_ref().and_then(|a| a.workspace.as_ref()).map(|w| w.profile.clone()).unwrap_or_else(|| "none".into()),
                 "approval" => ws.approval.as_ref().map(|a| a.action.clone()).unwrap_or_else(|| "none".into()),
+                "approval_command" => ws.approval.as_ref().and_then(|a| a.args.get("command").and_then(serde_json::Value::as_str).map(str::to_string)).unwrap_or_default(),
                 "access_pill" => ws.access_pill_label(),
                 "chat_access" => ws.chat_access().unwrap_or_else(|| "default".into()),
                 "full_access_dialog" => ws.full_access_confirm.map(|c| if c.checked { "checked" } else { "open" }).unwrap_or("closed").to_string(),
@@ -477,6 +487,7 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "last_text_lacks" => got == "true",
                 "interrupted" if val != "none" => got.contains(val),
                 "interrupted_note" | "notice" | "access_root" if val != "none" => got.contains(val),
+                "approval_command" => got.ends_with(val) && got.len() > 100, // longer than the 80-character step label
                 "no_text" | "user_meta_empty" => got == "true",
                 "last_text_len_over" => got == "true",
                 _ => got == val,

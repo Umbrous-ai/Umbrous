@@ -138,34 +138,41 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Pick a folder for the project with the system's folder picker, then attach it
-    /// with `profile`. Picking the folder is the choice; nothing is attached otherwise.
+    /// Pick a folder for the project with the system's folder picker and attach it. The
+    /// project's default for other chats is Read only; the level you chose is stored on
+    /// this chat only. Picking the folder is the choice; nothing is attached otherwise.
     fn choose_folder(&mut self, profile: &'static str, cx: &mut Context<Self>) {
-        let Some(pid) = self.project_id.clone() else { return };
+        if self.project_id.is_none() { return }
         self.access_menu = false;
         let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false,
                                                           prompt: Some("Use this folder".into()) });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
             let Some(root) = paths.into_iter().next() else { return };
-            let root = root.to_string_lossy().to_string();
-            this.update(cx, |this, cx| {
-                logfile::event("ui.workspace_attach", &[("profile", profile.into())]);
-                this.access_error = None;
-                let path = format!("/api/projects/{pid}/workspace");
-                this.api_call(cx, move |api| api.post::<api::Access>(&path, json!({ "root": root, "profile": profile })), move |this, r, cx| match r {
-                    Ok(a) if this.project_id.as_deref() == Some(a.project_id.as_str()) => {
-                        this.access_seq += 1;
-                        this.access = Some(a);
-                        // the level you clicked is now the project's, which this chat follows
-                        if this.chat_access().is_some() { this.set_chat_access(None, cx); }
-                    }
-                    Ok(_) => {}
-                    Err(e) => this.access_error = Some(e.message),
-                });
-                cx.notify();
-            }).ok();
+            this.update(cx, |this, cx| this.attach_folder(root.to_string_lossy().to_string(), profile, cx)).ok();
         }).detach();
+        cx.notify();
+    }
+
+    /// Attach `root` to the project (its default for other chats: Read only) and give
+    /// the chat the choice was made in its level `profile`.
+    pub fn attach_folder(&mut self, root: String, profile: &'static str, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        logfile::event("ui.workspace_attach", &[("profile", profile.into())]);
+        self.access_error = None;
+        let path = format!("/api/projects/{pid}/workspace");
+        // the chat this choice was made in (None: the new chat not created yet)
+        let chat_at_choice = self.chat.as_ref().map(|c| c.id.clone());
+        self.api_call(cx, move |api| api.post::<api::Access>(&path, json!({ "root": root, "profile": "workspace_read" })), move |this, r, cx| match r {
+            Ok(a) if this.project_id.as_deref() == Some(a.project_id.as_str()) => {
+                this.access_seq += 1;
+                this.access = Some(a);
+                // only if you are still in the chat you chose it for
+                if this.chat.as_ref().map(|c| c.id.clone()) == chat_at_choice { this.set_chat_access(Some(profile), cx); }
+            }
+            Ok(_) => {}
+            Err(e) => this.access_error = Some(e.message),
+        });
         cx.notify();
     }
 
@@ -177,7 +184,7 @@ impl Workspace {
         self.probe_busy = Some(model.clone());
         logfile::event("ui.probe", &[]);
         let m2 = model.clone();
-        self.api_call(cx, move |api| api.post::<Value>("/api/models/probe", json!({ "model": m2 })), move |this, r, cx| {
+        self.api_call(cx, move |api| api.post_long::<Value>("/api/models/probe", json!({ "model": m2 })), move |this, r, cx| {
             this.probe_busy = None;
             match r {
                 Ok(v) if v.get("passed").and_then(Value::as_bool) == Some(true) =>
@@ -370,19 +377,60 @@ impl Workspace {
                 .when(busy, |d| d.opacity(0.5))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.answer_approval(choice, cx)))
         };
-        Some(div().id("approval-card").w_full().flex().flex_col().gap(px(6.)).px(px(12.)).py(px(10.))
+        // The exact command the approval authorizes, verbatim (never the shortened step
+        // label): a long or multi-line command scrolls instead of being cut.
+        let command = (ap.kind() == "command").then(|| ap.args.get("command").and_then(Value::as_str).unwrap_or("").to_string());
+        let background = ap.args.get("background").and_then(Value::as_bool).unwrap_or(false);
+        // block layout (not a flex column): text in flex items was measured unwrapped
+        Some(div().id("approval-card").w_full().min_w_0().overflow_hidden().px(px(12.)).py(px(10.))
             .rounded(px(R_8)).border_1().border_color(border_strong()).bg(bg_raised())
             .text_size(fs_13()).line_height(px(19.5)).text_color(text_default())
-            .child(div().text_color(text_strong()).font_weight(FontWeight::MEDIUM).child(title))
-            .child(div().child(format!("{}{}", what.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default(), what.chars().skip(1).collect::<String>())))
-            .child(div().text_size(fs_12()).text_color(text_subtle()).font_family(MONO).child(match ap.resource.as_str() { "" | "." => format!("{} in the project's folder", ap.action), r => format!("{} on {r}", ap.action) }))
-            .when(ap.kind() == "command", |d| d.child(div().text_size(fs_12()).text_color(warning())
-                .child("It runs as you, in the project's folder, and is not sandboxed: it can do anything you can.")))
-            .child(div().flex().flex_wrap().gap(px(6.)).pt(px(2.))
+            .child(div().w_full().text_color(text_strong()).font_weight(FontWeight::MEDIUM).child(title))
+            .when_some(command.clone(), |d, cmd| d.child(
+                div().id("approval-command").mt(px(6.)).w_full().max_h(px(180.)).overflow_y_scroll()
+                    .px(px(10.)).py(px(8.)).rounded(px(R_6)).bg(bg_app()).border_1().border_color(border())
+                    .font_family(MONO).text_size(fs_12()).line_height(px(18.)).text_color(text_strong())
+                    .child(div().w_full().child(if cmd.is_empty() { "(empty command)".to_string() } else { breakable(&cmd) }))))
+            .when(command.is_none(), |d| d.child(div().mt(px(6.)).w_full().child(format!("{}{}",
+                what.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default(), what.chars().skip(1).collect::<String>()))))
+            .child(div().mt(px(6.)).w_full().text_size(fs_12()).text_color(text_subtle()).font_family(MONO)
+                .child(match ap.resource.as_str() { "" | "." => format!("{} in the project's folder", ap.action), r => format!("{} on {r}", ap.action) }))
+            .when(command.is_some(), |d| d.child(div().mt(px(6.)).w_full().text_size(fs_12()).text_color(warning()).child(format!(
+                "It runs as you, with /bin/sh in the project's folder, and is not sandboxed: it can do anything you can.{}",
+                if background { " It may keep running in the background." } else { "" }))))
+            .child(div().mt(px(8.)).flex().flex_wrap().gap(px(6.))
                 .child(btn("approve-once", "Approve once".into(), "once", true))
                 .child(btn("approve-grant", format!("Allow {} in this project", ap.grant_word()), "grant", false))
                 .child(btn("approve-deny", "Deny".into(), "deny", false)))
-            .when_some(ap.error.clone(), |d, e| d.child(div().text_size(fs_12()).text_color(danger()).child(e)))
+            .when_some(ap.error.clone(), |d, e| d.child(div().mt(px(6.)).w_full().text_size(fs_12()).text_color(danger()).child(e)))
             .into_any_element())
+    }
+}
+
+/// The command as shown on the card: the same characters, with a zero-width break
+/// opportunity every 32 characters of a long unbroken run, so a long path or token
+/// wraps inside the card instead of widening it (the text is never shortened).
+fn breakable(cmd: &str) -> String {
+    let mut out = String::with_capacity(cmd.len() + cmd.len() / 16);
+    let mut run = 0;
+    for ch in cmd.chars() {
+        if ch.is_whitespace() { run = 0 } else {
+            if run == 32 { out.push('\u{200B}'); run = 0; }
+            run += 1;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_long_command_keeps_every_character() {
+        let cmd = format!("true {} && make test\necho tail", "x".repeat(100));
+        let shown = breakable(&cmd);
+        assert_eq!(shown.replace('\u{200B}', ""), cmd);
+        assert!(shown.split(|c: char| c.is_whitespace() || c == '\u{200B}').all(|w| w.chars().count() <= 32));
     }
 }

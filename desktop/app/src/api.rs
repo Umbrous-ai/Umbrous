@@ -100,6 +100,18 @@ impl Api {
             .map_err(ApiError::transport)
     }
 
+    /// POST with the streaming client's long read timeout, for requests that wait on a
+    /// model: the tool check makes two model calls of up to 180 s each.
+    pub fn post_long<T: for<'de> Deserialize<'de>>(&self, path: &str, body: Value) -> Result<T> {
+        self.stream_agent
+            .post(&format!("{}{path}", self.origin))
+            .set("X-Umbrous-Token", &self.token)
+            .send_json(body)
+            .map_err(to_error)?
+            .into_json()
+            .map_err(ApiError::transport)
+    }
+
     /// POST /api/chat and call `on_event` for each JSON line as it arrives.
     /// Returns when the runtime closes the stream. Blocking: run it off the UI thread.
     /// `resume`: an interrupted task to run again (M5) instead of sending `message`.

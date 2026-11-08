@@ -99,12 +99,16 @@ and every hard block stay the project's: paths outside the folder, links and
 excluded files stay blocked at every level.
 
 With no folder attached, choosing a level opens the system folder picker and
-attaches the folder you pick with that level as the project's profile. The menu
+attaches the folder you pick; the level is stored on the chat it was chosen in,
+and the project's default for every other chat is Read only (so Full access
+never spreads to other chats this way). The menu
 shows only the three levels (Freddy: fewer things on screen); it adds a line
 only when something needs you (no folder yet, a model without the tool check).
 
 When the gate asks, a card appears above the composer: what the model wants
-to do, the action and its target, for a command that it runs unsandboxed,
+to do, the action and its target; for a command, the whole command line
+verbatim in a scrolling block (never the shortened step label, since Approve
+once authorizes exactly that string) and that it runs unsandboxed,
 and **Approve once**, **Allow … in this project** (a grant, revocable in the
 browser page's Access section) and **Deny**. Stop, leaving the chat, or the
 approval time limit closes the request. Every answer ends in a receipt.
@@ -112,7 +116,8 @@ approval time limit closes the request. Every answer ends in a receipt.
 A model only gets tools after it passes the tool check. When a folder is
 attached and the selected model has not, the pill turns amber
 (*… · no tools*) and the menu offers **Check tools**, which runs the harmless
-round trip (for a ChatGPT model, one short request on your subscription).
+round trip (for a ChatGPT model, one short request on your subscription). It
+waits as long as the probe may take (two model calls of up to 180 s each).
 A reply that starts without tools for that reason also says so in a notice.
 
 The message box grows with its text up to about ten lines and then scrolls,

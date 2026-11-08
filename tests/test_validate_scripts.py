@@ -582,10 +582,11 @@ def seed_approve(db_path: str, kind: str) -> None:
     db.connect(Path(db_path)).close()
     receipts = ReceiptStore(Path(db_path))
     tid = new_task_id()
-    reasons = ["Approved once by you."] + ([] if kind == "nogrant" else ["Allowed by a grant for this project (cmd.run)."])
-    for reason in reasons:
+    reasons = [("denied", "denied_by_you: You denied it."), ("allowed", "Approved once by you.")] + (
+        [] if kind == "nogrant" else [("allowed", "Allowed by a grant for this project (cmd.run).")])
+    for decision, reason in reasons:
         now = datetime.now(timezone.utc)
-        receipts.add(Receipt(tid, new_action_id(), "cmd.run", "project:prj_general resource:.", "allowed", now,
+        receipts.add(Receipt(tid, new_action_id(), "cmd.run", "project:prj_general resource:.", decision, now,
                              now + timedelta(milliseconds=3), reason), "prj_general", None)
 
 
