@@ -337,6 +337,28 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
             window.update(cx, |ws, _, cx| ws.reject_candidate(id, cx)).ok();
             wait_until(cx, window, 10, "rejected", move |ws| ws.memory.as_ref().is_some() && ws.candidate(&gone).is_none()).await?;
         }
+        "delete_open" => {
+            let (kind, title) = arg.split_once(' ').ok_or("delete_open chat|project TITLE")?;
+            let project = kind == "project";
+            let target = window.update(cx, |ws, _, _| {
+                if project { ws.projects.iter().find(|p| p.name == title).map(|p| (p.id.clone(), p.name.clone())) }
+                else { ws.chats.iter().chain(ws.chat.iter()).find(|c| c.title == title).map(|c| (c.id.clone(), c.title.clone())) }
+            }).ok().flatten().ok_or("deletion target missing")?;
+            window.update(cx, |ws, _, cx| ws.open_deletion(project, target.0, target.1, cx)).ok();
+            wait_until(cx, window, 10, "delete preview", |ws| ws.deletion.as_ref()
+                .map(|d| d.preview.is_some() || d.error.is_some()).unwrap_or(false)).await?;
+        }
+        "delete_cancel" => { window.update(cx, |ws, _, cx| ws.cancel_deletion(cx)).ok(); }
+        "delete_confirm" => {
+            window.update(cx, |ws, _, cx| {
+                ws.confirm_deletion(cx);
+                ws.confirm_deletion(cx); // rapid double-click must not issue a second request
+            }).ok();
+            wait_until(cx, window, 10, "delete closes automatically", |ws| ws.deletion.is_none()).await?;
+            wait_until(cx, window, 10, "valid selected project", |ws| {
+                ws.project_id.as_ref().map(|id| ws.projects.iter().any(|p| &p.id == id)).unwrap_or(ws.projects.is_empty())
+            }).await?;
+        }
         "reset_open" => {
             // Start fresh… (no argument), or Options › Delete chat… on the open chat (`reset_open chat`) (M8)
             let on_chat = arg == "chat";
@@ -474,6 +496,14 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "memory_personal" => ws.memory.as_ref().map(|v| v.personal.len()).unwrap_or(0).to_string(),
                 "candidates" => ws.memory.as_ref().map(|v| v.candidates.iter()
                     .map(|c| format!("{} {} ({}): {}", c.store, c.kind, c.basis, c.text)).collect::<Vec<_>>().join(" | ")).unwrap_or_default(),
+                "projects" | "projects_lack" => ws.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(" | "),
+                "project_count" => ws.projects.len().to_string(),
+                "deletion" => match &ws.deletion {
+                    None => "closed".into(),
+                    Some(d) => format!("{} {} chats={} error={}", if d.project { "project" } else { "chat" }, d.title,
+                        d.preview.as_ref().map(|p| p.items.iter().filter(|i| i.item_type == "chat").count()).unwrap_or(0),
+                        d.error.as_deref().unwrap_or("none")),
+                },
                 "reset" => match &ws.reset {
                     None => "closed".into(),
                     Some(r) if r.done.is_some() => format!("done: {}", r.done.as_ref().unwrap().summary()),
@@ -491,7 +521,8 @@ async fn run(cmd: &str, arg: &str, window: WindowHandle<Workspace>, cx: &mut Asy
                 "chat" if val != "none" => got.contains(val),
                 "last_meta" | "sessions" | "last_text" | "reply_metas" | "memory" => got.contains(val),
                 "reset" if val != "closed" => got.contains(val),
-                "sessions_lack" => !got.contains(val),
+                "sessions_lack" | "projects_lack" => !got.contains(val),
+                "projects" | "deletion" => got.contains(val),
                 "candidates" if val != "none" => got.contains(val),
                 "candidates" => got.is_empty(),
                 "last_text_lacks" => got == "true",

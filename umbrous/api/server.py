@@ -26,8 +26,8 @@ Routes (everything under /api/ needs the session credential, see security.py):
     POST /api/chats/<id>/archive             hide it, read-only; deletes nothing (M2)
     POST /api/chats/<id>/unarchive           bring it back (M2)
     POST /api/chats/<id>/access {access}     the chat's own access (a workspace profile), null = the project's
-There is deliberately no route that deletes a chat or project (docs/m2-history.md); chats
-and memory go only through the reset below, which shows the exact items first (M8).
+Chats, projects and memory are deleted through the reset endpoints below. The
+native app uses a short confirmation for chats and projects (docs/deletion.md).
     GET  /api/projects/<id>/access                  the access view: workspace, profile, grants (M3)
     POST /api/projects/<id>/workspace {root, profile}  attach a workspace folder (M3)
     POST /api/projects/<id>/workspace/detach        forget the folder and revoke its grants (M3)

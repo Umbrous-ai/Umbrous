@@ -24,6 +24,10 @@ are overwritten in the database file):
               suggestions from it still waiting for review (M7, they quote it)
   personal    the item's row
   project     the item's row
+  project_container  the project and its stored workspace/access configuration
+
+Project deletion is an explicit delete_projects selection; ordinary memory
+resets still preserve the project itself. Source directories are never touched.
 
 What it keeps, and says so in every preview and result (`kept`):
 task records and receipts of reset chats (ids, statuses, file paths, no
@@ -83,10 +87,11 @@ def _ids(value: object, pattern: "re.Pattern[str]", what: str) -> List[str]:
 def normalize(selection: object) -> dict:
     """The selection in one canonical form. Keys: chats (ids), chats_in
     (project ids: all their chats, archived too), personal ("all" or ids),
-    project ({project id: "all" or ids}), start_fresh (bool)."""
+    project ({project id: "all" or ids}), start_fresh (bool), and optional
+    delete_projects (project ids including their chats, memory and configuration)."""
     if not isinstance(selection, dict):
         raise ResetError("The selection is a JSON object.", "bad_selection")
-    unknown = set(selection) - {"chats", "chats_in", "personal", "project", "start_fresh"}
+    unknown = set(selection) - {"chats", "chats_in", "personal", "project", "start_fresh", "delete_projects"}
     if unknown:
         raise ResetError(f"Unknown part of a selection: {sorted(unknown)[0]!r}.", "bad_selection")
     out: dict = {"chats": _ids(selection.get("chats", []), CHAT_ID, "chats"),
@@ -102,6 +107,12 @@ def normalize(selection: object) -> dict:
             raise ResetError(f"Not a valid project id: {pid!r}.", "bad_selection")
         v = project[pid]
         out["project"][pid] = "all" if v == "all" else _ids(v, MEM_ID, f"project {pid}")
+    deleted_projects = _ids(selection.get("delete_projects", []), PROJECT_ID, "delete_projects")
+    if deleted_projects:
+        out["delete_projects"] = deleted_projects
+        out["chats_in"] = sorted(set(out["chats_in"]) | set(deleted_projects))
+        for pid in deleted_projects:
+            out["project"][pid] = "all"
     out["start_fresh"] = selection.get("start_fresh", False) is True
     if not (out["chats"] or out["chats_in"] or out["personal"] or any(out["project"].values())):
         raise ResetError("Nothing is selected. Choose chats or memory items to reset.", "nothing_selected")
@@ -176,6 +187,15 @@ class Reset:
 
         items: List[dict] = []
         blocked = []
+        deleted_projects = sel.get("delete_projects", [])
+        for pid in deleted_projects:
+            # Project identity and attachment changes must invalidate a preview too.
+            metadata = [c.execute("SELECT name, name_key, created_at FROM projects WHERE id=?", (pid,)).fetchone()]
+            for table in ("workspaces", "access_policy", "grants"):
+                metadata.append(c.execute(f"SELECT * FROM {table} WHERE project_id=? ORDER BY rowid", (pid,)).fetchall())
+            # Includes decided suggestions: project deletion removes their FK rows.
+            metadata.append(c.execute("SELECT * FROM memory_candidates WHERE project_id=? ORDER BY rowid", (pid,)).fetchall())
+            items.append({"type": "project_container", "id": pid, "title": projects[pid], "_fp": metadata})
         for cid in chat_ids:
             _, pid, title, updated, archived, n, seq, pend = chat_rows[cid]
             b = bool(busy and busy(cid))
@@ -204,8 +224,10 @@ class Reset:
                   "personal": len(personal), "project": len(project), "suggestions": len(suggestions)}
         mem_ids = [r[0] for r in personal] + [r[0] for r in project]
         return {"preview_id": "rst_" + fp[:32], "selection": sel, "items": items, "counts": counts,
-                "empty": not (chat_ids or mem_ids), "blocked": blocked, "start_fresh": sel["start_fresh"],
-                "kept": self._kept(c, chat_ids, mem_ids, sel), "not_touched": NOT_TOUCHED, "backups": BACKUPS}
+                "empty": not (chat_ids or mem_ids or deleted_projects), "blocked": blocked, "start_fresh": sel["start_fresh"],
+                "kept": self._kept(c, chat_ids, mem_ids, sel),
+                "not_touched": ("Source folders and files, other projects, task records and receipts are kept."
+                                if deleted_projects else NOT_TOUCHED), "backups": BACKUPS}
 
     def _kept(self, c: sqlite3.Connection, chat_ids: List[str], mem_ids: List[str], sel: dict) -> List[dict]:
         """What stays that refers to the selection, with counts. Shown before
@@ -236,8 +258,10 @@ class Reset:
                              "text": f"{from_chats} memory item(s) you accepted from these chats stay in memory, "
                                      "because you did not select them. Their source names a chat that will no "
                                      "longer exist."})
+            deleted_projects = sel.get("delete_projects", [])
+            excluded = (f" AND project_id NOT IN ({','.join('?' * len(deleted_projects))})" if deleted_projects else "")
             decided = c.execute(f"SELECT COUNT(*) FROM memory_candidates WHERE status != 'pending' AND chat_id IN "
-                                f"({marks})", chat_ids).fetchone()[0]
+                                f"({marks})" + excluded, chat_ids + deleted_projects).fetchone()[0]
             if decided:
                 kept.append({"what": "review_history", "count": decided,
                              "text": f"{decided} accepted or rejected suggestion(s) from these chats stay in the "
@@ -306,12 +330,12 @@ class Reset:
         if locks is not None and hasattr(locks, "forget"):
             locks.forget(chat_ids)
         return {"done": True, "deleted": deleted, "items": [{"type": i["type"], "id": i["id"]} for i in first["items"]],
-                "kept": first["kept"], "not_touched": NOT_TOUCHED, "backups": BACKUPS,
+                "kept": first["kept"], "not_touched": first["not_touched"], "backups": BACKUPS,
                 "start_fresh": sel["start_fresh"]}
 
     @staticmethod
     def _delete(c: sqlite3.Connection, preview: dict) -> Dict[str, int]:
-        by: Dict[str, List[str]] = {"chat": [], "personal": [], "project": [], "suggestion": []}
+        by: Dict[str, List[str]] = {"chat": [], "personal": [], "project": [], "suggestion": [], "project_container": []}
         for i in preview["items"]:
             by[i["type"]].append(i["id"])
 
@@ -327,4 +351,9 @@ class Reset:
                "chats": run("DELETE FROM chats WHERE id IN ({})", by["chat"]),
                "personal": run("DELETE FROM personal_memory WHERE id IN ({})", by["personal"]),
                "project": run("DELETE FROM project_memory WHERE id IN ({})", by["project"])}
+        # Database references only: never touch the attached filesystem root.
+        if by["project_container"]:
+            for table in ("memory_candidates", "grants", "workspaces", "access_policy"):
+                run(f"DELETE FROM {table} WHERE project_id IN ({{}})", by["project_container"])
+            out["projects"] = run("DELETE FROM projects WHERE id IN ({})", by["project_container"])
         return out

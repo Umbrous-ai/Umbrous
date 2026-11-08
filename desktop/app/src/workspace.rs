@@ -32,6 +32,9 @@ mod model_controls;
 #[path = "access_controls.rs"]
 mod access_controls;
 pub use access_controls::PendingApproval;
+#[path = "deletion.rs"]
+mod deletion;
+pub use deletion::DeleteDialog;
 /// Every workspace profile a chat's access may be (the e2e driver names them).
 pub fn access_levels() -> &'static [&'static str] { &["workspace_read", "ask_before_read", "code_ask_commands", "workspace_code"] }
 
@@ -128,6 +131,9 @@ pub struct Workspace {
     archived: Vec<api::ChatInfo>,
     show_archived: bool,
     chat_menu: Option<String>,
+    project_menu: Option<String>,
+    pub deletion: Option<DeleteDialog>,
+    deletion_seq: u64,
     settings_open: bool,
     settings_archived: Option<Vec<api::ChatInfo>>,
     settings_error: Option<String>,
@@ -334,6 +340,9 @@ impl Workspace {
             archived: vec![],
             show_archived: false,
             chat_menu: None,
+            project_menu: None,
+            deletion: None,
+            deletion_seq: 0,
             settings_open: false,
             settings_archived: None,
             settings_error: None,
@@ -488,7 +497,14 @@ impl Workspace {
                 let keep = select.or(this.project_id.clone()).filter(|id| this.projects.iter().any(|p| &p.id == id));
                 let id = keep.or_else(|| this.projects.iter().find(|p| p.id == "prj_general").or(this.projects.first()).map(|p| p.id.clone()));
                 if this.project_id != id {
+                    this.new_chat(cx);
                     this.project_id = id;
+                    this.chats.clear();
+                    this.archived.clear();
+                    this.access = None;
+                    this.memory = None;
+                    this.access_seq += 1;
+                    this.memory_seq += 1;
                 }
                 this.load_chats(cx);
             }
@@ -497,10 +513,10 @@ impl Workspace {
 
     pub fn load_chats(&mut self, cx: &mut Context<Self>) {
         self.load_memory(cx);
+        self.chats_seq += 1;
         let Some(pid) = self.project_id.clone() else { return };
         self.load_access(cx);
         let show_archived = self.show_archived;
-        self.chats_seq += 1;
         let seq = self.chats_seq;
         let for_project = pid.clone();
         self.api_call(
@@ -1086,6 +1102,7 @@ impl Workspace {
 
     fn can_send(&self) -> bool {
         matches!(self.phase, Phase::Ready)
+            && self.project_id.is_some()
             && self.provider_up()
             && self.model.is_some()
             && self.run.is_none()
@@ -1561,6 +1578,10 @@ impl Workspace {
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         if self.full_access_confirm.is_some() {
             self.full_access_confirm = None;
+        } else if self.deletion.is_some() {
+            self.cancel_deletion(cx);
+        } else if self.project_menu.is_some() {
+            self.project_menu = None;
         } else if self.reset.is_some() {
             self.close_reset(cx);
         } else if self.chat_menu.is_some() {
@@ -1661,14 +1682,37 @@ impl Workspace {
             let current = self.project_id.as_deref() == Some(&p.id);
             let id = p.id.clone();
             let row_id = SharedString::from(format!("p-{}", p.id));
+            let menu_id = p.id.clone();
+            let delete_id = p.id.clone();
+            let delete_title = p.name.clone();
             projects = projects.child(
                 ui::nav(row_id.clone(), current)
                     .font_weight(FontWeight::NORMAL)
                     .child(ui::hover_icon("folder", &row_id, if current { text_strong() } else { text_default() }, text_strong()))
                     .child(ui::nav_title(p.name.clone()))
                     .when(p.chats > 0, |d| d.child(ui::nav_count(p.chats.to_string())))
+                    .child(div().id(SharedString::from(format!("project-menu-{}", p.id)))
+                        .size(px(28.)).flex_none().flex().items_center().justify_center().rounded(px(R_6))
+                        .hover(|s| s.bg(bg_hover())).child(ui::icon("more").text_color(text_default()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.chat_menu = None;
+                            this.project_menu = if this.project_menu.as_ref() == Some(&menu_id) { None } else { Some(menu_id.clone()) };
+                            cx.notify();
+                        })))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.select_project(id.clone(), cx))),
             );
+            if self.project_menu.as_ref() == Some(&p.id) {
+                projects = projects.child(div().p(px(6.)).rounded(px(R_8)).bg(bg_raised())
+                    .child(ui::nav(SharedString::from(format!("delete-project-{}", p.id)), false).text_color(danger()).child("Delete project…")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.open_deletion(true, delete_id.clone(), delete_title.clone(), cx);
+                        }))));
+            }
+        }
+        if self.projects.is_empty() {
+            projects = projects.child(ui::nav("create-first-project", false).child("Create project")
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.begin_add_project(window, cx))));
         }
         if let Some(input) = &self.project_input {
             // `.proj-input`
@@ -1697,7 +1741,9 @@ impl Workspace {
         let archived_count = project.map(|p| p.archived_chats).unwrap_or(0);
         if self.chats.is_empty() {
             // `.side-empty`
-            let text = if archived_count > 0 {
+            let text = if self.project_id.is_none() {
+                "Create a project to start a chat.".into()
+            } else if archived_count > 0 {
                 format!("No active chats in {pname}. {archived_count} archived.")
             } else {
                 format!("No chats in {pname} yet.")
@@ -1721,7 +1767,7 @@ impl Workspace {
             let menu_id = id.clone();
             let archive_id = id.clone();
             let delete_id = id.clone();
-            let pid = c.project_id.clone();
+            let delete_title = c.title.clone();
             let archived = c.archived;
             row = row.child(div().id(SharedString::from(format!("chat-menu-{}", c.id)))
                 .size(px(28.)).flex_none().flex().items_center().justify_center().rounded(px(R_6))
@@ -1741,7 +1787,7 @@ impl Workspace {
                         .child(if archived { "Restore chat" } else { "Archive chat" })
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_chat_archived(archive_id.clone(), !archived, cx))))
                     .child(ui::nav(SharedString::from(format!("delete-{}", c.id)), false).text_color(danger()).child("Delete chat…")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_reset_in_project(Some(delete_id.clone()), pid.clone(), cx)))));
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_deletion(false, delete_id.clone(), delete_title.clone(), cx)))));
             }
         }
         if self.show_archived || archived_count > 0 {
@@ -1996,6 +2042,7 @@ impl Workspace {
             for chat in chats {
                 let restore_id = chat.id.clone();
                 let delete_id = chat.id.clone();
+                let delete_title = chat.title.clone();
                 let pid = chat.project_id.clone();
                 let project = self.projects.iter().find(|p| p.id == pid).map(|p| p.name.clone()).unwrap_or_default();
                 list = list.child(div().flex().items_center().gap(px(8.)).py(px(8.)).border_b_1().border_color(border())
@@ -2004,7 +2051,7 @@ impl Workspace {
                     .child(ui::nav(SharedString::from(format!("settings-restore-{}", chat.id)), false).w(px(76.)).child("Restore")
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_chat_archived(restore_id.clone(), false, cx))))
                     .child(ui::nav(SharedString::from(format!("settings-delete-{}", chat.id)), false).w(px(76.)).text_color(danger()).child("Delete…")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_reset_in_project(Some(delete_id.clone()), pid.clone(), cx)))));
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_deletion(false, delete_id.clone(), delete_title.clone(), cx)))));
             }
         } else { list = list.child("Loading archived chats…"); }
         Some(div().id("settings-overlay").absolute().inset_0().flex().items_center().justify_center().bg(gpui::rgba(0x0000_0099))
@@ -2075,10 +2122,10 @@ impl Workspace {
                         .text_color(text_strong())
                         .hover(|s| s.bg(bg_selected()))
                         .child("Delete chat…")
-                        .child(div().text_size(fs_12()).text_color(text_subtle()).child("Shows what goes and what stays first"))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            let id = this.chat.as_ref().map(|c| c.id.clone());
-                            this.open_reset(id, cx);
+                            if let Some(chat) = this.chat.clone() {
+                                this.open_deletion(false, chat.id, chat.title, cx);
+                            }
                         })),
                 )
                 .into_any_element(),
@@ -2559,9 +2606,11 @@ impl Workspace {
             let project = self.projects.iter().find(|p| Some(&p.id) == self.project_id.as_ref()).map(|p| p.name.clone()).unwrap_or_default();
             notices.push(
                 ui::notice(None)
-                    .child(div().flex_1().min_w_0().child(format!(
+                    .child(div().flex_1().min_w_0().child(if self.project_id.is_none() {
+                        "Create a project in the sidebar to start a chat.".to_string()
+                    } else { format!(
                         "New chat in {project}. Ollama models run on this Mac. ChatGPT models send the conversation and tool results to OpenAI using your subscription. Chats are saved on this Mac."
-                    )))
+                    ) }))
                     .into_any_element(),
             );
         }
@@ -2886,7 +2935,8 @@ impl Render for Workspace {
         let confirm = self.render_full_access_confirm(cx);
         let settings = self.render_settings(cx);
         let reset = self.render_reset_dialog(cx);
-        let el = root.relative().child(app).children(settings).children(reset).children(confirm);
+        let deletion = self.render_deletion(cx);
+        let el = root.relative().child(app).children(settings).children(reset).children(deletion).children(confirm);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.perf.render_count += 1;
         self.perf.render_ms_total += ms;

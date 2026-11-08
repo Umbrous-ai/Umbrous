@@ -1,7 +1,7 @@
 """Chat History / Session Store (M2).
 
 Its own logical store, in the `projects`, `chats` and `messages` tables of the
-runtime's SQLite file. Nothing else writes there, and nothing here touches
+runtime's SQLite file. Reset also deletes rows there; nothing here touches
 other stores: memory (M6) and task records/receipts (M3, M4) live in their
 own tables, and no operation in this module reaches into them.
 
@@ -9,9 +9,9 @@ What each word means here:
   transcript   the messages of one chat, exactly as sent and received
   archived     a chat with archived_at set: hidden from the normal list,
                read-only, every message kept. Unarchive clears archived_at.
-  deleted      not possible yet. The deletion contract (recovery, backups,
-               derived copies) is an open decision, so there is no delete
-               function, endpoint or button. See docs/m2-history.md.
+  deleted      removed by the reset service, including its messages. Project
+               deletion also removes project-owned data, never source files.
+               See docs/deletion.md.
 
 Every chat belongs to exactly one project. A fresh database has one project,
 "General".

@@ -1,0 +1,44 @@
+# Seeded by validate-deletion.sh. Every deletion uses the UI's shared handlers.
+wait_ready 30
+select_project Disposable
+open_chat Active chat
+# Cancellation must preserve the selected chat.
+delete_open chat Active chat
+expect deletion chat Active chat chats=1 error=none
+delete_cancel
+expect deletion closed
+expect sessions Active chat
+# One confirmation closes the dialog and removes the chat immediately.
+delete_open chat Active chat
+delete_confirm
+expect deletion closed
+expect sessions_lack Active chat
+# Archiving does not require a second modal and archived chats use the same delete.
+open_chat Archive then delete
+archive
+delete_open chat Archive then delete
+delete_confirm
+expect deletion closed
+expect chat none
+# Delete a project containing only archived chats, from another project.
+select_project General
+delete_open project Disposable
+expect deletion project Disposable chats=1 error=none
+screenshot @OUT@/delete-project.png
+delete_cancel
+expect projects Disposable
+delete_open project Disposable
+delete_confirm
+expect projects_lack Disposable
+expect deletion closed
+# Empty and last projects can be removed; create a new one afterwards.
+delete_open project General
+delete_confirm
+expect project_count 0
+expect deletion closed
+expect chat none
+screenshot @OUT@/no-projects.png
+add_project Fresh project
+expect projects Fresh project
+record end
+quit

@@ -409,5 +409,90 @@ class CliTests(unittest.TestCase):
             self.assertIn("Quit it first", err.getvalue())
 
 
+class ProjectDeletionTests(Base):
+    def test_project_delete_includes_archives_and_keeps_files_and_other_projects(self):
+        from umbrous.gate.access import AccessStore
+        folder = Path(self.tmp.name) / 'source'
+        folder.mkdir()
+        (folder / 'keep.txt').write_text('source stays')
+        access = AccessStore(self.path, Path(self.tmp.name) / "home")
+        access.attach(self.a, str(folder), 'workspace_read')
+        access.grant(self.a, "fs.read")
+        self.history.set_archived(self.a2, True)
+        self.add_candidate('cand_1234567890abcdef', self.a1, 'pending')
+        sel = {'delete_projects': [self.a]}
+        preview = self.rs.preview(sel)
+        self.assertIn(self.a, self.ids(preview, 'project_container'))
+        self.assertEqual(set(self.ids(preview, 'chat')), {self.a1, self.a2})
+        out = self.rs.confirm(sel, preview['preview_id'])
+        self.assertEqual(out['deleted']['projects'], 1)
+        for table in ('chats', 'project_memory', 'workspaces', 'access_policy', 'grants', 'memory_candidates'):
+            self.assertEqual(self.sql(f'SELECT COUNT(*) FROM {table} WHERE project_id=?', (self.a,))[0][0], 0)
+        self.assertEqual((folder / 'keep.txt').read_text(), 'source stays')
+        self.assertEqual(self.history.get_chat(self.b1).project_id, self.b)
+        self.assertEqual(len(self.sql('SELECT id FROM personal_memory')), 2)
+        self.assertEqual(self.sql('PRAGMA foreign_key_check'), [])
+
+    def test_empty_and_last_project_can_be_deleted(self):
+        for project in self.history.list_projects():
+            sel = {'delete_projects': [project.id]}
+            preview = self.rs.preview(sel)
+            self.assertFalse(preview['empty'])
+            self.rs.confirm(sel, preview['preview_id'])
+        self.assertEqual(self.history.list_projects(), [])
+        new = self.history.create_project('Fresh project')
+        self.assertEqual(self.history.create_chat(new.id).project_id, new.id)
+
+    def test_project_delete_refuses_new_chat_and_busy_chat_without_partial_deletion(self):
+        sel = {'delete_projects': [self.a]}
+        preview = self.rs.preview(sel)
+        self.history.create_chat(self.a, 'New since confirmation')
+        before = self.dump()
+        with self.assertRaises(ResetError) as err:
+            self.rs.confirm(sel, preview['preview_id'])
+        self.assertEqual(err.exception.code, 'preview_changed')
+        self.assertEqual(self.dump(), before)
+        locks = ChatLocks()
+        locks.get(self.a2).acquire()
+        try:
+            preview = self.rs.preview(sel)
+            with self.assertRaises(ResetError) as err:
+                self.rs.confirm(sel, preview['preview_id'], locks)
+            self.assertEqual(err.exception.code, 'chat_busy')
+            self.assertEqual(self.dump(), before)
+        finally:
+            locks.get(self.a2).release()
+
+    def test_failed_project_delete_rolls_back_every_child(self):
+        sel = {'delete_projects': [self.a]}
+        preview = self.rs.preview(sel)
+        before = self.dump()
+        self.sql("CREATE TRIGGER fail_project BEFORE DELETE ON projects BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.rs.confirm(sel, preview['preview_id'])
+        self.assertEqual(self.dump(), before)
+
+
+class ProjectDeletionApiTests(unittest.TestCase):
+    def test_project_delete_requires_preview_and_survives_reload(self):
+        with RunningRuntime() as rt:
+            project = rt.runtime.history.create_project('Delete through API')
+            chat = rt.runtime.history.create_chat(project.id)
+            rt.runtime.history.set_archived(chat.id, True)
+            selection = {'delete_projects': [project.id]}
+            status, _, _ = rt.post_json('/api/reset', {'selection': selection})
+            self.assertEqual(status, 409)
+            self.assertEqual(rt.runtime.history.get_chat(chat.id).project_id, project.id)
+            status, _, body = rt.post_json('/api/reset/preview', {'selection': selection})
+            self.assertEqual(status, 200)
+            preview = json.loads(body)
+            status, _, body = rt.post_json('/api/reset', {'selection': selection, 'preview_id': preview['preview_id']})
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)['deleted']['projects'], 1)
+            status, projects = rt.get_json('/api/projects')
+            self.assertNotIn(project.id, [p['id'] for p in projects['projects']])
+            self.assertNotIn(project.id, [p.id for p in HistoryStore(rt.config.db_path).list_projects()])
+
+
 if __name__ == "__main__":
     unittest.main()
