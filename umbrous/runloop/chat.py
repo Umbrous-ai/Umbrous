@@ -101,6 +101,17 @@ STOP_GRACE_S = 0.5           # after Stop, how long a running tool gets to notic
 class TaskTimeLimit(Cancelled):
     code = "task_time_limit"
 
+NO_WORKSPACE_PROMPT = (
+    "\n\nThis chat has no workspace folder attached, so you have no file or command tools. "
+    "You can discuss and plan, but cannot implement changes. If the user asks you to act on code, "
+    "explain this specific blocker and give the native app steps: click Chat only in the composer, "
+    "choose Workspace write, and select the source folder. Workspace write permits edits in that "
+    "folder and asks before commands. Then ask them to resend the implementation request; the "
+    "conversation is retained. They can also name a folder explicitly with 'work on /absolute/path'. "
+    "Do not promise background work, say changes were made, or ask for broad Full access. "
+    "For work on Umbrous itself, the source repository is needed, not the installed .app bundle."
+)
+
 TOOL_PROMPT = (
     "\n\nYou can use three read-only tools on this project's workspace folder ({name}): list_files, "
     "read_file and search_files. Paths are relative to the workspace root. Use them when the question is "
@@ -306,7 +317,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             self_note = selfsource.note(ws.root) if coding else None
             system = config.system_prompt + (
                 CODE_PROMPT.format(root=ws.root, self_note=" " + self_note if self_note else "") if coding else
-                TOOL_PROMPT.format(name=ws.name) if tools_on else "")
+                TOOL_PROMPT.format(name=ws.name) if tools_on else NO_WORKSPACE_PROMPT if ws is None else "")
             turns = history.turns(chat_id)
             # M6: read memory now, from the tables (no cache), for this project only.
             mem = select(memory, chat_info.project_id, message, max_items=config.memory_max_items,

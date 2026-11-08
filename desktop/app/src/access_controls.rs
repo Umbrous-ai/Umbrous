@@ -238,7 +238,7 @@ impl Workspace {
     pub fn access_pill_label(&self) -> String {
         match self.effective_profile() {
             None if self.access.is_none() => "Access".to_string(),
-            None => "No folder".to_string(),
+            None => "Chat only".to_string(),
             Some(p) if self.tools_blocked_by_check() => format!("{} · no tools", level_label(&p)),
             Some(p) => level_label(&p).to_string(),
         }

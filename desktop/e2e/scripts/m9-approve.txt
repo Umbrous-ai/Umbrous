@@ -62,7 +62,7 @@ expect access code_ask_commands
 add_project Fresh
 select_project Fresh
 new_chat
-expect access_pill No folder
+expect access_pill Chat only
 attach_folder workspace_code @OUT@/m9-fixture/d/proj
 expect chat_access workspace_code
 expect access workspace_read
