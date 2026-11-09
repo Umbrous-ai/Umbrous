@@ -141,5 +141,8 @@ run) and in the step's own folder; Stop during the check means Grok is never sta
 Grok's settings files (~/.grok and /etc/grok: config, managed_config, requirements) are
 read too, and any setting that can run a program (sign-in helpers, hooks, notification
 hooks, status line, MCP servers, feedback command), or anything that looks like one,
-means Grok is not started: `grok inspect` does not report all of them. A step's
+means Grok is not started: `grok inspect` does not report all of them. Only plain TOML
+is accepted there (bare keys, one-line values without escapes); quoted or escaped keys,
+inline tables and multi-line values are refused, so a key cannot be spelled in a way the
+check does not see. A step's
 whole process group is ended afterwards, even when Grok Build itself already exited.

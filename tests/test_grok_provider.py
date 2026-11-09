@@ -1,6 +1,7 @@
 """Grok provider boundaries; no account or model traffic needed."""
 import json
 import os
+import sys
 import queue
 import unittest
 import unittest.mock
@@ -222,6 +223,49 @@ class GrokTests(unittest.TestCase):
             list(a.chat_stream("grok/grok-4.7", [{"role": "user", "content": "hi"}], tools=[TOOL]))
         self.assertEqual(steps, [])
 
+    def test_escaped_quoted_or_unusual_settings_are_refused(self):
+        from umbrous.model.grok import check_config
+        esc = '"\\u0061uth_provider_command"'                              # a TOML-escaped key
+        for text in ('[auth]\n' + esc + ' = "/x"\n',
+                     '[auth]\n"auth_provider_command" = "/x"\n',          # quoted key
+                     "[auth]\n'auth_provider_command' = '/x'\n",
+                     '[cli]\nx = { a = 1 }\n',                              # inline table
+                     '[cli]\nx = """\nmulti\n"""\n',                          # multi-line string
+                     '[cli]\nx = [\n1,\n]\n',                                  # multi-line array
+                     '[cli]\nx = "a\\tb"\n',                                  # any escape at all
+                     '["auth"]\nx = 1\n'):                                  # quoted table name
+            home = Path(self.empty_home())
+            (home / "config.toml").write_text(text)
+            with self.assertRaises(ProviderError, msg=text):
+                check_config(home, Path(self.empty_home()))
+        home = Path(self.empty_home())
+        (home / "config.toml").write_text('[cli]\ninstaller = "curl" # comment\n\n[[marketplace.sources]]\n'
+                                          'name = "x"\ngit = "https://example.com/x.git"\nlist = ["a", 1, true]\n')
+        check_config(home, Path(self.empty_home()))
+
+    def test_stop_and_timeout_work_while_a_descendant_holds_the_output(self):
+        import subprocess, time, threading
+        from umbrous.model.base import Cancelled
+        from umbrous.model.grok import run_cancellable
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):                  # the child keeps stdout open
+            run_cancellable(["/bin/sh", "-c", "sleep 30 & echo started"], timeout=0.2)
+        self.assertLess(time.monotonic() - started, 4)
+        token = CancelToken()
+        threading.Timer(0.5, token.cancel).start()
+        started = time.monotonic()
+        with self.assertRaises(Cancelled):
+            run_cancellable(["/bin/sh", "-c", "sleep 30 & echo started"], cancel=token, timeout=60)
+        self.assertLess(time.monotonic() - started, 4)
+        # A descendant that left the process group: reading gives up instead of hanging.
+        escaped = ("import os, sys, time\nif os.fork() == 0:\n    os.setsid()\n    print(os.getpid(), flush=True)\n"
+                   "    time.sleep(30)\n")
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_cancellable([sys.executable, "-c", escaped], timeout=0.3)
+        self.assertLess(time.monotonic() - started, 5)
+        subprocess.run(["pkill", "-f", "time.sleep\\(30\\)"], check=False)
+
     def test_the_check_runner_never_signals_a_reaped_child(self):
         import time
         from umbrous.model.base import Cancelled
@@ -241,7 +285,7 @@ class GrokTests(unittest.TestCase):
             with self.assertRaises(Cancelled):
                 run_cancellable(["/bin/sh", "-c", "sleep 30"], cancel=slow, timeout=60)
             self.assertLess(time.monotonic() - started, 5)                  # Stop ended it
-            self.assertEqual(len(calls), 1)
+            self.assertGreaterEqual(len(calls), 1)                         # signalled while still running
 
     def test_cleanup_ends_processes_left_after_grok_exits(self):
         import subprocess, time

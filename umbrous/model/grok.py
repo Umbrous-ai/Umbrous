@@ -127,27 +127,19 @@ def command(binary: str, model: str, effort: Optional[str], system: str, tools, 
 
 
 def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float = 30, **kwargs):
-    """subprocess.run that Stop ends at once (the whole process group).
+    """subprocess.run that Stop and the time limit end at once (the whole process group).
 
-    Signalling and reaping share one lock: the child is reaped only by poll() under
-    the lock, and the group is signalled only under the lock while not yet reaped, so
-    a group id that may already be reused is never signalled."""
+    One thread does everything: it reads both pipes with select (never blocking), and
+    Stop or the deadline are honoured while reading, even when a descendant keeps a
+    pipe open. The child is not reaped before reading ends or it was signalled, so the
+    group id cannot have been reused when it is signalled; after reaping, it never is.
+    If a process that left the group still holds a pipe, reading gives up shortly after
+    the kill and the pipes are closed (they belong to this thread alone)."""
+    import select
     kwargs.pop("capture_output", None)
     text = kwargs.pop("text", False)
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, **kwargs)
     lock, state = threading.Lock(), {"reaped": False}
-    chunks = {"out": [], "err": []}
-
-    def drain(stream, into):
-        try:
-            for data in iter(lambda: stream.read(65536), b""):
-                into.append(data)
-        except (OSError, ValueError):
-            pass
-    readers = [threading.Thread(target=drain, args=(proc.stdout, chunks["out"]), daemon=True),
-               threading.Thread(target=drain, args=(proc.stderr, chunks["err"]), daemon=True)]
-    for r in readers:
-        r.start()
 
     def kill():
         with lock:
@@ -159,28 +151,46 @@ def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float =
                 pass
     if cancel is not None:
         cancel.on_cancel(kill)
-    until, timed_out = time.monotonic() + timeout, False
-    while True:
-        with lock:
-            if proc.poll() is not None:
-                state["reaped"] = True
+    fds = {proc.stdout.fileno(): [], proc.stderr.fileno(): []}
+    open_fds = set(fds)
+    until, killed_at, why = time.monotonic() + timeout, None, None
+    try:
+        while True:
+            now = time.monotonic()
+            if killed_at is None and ((cancel is not None and cancel.cancelled) or now >= until):
+                why = "cancelled" if cancel is not None and cancel.cancelled else "timeout"
+                kill()
+                killed_at = now
+            if not open_fds or (killed_at is not None and now - killed_at > 2):
                 break
-        if not timed_out and time.monotonic() >= until:
-            timed_out = True
-            kill()
-        time.sleep(0.02)
-    for r in readers:
-        r.join(2)
-    for stream in (proc.stdout, proc.stderr):
-        try:
-            stream.close()
-        except (OSError, ValueError):
-            pass
-    if cancel is not None and cancel.cancelled:
+            ready, _, _ = select.select(list(open_fds), [], [], 0.05)
+            for fd in ready:
+                data = os.read(fd, 65536)
+                if data:
+                    fds[fd].append(data)
+                else:
+                    open_fds.discard(fd)
+        # Reap, still honouring Stop and the deadline.
+        while True:
+            with lock:
+                if proc.poll() is not None:
+                    state["reaped"] = True
+                    break
+            if why is None and ((cancel is not None and cancel.cancelled) or time.monotonic() >= until):
+                why = "cancelled" if cancel is not None and cancel.cancelled else "timeout"
+                kill()
+            time.sleep(0.02)
+    finally:
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()                 # no other thread uses them: never blocks
+            except (OSError, ValueError):
+                pass
+    if why == "cancelled" or (cancel is not None and cancel.cancelled):
         raise Cancelled("Stopped.")
-    if timed_out:
+    if why == "timeout":
         raise subprocess.TimeoutExpired(argv, timeout)
-    out, err = b"".join(chunks["out"]), b"".join(chunks["err"])
+    out, err = (b"".join(v) for v in fds.values())          # stdout first, then stderr
     if text:
         out, err = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
@@ -199,6 +209,54 @@ EXECUTABLE_MARKERS = ("command", "cmd", "hook", "auth_provider", "mcp_servers", 
                       "helper", "exec", "script")
 
 
+import re as _re
+_BARE = r"[A-Za-z0-9_-]+"
+_KEY = _BARE + r"(?:\s*\.\s*" + _BARE + r")*"
+_HEADER = _re.compile(r"^\[\[?\s*(" + _KEY + r")\s*\]\]?$")
+_PAIR = _re.compile(r"^(" + _KEY + r")\s*=\s*(.+)$")
+# Values accepted: a one-line string without escapes, a number, a boolean, a date, or a
+# one-line array of those. Anything else (escapes, quoted keys, inline tables,
+# multi-line strings or arrays) is not read further: the file is refused.
+_SCALAR = r"(?:\"[^\"\\\n]*\"|'[^'\n]*'|[+-]?[0-9][0-9_.:eE+TZ-]*|true|false|inf|nan)"
+_VALUE = _re.compile(r"^(?:" + _SCALAR + r"|\[\s*(?:" + _SCALAR + r"\s*(?:,\s*" + _SCALAR + r"\s*)*,?)?\s*\])$")
+
+
+def _strip_comment(line: str) -> str:
+    """The line without a trailing comment (a # outside quotes)."""
+    quote = None
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            return line[:i]
+    return line
+
+
+def settings_keys(text: str) -> list:
+    """Every key and table name in a Grok settings file, exactly as Grok reads them.
+
+    Only a plain subset of TOML is accepted: bare (unquoted, unescaped) keys and
+    simple one-line values. Anything else raises ValueError, so an escaped or quoted
+    key can never spell a setting the scan below does not see."""
+    keys = []
+    for raw in text.splitlines():
+        line = _strip_comment(raw).strip()
+        if not line:
+            continue
+        m = _HEADER.match(line)
+        if m:
+            keys.append(_re.sub(r"\s+", "", m.group(1)))
+            continue
+        m = _PAIR.match(line)
+        if not m or not _VALUE.match(m.group(2).strip()):
+            raise ValueError(raw)
+        keys.append(_re.sub(r"\s+", "", m.group(1)))
+    return keys
+
+
 def check_config(grok_home: Optional[Path] = None, system: Path = SYSTEM_CONFIG) -> None:
     home = grok_home or Path.home() / ".grok"
     for folder in (home, system):
@@ -207,10 +265,16 @@ def check_config(grok_home: Optional[Path] = None, system: Path = SYSTEM_CONFIG)
             try:
                 if not path.exists():
                     continue
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+                text = path.read_bytes().decode("utf-8")
+            except (OSError, UnicodeDecodeError):
                 raise ProviderError(f"Could not read Grok Build's settings ({path}); nothing was sent.") from None
-            body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#")).lower()
+            try:
+                keys = settings_keys(text)
+            except ValueError:
+                raise ProviderError(f"Grok Build's settings in {path} use TOML that Umbrous does not check (quoted "
+                                    "or escaped keys, inline tables or multi-line values), so nothing was sent.") from None
+            # The keys, and the whole text too (a value may name a helper as well).
+            body = " ".join(keys).lower() + " " + "\n".join(_strip_comment(l) for l in text.splitlines()).lower()
             found = sorted({m for m in EXECUTABLE_MARKERS if m in body})
             if found:
                 raise ProviderError(f"Grok Build's settings in {path} can run programs ({', '.join(found)}); "
