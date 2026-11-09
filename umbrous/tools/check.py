@@ -34,7 +34,7 @@ def _python(text: str, path: str) -> Optional[str]:
         ver = f"{sys.version_info.major}.{sys.version_info.minor}"
         return (f"Python {ver} cannot parse {path}: {exc.msg} ({where})."
                 + (f"\n    {src.strip()[:200]}" if src.strip() else ""))
-    except (ValueError, MemoryError, RecursionError) as exc:
+    except ValueError as exc:            # e.g. source with NUL bytes
         return f"Python cannot parse {path}: {str(exc)[:200]}."
     return None
 
@@ -47,11 +47,16 @@ def _json(text: str, path: str) -> Optional[str]:
     return None
 
 
-def _toml(text: str, path: str) -> Optional[str]:
+def _toml_available() -> bool:
     try:
-        import tomllib                                   # Python 3.11+
+        import tomllib  # noqa: F401                    # Python 3.11+
     except ImportError:
-        return None
+        return False
+    return True
+
+
+def _toml(text: str, path: str) -> Optional[str]:
+    import tomllib
     try:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -64,11 +69,19 @@ CHECKS = {".py": ("python", _python), ".pyi": ("python", _python), ".json": ("js
 
 
 def syntax(path: str, text: str) -> Optional[dict]:
-    """{"kind", "ok", "message"} for a file kind that can be checked, else None."""
+    """{"kind", "ok", "message"} when the file was checked; None when it was not (a
+    kind without a parser here, too large, too deeply nested, or no TOML parser)."""
     name = path.rsplit("/", 1)[-1].lower()
     ext = "." + name.rsplit(".", 1)[-1] if "." in name else ""
     if ext not in CHECKS or len(text) > MAX_CHECK_CHARS:
         return None
     kind, fn = CHECKS[ext]
-    message = fn(text, path)
+    if kind == "toml" and not _toml_available():
+        return None              # not checked (Python before 3.11): never reported as passing
+    try:
+        message = fn(text, path)
+    except (RecursionError, MemoryError):
+        # Too deeply nested for this parser: that says nothing about whether the file
+        # is valid, so it is reported as not checked, neither passing nor failing.
+        return None
     return {"kind": kind, "ok": message is None, "message": message}

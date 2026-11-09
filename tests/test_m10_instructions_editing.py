@@ -135,6 +135,26 @@ class EditTests(unittest.TestCase):
         again = self.call("edit_file", path="names.py", old_text="x", new_text="count", replace_all=True)
         self.assertEqual(again.observed["op"], "already_applied")
 
+    def test_a_repeated_replace_all_that_contains_its_old_text_is_not_applied_twice(self):
+        (self.ws / "x.txt").write_text("x\n")
+        first = self.call("edit_file", path="x.txt", old_text="x", new_text="xx", replace_all=True)
+        self.assertEqual(first.observed["op"], "edited")
+        again = self.call("edit_file", path="x.txt", old_text="x", new_text="xx", replace_all=True)
+        self.assertEqual(again.observed["op"], "already_applied")
+        self.assertEqual((self.ws / "x.txt").read_text(), "xx\n")
+        # the same for a single edit whose new text contains the old one
+        self.call("edit_file", path="x.txt", old_text="xx", new_text="xx()")
+        self.call("edit_file", path="x.txt", old_text="xx", new_text="xx()")
+        self.assertEqual((self.ws / "x.txt").read_text(), "xx()\n")
+
+    def test_the_same_call_after_someone_else_changed_the_file_is_applied(self):
+        (self.ws / "x.txt").write_text("x\n")
+        self.call("edit_file", path="x.txt", old_text="x", new_text="xx", replace_all=True)
+        (self.ws / "x.txt").write_text("x\n")          # reverted outside the task
+        self.ctx.seen.clear()
+        again = self.call("edit_file", path="x.txt", old_text="x", new_text="xx", replace_all=True)
+        self.assertEqual(again.observed["op"], "edited")
+
     def test_argument_checks(self):
         for args, words in (
                 ({"old_text": "a"}, "needs old_text and new_text"),
@@ -165,6 +185,30 @@ class EditTests(unittest.TestCase):
         good = self.call("edit_file", path="calc.py", old_text="    return a +", new_text="    return a + b")
         self.assertTrue(good.observed["check"]["ok"])
         self.assertNotIn("does not parse", good.model_text)
+
+    def test_repeating_a_broken_edit_keeps_reporting_it(self):
+        edit = dict(path="calc.py", old_text="    return a + b", new_text="    return a +")
+        self.call("edit_file", **edit)
+        again = self.call("edit_file", **edit)
+        self.assertEqual(again.observed["op"], "already_applied")
+        self.assertFalse(again.observed["check"]["ok"])
+        self.assertIn("does not parse", again.model_text)
+
+    def test_deep_nesting_is_not_checked_rather_than_crashing(self):
+        deep = "[" * 50_000 + "]" * 50_000
+        self.assertIsNone(check.syntax("deep.json", deep))
+        out = self.call("write_file", path="deep.json", content=deep)
+        self.assertEqual((out.decision, out.observed["check"]), ("allowed", None))
+        # CPython itself refuses this source, so for Python it is a real parse failure
+        self.assertFalse(check.syntax("deep.py", "x = " + "(" * 1_000 + ")" * 1_000 + "\n")["ok"])
+
+    def test_toml_without_a_parser_is_not_reported_as_passing(self):
+        from unittest import mock
+        with mock.patch.object(check, "_toml_available", return_value=False):
+            self.assertIsNone(check.syntax("pyproject.toml", "not = = toml"))
+        if check._toml_available():
+            self.assertFalse(check.syntax("pyproject.toml", "not = = toml")["ok"])
+            self.assertTrue(check.syntax("pyproject.toml", "a = 1\n")["ok"])
 
     def test_json_and_unknown_kinds(self):
         out = self.call("write_file", path="conf.json", content='{"a": 1,}')

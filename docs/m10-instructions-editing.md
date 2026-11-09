@@ -36,9 +36,14 @@ instructions file.
 
 * **All or none.** If any replacement does not match exactly once, nothing is
   written and the message says which one (`Edit 2 of 3: ...`).
-* **Repeats are safe.** A replacement whose old text is gone and whose new text
-  is there counts as already made, so a repeated or resumed call does not apply
-  twice (M5/M9 recovery is unchanged: it checks hashes on disk).
+* **Repeats are safe.** A call identical to this task's last change of a file,
+  while the file is still exactly as that change left it (same hash), is
+  reported as already applied and nothing is written; this covers changes whose
+  new text contains the old one (`x` → `xx` with `replace_all`), which a text
+  match alone would apply again. Otherwise a replacement whose old text is gone
+  and whose new text is there counts as already made. Across a crash, M5/M9
+  recovery is unchanged: it checks hashes on disk and tells the resumed task
+  what was done.
 * One call is one step, one approval and one receipt, instead of one per
   change. `edits` may also arrive as a JSON string (some models send nested
   arrays that way). At most 50 replacements per call.
@@ -56,6 +61,11 @@ started, so this needs no permission beyond the write already allowed.
 * The task's progress record lists `files_not_parsing` until a later change
   to that file parses, and tells the model to fix those first.
 * Python is parsed by the Python Umbrous runs on; the message names its version.
+* A repeated change (already applied) is checked again, so a broken file stays
+  listed until a change to it parses.
+* "Not checked" is never "passed": TOML is checked only where Python has
+  `tomllib` (3.11+); input too deeply nested for the parser, or over 512 KB, is
+  not checked (`check: null`), and a checker failure never fails the write.
 
 Not in M10: running the project's own linter or type checker automatically.
 That runs project code, so it goes through `run_command` and the gate like any
@@ -63,7 +73,7 @@ command; the project's AGENTS.md is the place to say which check to run.
 
 ## Tests
 
-`python3 -m unittest tests.test_m10_instructions_editing` (17 tests): which
+`python3 -m unittest tests.test_m10_instructions_editing` (22 tests): which
 instruction files are read and when not, multi-edit all-or-none and repeats,
 replace_all, argument checks, the parse check, and a running runtime where the
 instructions reach the model and a broken edit reaches the progress record.

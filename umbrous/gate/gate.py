@@ -211,6 +211,10 @@ class ToolContext:
     command_started: Callable[[dict], None] = lambda data: None
     command_timeout_s: int = 120
     command_timeout_max_s: int = 1800
+    # M10: file -> (the change's arguments, the hash it left). A call identical to the
+    # last change of a file that is still exactly as that change left it is a repeat:
+    # reported as already applied, never applied again (replace_all x -> xx would be).
+    last_change: Dict[str, Tuple[str, str]] = field(default_factory=dict)
 
     # `seen` is keyed by the path as the disk spells it, not as the model did:
     # on a case-insensitive disk `calc.py` and `CALC.py` are one file, and an
@@ -652,10 +656,18 @@ class Gate:
         path = "/".join(v.parts)
         expect = (a.get("expected_sha256") or "").strip().lower() or ctx.version(ws.root, path)
         written: Dict[str, str] = {}
+        args_key = json.dumps({k: val for k, val in a.items() if k != "expected_sha256"}, sort_keys=True,
+                              ensure_ascii=False)
+        file_key = ctx._key(ws.root, path)
+        previous = ctx.last_change.get(file_key)
 
         def keep(compute):
-            # M10: remember the new text so it can be syntax-checked after the write
+            # M10: a repeat of this file's last change is not applied again, and the
+            # resulting text is kept so it can be parse-checked after the write
             def wrapped(old):
+                if v.action == "fs.edit" and old is not None and previous == (args_key, edit.sha(old.encode("utf-8"))):
+                    written["text"] = old
+                    return old, "edited_already"
                 text, op = compute(old)
                 written["text"] = text
                 return text, op
@@ -680,6 +692,7 @@ class Gate:
             return self._finish(task_id, action_id, project_id, chat_id, v, started, "uncertain", "tool_crashed",
                                 f"The change failed unexpectedly ({exc.__class__.__name__}).")
         ctx.remember(ws.root, r.path, r.after)
+        ctx.last_change[file_key] = (args_key, r.after)
         words = {"created": "Created", "replaced": "Replaced", "edited": "Edited", "unchanged": "Unchanged",
                  "already_applied": "Already applied"}
         lines = r.diff.count("\n") + 1 if r.diff else 0
@@ -688,8 +701,11 @@ class Gate:
         note = {"unchanged": " The content was already exactly this; nothing was written.",
                 "already_applied": " old_text is no longer there and new_text is, so the edit was already made "
                                    "(for example before an interruption); nothing was written."}.get(r.op, "")
-        checked = (check.syntax(r.path, written["text"])
-                   if r.op in ("created", "replaced", "edited") and "text" in written else None)
+        # Checked whatever the op: a repeat of a broken edit must not clear the failure.
+        try:
+            checked = check.syntax(r.path, written["text"]) if "text" in written else None
+        except Exception:   # a checker failure is never a failed write
+            checked = None
         if checked and not checked["ok"]:
             note += " The change was written, but it does not parse; fix it: " + checked["message"]
             summary += " · does not parse"

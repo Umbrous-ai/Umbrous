@@ -405,6 +405,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
         max_steps = config.code_max_steps if coding else config.task_max_steps
         max_calls = config.code_max_tool_calls if coding else config.task_max_tool_calls
         seen: Dict[str, str] = {}        # M9: file -> hash as this task last read or wrote it
+        last_change: Dict[str, tuple] = {}   # M10: file -> (args, hash) of this task's last change to it
         if tools_on:
             task_id = new_task_id()
             limits = {"max_steps": max_steps, "max_tool_calls": max_calls,
@@ -562,7 +563,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                                              profile=chat_access())
                     else:
                         result = None
-                        ctx = ToolContext(seen=seen, intent=(lambda aid: lambda d: trun.intent(aid, d))(action_id),
+                        ctx = ToolContext(seen=seen, last_change=last_change, intent=(lambda aid: lambda d: trun.intent(aid, d))(action_id),
                                           commands=commands,
                                           command_started=(lambda aid: lambda d: trun.command_started(aid, d))(action_id),
                                           command_timeout_s=config.command_timeout_s,
