@@ -290,6 +290,73 @@ class CodexTests(unittest.TestCase):
         finally:
             stream.close(); os.close(read_fd)
 
+    # ---------------------------------------------------------------- one conversation per task
+    def turn(self, server, reply, calls=()):
+        body = {"reply": reply, "calls": [{"name": n, "arguments": json.dumps(a)} for n, a in calls]}
+        server.events += [{"method": "item/agentMessage/delta", "params": {"threadId": "t", "delta": json.dumps(body)}},
+                          {"method": "turn/completed", "params": {"threadId": "t", "turn": {"status": "completed"}}}]
+
+    def task_adapter(self):
+        a = CodexAdapter(Path('/tmp'), server_factory=FakeServer)
+        list(a._models())               # the catalog (its own short-lived server) is cached first
+        return a, None
+
+    def inputs(self, server):
+        return [json.loads(p["input"][0]["text"]) for m, p in server.calls if m == "turn/start"]
+
+    def test_a_task_continues_one_conversation_and_sends_only_new_messages(self):
+        a, servers = self.task_adapter()
+        first = [{"role": "system", "content": "policy"}, {"role": "user", "content": "read x"}]
+        step = lambda msgs, tools=[TOOL]: list(a.chat_stream('codex/test-model', msgs, tools=tools))
+        # step 1: a new conversation with the whole transcript
+        task = FakeServer(events=[]); self.turn(task, "Reading.", [("read_file", {"path": "x"})])
+        a.server_factory = lambda: task
+        out = step(first)
+        self.assertIn(ChatToolCalls((("read_file", {"path": "x"}),)), out)
+        self.assertFalse(task.closed)                                       # kept for the next step
+        answer = {"role": "assistant", "content": "Reading.", "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "x"}}}]}
+        result = {"role": "tool", "content": "UNTRUSTED ... 1: hi", "tool_name": "read_file"}
+        record = {"role": "system", "content": "Runtime progress record. {}"}
+        # step 2: the same conversation; only the tool result and the fresh record are sent
+        a.server_factory = lambda: self.fail("a new conversation was started")
+        self.turn(task, "x says hi.")
+        out = step(first + [answer, result, record])
+        self.assertEqual(out[-1], ChatDone('codex/test-model', done_reason='stop'))
+        self.assertEqual([m for m, _ in task.calls].count("thread/start"), 1)
+        sent = self.inputs(task)
+        self.assertEqual(sent[0], {"transcript": first[1:], "available_tools": [TOOL]})
+        self.assertEqual(sent[1], {"transcript_continues": [result, record]})    # tools unchanged: not resent
+        start = next(p for m, p in task.calls if m == "thread/start")
+        self.assertTrue(start["baseInstructions"].endswith("policy"))           # the record is not in the instructions
+        self.assertTrue(task.closed)                                            # a final answer ends the conversation
+
+    def test_a_request_that_does_not_continue_the_task_starts_a_new_conversation(self):
+        a, servers = self.task_adapter()
+        first = [{"role": "system", "content": "policy"}, {"role": "user", "content": "read x"}]
+        one = FakeServer(events=[]); self.turn(one, "", [("read_file", {"path": "x"})])
+        a.server_factory = lambda: one
+        list(a.chat_stream('codex/test-model', first, tools=[TOOL]))
+        answer = {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "x"}}}]}
+        result = {"role": "tool", "content": "UNTRUSTED data", "tool_name": "read_file"}
+        two = FakeServer(events=[]); self.turn(two, "done")
+        a.server_factory = lambda: two
+        changed = [first[0], {"role": "user", "content": "read y"}, answer, result]     # an earlier message differs
+        list(a.chat_stream('codex/test-model', changed, tools=[TOOL]))
+        self.assertEqual(self.inputs(two)[0]["transcript"], changed[1:])               # full transcript, new thread
+        self.assertFalse(one.closed)                                                   # still waiting for its own task
+        a.close()
+        self.assertTrue(one.closed)
+
+    def test_a_failed_step_never_leaves_a_conversation_to_continue(self):
+        a, servers = self.task_adapter()
+        first = [{"role": "system", "content": "policy"}, {"role": "user", "content": "read x"}]
+        one = FakeServer(events=[{"method": "turn/completed", "params": {"threadId": "t", "turn": {"status": "failed"}}}])
+        a.server_factory = lambda: one
+        with self.assertRaises(ProviderError):
+            list(a.chat_stream('codex/test-model', first, tools=[TOOL]))
+        self.assertTrue(one.closed)
+        self.assertEqual(a._idle, [])
+
     def test_close_stops_live_processes(self):
         a, _ = self.adapter(); s = FakeServer()
         a._active.add(s); a.close(); self.assertTrue(s.closed)

@@ -52,6 +52,33 @@ those). Whether a provider bills cached tokens less depends on the provider.
 - Workspace resolution sends its instructions, the history and an inventory of
   up to 40 folders on every message of a chat without a folder. Its instructions
   were being rewritten in other work, so they were left as they are.
-- The ChatGPT (Codex) adapter JSON-encodes the transcript, which escapes every
-  newline and quote in file contents, and puts the per-step progress record in
-  the instructions, ahead of the transcript.
+- The ChatGPT provider still JSON-encodes the transcript (every newline and quote
+  in file contents is escaped), and each new Codex conversation carries about
+  6,500 tokens of Codex's own overhead. The memory-suggestion call after a task
+  opens one more conversation and is not cached.
+
+## ChatGPT provider: one conversation per task
+
+Before, every model step started a new, throwaway Codex conversation with the
+whole transcript and all system text (including the per-step progress record)
+in its instructions, so nothing could be served from OpenAI's prompt cache.
+Now a task keeps one conversation (`codex._Session`): the leading system text is
+its instructions, later system notes travel in the transcript, and each further
+step sends only `transcript_continues` (the messages after the model's previous
+answer) and the tools only when they change. A step whose request does not
+exactly continue the conversation (an earlier message was rewritten, the model's
+answer differs, a failure, Stop or time limit) starts a new conversation from the
+full transcript, as before. Idle conversations close after 120 s; at most 4 wait.
+
+Real runs, same task (add multiply to calc.py and make the tests pass), model
+gpt-6-astra at medium effort through the same ChatGPT sign-in; token counts are
+Codex's own usage reports. All runs passed the tests.
+
+| | Runs | Input tokens | From cache | Not cached |
+| --- | --- | --- | --- | --- |
+| Codex CLI | 2 | 76,400 | 70,000 (92 %) | 6,400 |
+| Umbrous before (main) | 3 | 39,990–41,730 | 0–3,600 | 38,100–41,730 |
+| Umbrous now | 3 | 40,828 | 15,900–28,000 (39–69 %) | 12,800–25,000 |
+
+Counting cached input at a tenth of the price, a task now costs Umbrous about
+20,000 token-equivalents (was about 40,000) against Codex's about 13,400.
