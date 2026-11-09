@@ -36,7 +36,7 @@ from umbrous.gate.access import ALLOW, ASK, BLOCK, COMMANDS, PROFILES, WRITES, A
 from umbrous.receipts.model import EvidenceRef, Receipt, new_action_id
 from umbrous.receipts.redaction import default_redactor
 from umbrous.receipts.store import ReceiptStore
-from umbrous.tools import edit, fs
+from umbrous.tools import check, edit, fs
 from umbrous.tools.run import CommandRegistry
 
 MAX_PATH = 1024
@@ -112,12 +112,15 @@ TOOLS: Dict[str, dict] = {
     "edit_file": {
         "retry": "verify",
         "action": "fs.edit",
-        "description": "Replace old_text, which must occur exactly once in the file, with new_text. Copy "
-                       "old_text exactly, with enough lines to be unique.",
+        "description": "Replace old_text, which must occur exactly once in the file (or every occurrence with "
+                       "replace_all), with new_text. Copy old_text exactly, with enough lines to be unique. For "
+                       "several changes to one file, pass edits instead: applied in order, all or none.",
         "params": {
             "path": (str, True, ""),
-            "old_text": (str, True, "Exact text to replace."),
-            "new_text": (str, True, "Replacement text."),
+            "old_text": (str, False, "Exact text to replace."),
+            "new_text": (str, False, "Replacement text."),
+            "replace_all": (bool, False, "Replace every occurrence of old_text."),
+            "edits": (list, False, "Several replacements in this file: [{old_text, new_text}, ...]."),
             "expected_sha256": (str, False, None),
         },
     },
@@ -147,6 +150,9 @@ TOOLS: Dict[str, dict] = {
     },
 }
 READ_TOOLS = ("list_files", "read_file", "search_files", "find_files")
+MAX_EDITS = 50     # replacements in one edit_file call
+EDIT_ITEM = {"type": "object", "properties": {"old_text": {"type": "string"}, "new_text": {"type": "string"}},
+             "required": ["old_text", "new_text"]}
 
 
 def offered(profile: str) -> List[str]:
@@ -166,8 +172,9 @@ def ollama_tools(names: Optional[List[str]] = None) -> List[dict]:
     for name, t in TOOLS.items():
         if name not in (names if names is not None else READ_TOOLS[:3]):
             continue
-        kinds = {int: "integer", bool: "boolean", str: "string"}
-        props = {p: {"type": kinds[typ], **({"description": d} if d else {})}
+        kinds = {int: "integer", bool: "boolean", str: "string", list: "array"}
+        props = {p: {"type": kinds[typ], **({"description": d} if d else {}),
+                     **({"items": EDIT_ITEM} if typ is list else {})}
                  for p, (typ, _req, d) in t["params"].items() if d is not None}
         out.append({"type": "function", "function": {
             "name": name, "description": t["description"],
@@ -340,6 +347,29 @@ class Approvals:
             return approval_id in self._used
 
 
+def _edit_args(clean: dict) -> Optional[str]:
+    """M10: edit_file takes old_text + new_text (optionally replace_all), or edits; never both.
+    Returns why the arguments are refused, or None."""
+    edits = clean.get("edits")
+    single = "old_text" in clean or "new_text" in clean
+    if edits is not None:
+        if single or clean.get("replace_all"):
+            return "Pass either old_text and new_text, or edits, not both."
+        if not 0 < len(edits) <= MAX_EDITS:
+            return f"edits must list 1 to {MAX_EDITS} replacements."
+        for i, e in enumerate(edits, 1):
+            if not isinstance(e, dict) or set(e) != {"old_text", "new_text"} or \
+                    not all(isinstance(e[k], str) for k in ("old_text", "new_text")):
+                return f"Edit {i} must be an object with exactly old_text and new_text (text)."
+            if not 0 < len(e["old_text"]) <= MAX_OLD_TEXT:
+                return f"Edit {i}: old_text must not be empty."
+        clean["edits"] = [{"old_text": e["old_text"], "new_text": e["new_text"]} for e in edits]
+        return None
+    if "old_text" not in clean or "new_text" not in clean:
+        return "edit_file needs old_text and new_text (or edits)."
+    return None
+
+
 class Gate:
     def __init__(self, access: AccessStore, receipts: ReceiptStore, approvals: Optional[Approvals] = None) -> None:
         self.access = access
@@ -377,6 +407,13 @@ class Gate:
                 return Verdict(BLOCK, "malformed", f"{name!r} must be a whole number.", action), action, {}
             if typ is str and not isinstance(v, str):
                 return Verdict(BLOCK, "malformed", f"{name!r} must be text.", action), action, {}
+            if typ is list and isinstance(v, str):
+                try:
+                    v = json.loads(v)    # some models send a nested array as a JSON string
+                except ValueError:
+                    pass
+            if typ is list and not isinstance(v, list):
+                return Verdict(BLOCK, "malformed", f"{name!r} must be a list.", action), action, {}
             clean[name] = v
         if "query" in clean and not (0 < len(clean["query"].strip()) <= MAX_QUERY and "\x00" not in clean["query"]):
             return Verdict(BLOCK, "malformed", f"The search text must be 1 to {MAX_QUERY} characters.", action), action, {}
@@ -392,13 +429,18 @@ class Gate:
         if "content" in clean and len(clean["content"].encode("utf-8", "replace")) > edit.MAX_WRITE_BYTES:
             return Verdict(BLOCK, "malformed", f"The content is over the {edit.MAX_WRITE_BYTES:,} byte limit.",
                            action), action, {}
+        if call.tool == "edit_file":
+            bad = _edit_args(clean)
+            if bad:
+                return Verdict(BLOCK, "malformed", bad, action), action, {}
         if "old_text" in clean and not (0 < len(clean["old_text"]) <= MAX_OLD_TEXT):
             return Verdict(BLOCK, "malformed", "old_text must not be empty.", action), action, {}
         if "expected_sha256" in clean and not re.fullmatch(r"[0-9a-f]{64}", clean["expected_sha256"].strip().lower()):
             return Verdict(BLOCK, "malformed", "expected_sha256 must be 64 hex characters.", action), action, {}
         if "id" in clean and not re.fullmatch(r"cmd_[0-9a-f]{12}", clean["id"]):
             return Verdict(BLOCK, "malformed", "id must be a command id from run_command (cmd_...).", action), action, {}
-        if any(isinstance(clean.get(k), str) and "\x00" in clean[k] for k in ("content", "old_text", "new_text")):
+        if any(isinstance(clean.get(k), str) and "\x00" in clean[k] for k in ("content", "old_text", "new_text")) or \
+                any("\x00" in e["old_text"] or "\x00" in e["new_text"] for e in clean.get("edits", ())):
             return Verdict(BLOCK, "malformed", "Text with NUL characters cannot be written.", action), action, {}
         return None, action, clean
 
@@ -609,14 +651,25 @@ class Gate:
         a = v.clean_args
         path = "/".join(v.parts)
         expect = (a.get("expected_sha256") or "").strip().lower() or ctx.version(ws.root, path)
+        written: Dict[str, str] = {}
+
+        def keep(compute):
+            # M10: remember the new text so it can be syntax-checked after the write
+            def wrapped(old):
+                text, op = compute(old)
+                written["text"] = text
+                return text, op
+            return wrapped
         try:
             if v.action == "fs.write":
                 content = a["content"]
-                r = edit.change(ws.root, v.parts, lambda old: (content, "replaced"), expect,
+                r = edit.change(ws.root, v.parts, keep(lambda old: (content, "replaced")), expect,
                                 create_only=expect is None, intent=ctx.intent)
             else:
-                r = edit.change(ws.root, v.parts, edit.edit_compute(a["old_text"], a["new_text"], path), expect,
-                                create_only=False, intent=ctx.intent)
+                pairs = ([(e["old_text"], e["new_text"]) for e in a["edits"]] if "edits" in a
+                         else [(a["old_text"], a["new_text"])])
+                r = edit.change(ws.root, v.parts, keep(edit.edits_compute(pairs, path, bool(a.get("replace_all")))),
+                                expect, create_only=False, intent=ctx.intent)
         except edit.Conflict as exc:
             return self._finish(task_id, action_id, project_id, chat_id, v, started, "failed", exc.code, exc.message)
         except fs.FsError as exc:
@@ -635,6 +688,11 @@ class Gate:
         note = {"unchanged": " The content was already exactly this; nothing was written.",
                 "already_applied": " old_text is no longer there and new_text is, so the edit was already made "
                                    "(for example before an interruption); nothing was written."}.get(r.op, "")
+        checked = (check.syntax(r.path, written["text"])
+                   if r.op in ("created", "replaced", "edited") and "text" in written else None)
+        if checked and not checked["ok"]:
+            note += " The change was written, but it does not parse; fix it: " + checked["message"]
+            summary += " · does not parse"
         body = (f"{v.action.replace('fs.', '')}_file {r.path}: {r.op}.{note} Now {r.size:,} bytes.\n"
                 + (r.diff if lines else ""))
         ev = [EvidenceRef("change", r.path, r.after, r.size)]
@@ -643,7 +701,7 @@ class Gate:
         out = self._finish(task_id, action_id, project_id, chat_id, v, started, "allowed", "ok", v.reason,
                            model_text=wrap_untrusted(body), summary=summary, evidence=ev)
         out.observed = {"op": r.op, "path": r.path, "before": r.before, "after": r.after,
-                        "added": r.added, "removed": r.removed}
+                        "added": r.added, "removed": r.removed, "check": checked}
         out.detail = r.diff
         return out
 

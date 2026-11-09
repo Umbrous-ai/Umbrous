@@ -57,7 +57,8 @@ from typing import Dict, Iterator, List, Optional
 
 from umbrous.runloop.coordination import ChatLocks, RunRegistry
 from umbrous.config import Config
-from umbrous.context.assemble import MessageTooLong, assemble, estimate_tokens
+from umbrous.context.assemble import CHARS_PER_TOKEN, MessageTooLong, assemble, estimate_tokens
+from umbrous.context.instructions import MAX_TOTAL_CHARS as MAX_INSTRUCTION_CHARS, load as load_instructions
 from umbrous.memory.retrieve import Selection, select
 from umbrous.memory.review import Review, parse, propose_messages
 from umbrous.memory.store import Memory
@@ -343,6 +344,16 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
             system = config.system_prompt + (
                 CODE_PROMPT.format(root=ws.root, self_note=" " + self_note if self_note else "") if coding else
                 TOOL_PROMPT.format(name=ws.name) if tools_on else NO_WORKSPACE_PROMPT if ws is None else "")
+            # M10: the project's AGENTS.md / CLAUDE.md, at most a quarter of the input budget
+            project_rules = None
+            if tools_on and resolved_reply is None:   # a resolution reply was planned without them
+                window = min(config.context_tokens, model.context_length or config.context_tokens)
+                room = (window - min(config.reply_tokens, window // 2)) // 4 * CHARS_PER_TOKEN
+                project_rules = load_instructions(
+                    ws.root, min(MAX_INSTRUCTION_CHARS, room),
+                    decide=lambda name: gate.evaluate(chat_info.project_id, Call("read_file", {"path": name}),
+                                                      profile=profile).outcome)
+                system += project_rules.block()
             turns = history.turns(chat_id)
             # M6: read memory now, from the tables (no cache), for this project only.
             plan = resolution_plan if resolved_reply is not None else assemble(system, turns, message, recent_turns=config.recent_turns,
@@ -449,7 +460,8 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
         tools_info = {"on": tools_on, "workspace": ws.name if ws else None, "root": ws.root if ws else None,
                       "profile": profile, "project_profile": ws.profile if ws else None,
                       "chat_access": chat_info.access, "approvals": approvals, "coding": coding,
-                      "tools": tool_names, "selected": selected, "self_source": bool(self_note)}
+                      "tools": tool_names, "selected": selected, "self_source": bool(self_note),
+                      "instructions": project_rules.summary() if project_rules else None}
         if tools_on and profile == "ask_before_read" and not approvals:
             tools_info["notice"] = APPROVAL_UNAVAILABLE
         if ws and not tools_on:
@@ -599,7 +611,7 @@ def run_chat(config: Config, router: ModelRouter, history: HistoryStore, locks: 
                            "notice": "Part of this result was left out to fit the context budget." if cut else None,
                            "action_id": action_id, "detail": result.detail[:6000] if result.detail else None,
                            "observed": {k: v for k, v in result.observed.items()
-                                        if k in ("op", "path", "added", "removed", "command", "status", "exit",
+                                        if k in ("op", "path", "added", "removed", "check", "command", "status", "exit",
                                                  "ms", "cmd_id")} or None}
                 trun.checkpoint(used)
             if done is None:

@@ -284,6 +284,43 @@ def edit_compute(old: str, new: str, path: str) -> Callable[[Optional[str]], Tup
     return compute
 
 
+def edits_compute(pairs: List[Tuple[str, str]], path: str,
+                  replace_all: bool = False) -> Callable[[Optional[str]], Tuple[str, str]]:
+    """M10: several replacements in one file, applied in order to the result of the
+    one before, all or none (nothing is written unless every one applies). Each
+    old text must occur exactly once at its turn (or at least once with
+    `replace_all`). A replacement whose old text is gone and whose new text is
+    there exactly once counts as already made (a resumed or repeated call); when
+    all of them are, the op is "edited_already" and nothing is written."""
+    many = len(pairs) > 1
+
+    def where(i: int) -> str:
+        return f"Edit {i} of {len(pairs)}: " if many else ""
+
+    def compute(text: Optional[str]) -> Tuple[str, str]:
+        if text is None:
+            raise FsError("not_found", f"{path} does not exist; use write_file to create it.")
+        done = 0
+        for i, (old, new) in enumerate(pairs, 1):
+            n = text.count(old)
+            if n == 1 or (n > 1 and replace_all):
+                text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+                done += 1
+            elif n == 0:
+                if new and (new in text if replace_all else text.count(new) == 1):
+                    continue          # already made
+                raise FsError("no_match", f"{where(i)}old_text was not found in {path}"
+                                          f"{' after the edits before it' if many and i > 1 else ''}. Read the file "
+                                          "again; it may differ from what you expect (spaces, line breaks). "
+                                          "Nothing was written.")
+            else:
+                raise FsError("ambiguous", f"{where(i)}old_text occurs {n} times in {path}. Include more "
+                                           "surrounding lines so it matches exactly once, or set replace_all. "
+                                           "Nothing was written.")
+        return text, ("edited" if done else "edited_already")
+    return compute
+
+
 def remove_tmp(root: str, rel: str) -> bool:
     """Recovery: remove a temporary file a change left behind. Only names with
     the temporary prefix, only through descriptors."""

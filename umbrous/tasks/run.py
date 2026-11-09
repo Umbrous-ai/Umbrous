@@ -177,7 +177,9 @@ class TaskRun:
                     self.changes.append({"action_id": action_id, "path": o9["path"], "op": o9["op"],
                                          "before": o9.get("before"), "after": o9.get("after"),
                                          "added": o9.get("added", 0), "removed": o9.get("removed", 0),
-                                         "step": a["step"]})
+                                         "step": a["step"],
+                                         **({"parses": False} if (o9.get("check") or {}).get("ok") is False
+                                            else {})})
             elif o9.get("command"):
                 if len(self.commands) < 100:
                     self.commands.append({"action_id": action_id, "command": o9["command"], "status": o9.get("status"),

@@ -98,7 +98,7 @@ class TokenSavingTests(unittest.TestCase):
     def test_tool_definitions_hide_the_hash_parameter_but_keep_the_rules(self):
         tools = {t['function']['name']: t['function'] for t in ollama_tools(['write_file', 'edit_file', 'read_file'])}
         self.assertNotIn('expected_sha256', tools['edit_file']['parameters']['properties'])
-        self.assertEqual(tools['edit_file']['parameters']['required'], ['path', 'old_text', 'new_text'])
+        self.assertEqual(tools['edit_file']['parameters']['required'], ['path'])   # M10: old_text+new_text or edits
         self.assertIn('exactly once', tools['edit_file']['description'])
         self.assertIn('conflict', tools['write_file']['description'])
 
