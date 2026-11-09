@@ -2,7 +2,7 @@
 (() => {
   'use strict';
   const KEY = 'umbrous.model-controls.v1';
-  function isCloud(model) { return !!model && (model.provider === 'codex' || model.name.startsWith('codex/')); }
+  function isCloud(model) { return !!model && (['codex', 'claude'].includes(model.provider) || /^(codex|claude)\//.test(model.name)); }
   function loginUrl(raw) {
     if (typeof raw !== 'string' || /[\s\\]/.test(raw)) return null;
     let url;

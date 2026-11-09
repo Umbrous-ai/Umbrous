@@ -45,6 +45,17 @@ class ModelRoutes:
 
     def _provider(self, path: str) -> Tuple[int, str]:
         from umbrous.model.base import ModelError
+        if path == "/api/providers/claude":
+            # Status only: Claude Code's sign-in happens in Claude Code (`claude auth login`).
+            if self.command != "GET":
+                self._send_json(405, {"error": "method_not_allowed"})
+                return 405, "method_not_allowed"
+            claude = self.runtime.router.claude
+            out = claude.status() if claude is not None else {
+                "available": False, "authenticated": False, "auth_type": None,
+                "error": "Claude is disabled in this runtime (claude_enabled)."}
+            self._send_json(200, out)
+            return 200, "claude_status"
         codex = self.runtime.router.codex
         login = path.endswith("/login")
         if self.command != ("POST" if login else "GET"):

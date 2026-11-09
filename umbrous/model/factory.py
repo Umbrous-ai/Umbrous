@@ -12,4 +12,8 @@ def create_router(config: Config) -> ModelRouter:
     if config.codex_enabled:
         from umbrous.model.codex import CodexAdapter
         codex = CodexAdapter(config.home, deadlines=deadlines)
-    return ModelRouter(OllamaAdapter(config.ollama_url, deadlines), config.db_path, codex=codex)
+    claude = None
+    if config.claude_enabled:
+        from umbrous.model.claude import ClaudeAdapter
+        claude = ClaudeAdapter(config.home, deadlines=deadlines)
+    return ModelRouter(OllamaAdapter(config.ollama_url, deadlines), config.db_path, codex=codex, claude=claude)

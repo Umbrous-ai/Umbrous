@@ -25,6 +25,9 @@ class GenerationSettings:
             raise ProviderError("That model does not advertise the selected speed. Choose an available speed.")
         if self.reasoning_effort is not None and self.reasoning_effort not in model.reasoning_efforts:
             raise ProviderError("That model does not advertise the selected reasoning level. Choose an available level.")
+        if model.provider == "claude":
+            # No level chosen: Claude Code's own default for the model.
+            return {"reasoning_effort": self.reasoning_effort} if self.reasoning_effort else {}
         if model.provider != "codex":
             return {}
         effort = self.reasoning_effort or model.default_reasoning_effort

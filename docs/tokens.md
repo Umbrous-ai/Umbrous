@@ -84,3 +84,25 @@ Codex's own usage reports. All runs passed the tests.
 
 Counting cached input at a tenth of the price, a task now costs Umbrous about
 20,000 token-equivalents (was about 40,000) against Codex's about 13,400.
+
+## Claude provider (new): Claude Code with its own tools off
+
+`claude/` models run through the official Claude Code CLI with your claude.ai
+subscription (umbrous/model/claude.py; never an API key). Claude Code is started
+headless with no built-in tools, MCP servers, skills, plugins, slash commands or
+settings files, with Umbrous's instructions as its whole system prompt and a JSON
+schema for its answer, so it can only propose calls for Umbrous's gate. Its
+initialize handshake must show a subscription sign-in, dontAsk and no commands
+before anything is sent; its start-up report must list only the answer tool, no
+MCP server and the exact model; a direct tool call by the model must come back
+refused. One process holds a task's conversation (umbrous/model/sessions.py,
+the same rules as the ChatGPT provider), so later steps are served from cache.
+
+Same task, Claude Sonnet 5.5, same subscription; Claude Code's own usage reports
+(2 runs each, all tests passed). "Weighted" counts cache reads at 0.1x and cache
+writes at 2x (1-hour cache), as Anthropic prices them.
+
+| | Requests | Input tokens | From cache | Weighted |
+| --- | --- | --- | --- | --- |
+| Claude Code (default setup) | 6–7 | 168,750–212,911 | 89–91 % | 50,600–55,700 |
+| Umbrous | 5 | 23,493–23,528 | 67–74 % | 13,700–17,000 |

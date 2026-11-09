@@ -127,7 +127,7 @@ impl Api {
         }
         // this app shows approval cards (access_controls.rs), so the gate may ask
         body["approvals"] = json!(true);
-        if model.starts_with("codex/") {
+        if model.starts_with("codex/") || model.starts_with("claude/") {
             if let Some(effort) = &controls.reasoning_effort { body["reasoning_effort"] = json!(effort); }
             body["speed"] = json!(controls.speed);
         }
@@ -704,7 +704,9 @@ pub struct ModelInfo {
 }
 
 impl ModelInfo {
-    pub fn is_cloud(&self) -> bool { self.provider == "codex" || self.name.starts_with("codex/") }
+    pub fn is_cloud(&self) -> bool {
+        matches!(self.provider.as_str(), "codex" | "claude") || self.name.starts_with("codex/") || self.name.starts_with("claude/")
+    }
     pub fn label(&self) -> &str { if self.display_name.is_empty() { &self.name } else { &self.display_name } }
 }
 

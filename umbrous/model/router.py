@@ -1,6 +1,7 @@
 """Model Router: picks the adapter and model for a request, and nothing else.
 
-The router selects local Ollama or explicitly namespaced Codex models:
+The router selects local Ollama or an explicitly namespaced subscription model
+(codex/ for ChatGPT, claude/ for Claude, through each vendor's official CLI):
   - only models in the selected provider's current catalog can be used;
   - the model you picked is the model that is called. If it is missing or
     broken, the request fails with a clear error. There is no fallback to
@@ -24,12 +25,21 @@ from umbrous.persistence.session import open_connection
 
 
 class ModelRouter:
-    def __init__(self, adapter: ModelAdapter, db_path: Path, codex: Optional[ModelAdapter] = None) -> None:
+    # prefix -> (provider name, what the person calls it)
+    REMOTES = {"codex/": ("codex", "ChatGPT"), "claude/": ("claude", "Claude")}
+
+    def __init__(self, adapter: ModelAdapter, db_path: Path, codex: Optional[ModelAdapter] = None,
+                 claude: Optional[ModelAdapter] = None) -> None:
         self.adapter = adapter
         self.codex = codex
+        self.claude = claude
         self.db_path = db_path
         self._lock = threading.Lock()
         self._probe_lock = threading.Lock()
+
+    @property
+    def remotes(self) -> dict:
+        return {"codex": self.codex, "claude": self.claude}
 
     def _db(self) -> sqlite3.Connection:
         return open_connection(self.db_path)
@@ -50,25 +60,30 @@ class ModelRouter:
 
     def adapter_for(self, name: str) -> ModelAdapter:
         """Namespaced remote models never fall back to local inference or API billing."""
-        if isinstance(name, str) and name.startswith("codex/"):
-            if self.codex is None:
-                raise ProviderError("ChatGPT is disabled in this runtime (codex_enabled).")
-            return self.codex
+        for prefix, (provider, label) in self.REMOTES.items():
+            if isinstance(name, str) and name.startswith(prefix):
+                remote = self.remotes.get(provider)
+                if remote is None:
+                    raise ProviderError(f"{label} is disabled in this runtime ({provider}_enabled).")
+                return remote
         return self.adapter
 
     def status(self) -> dict:
         out = self._local_status()
         out["providers"] = {"ollama": {k: v for k, v in out.items() if k != "models"}}
-        if self.codex is not None:
-            remote = self.codex.status()
-            out["providers"]["codex"] = remote
+        for prefix, (provider, label) in self.REMOTES.items():
+            adapter = self.remotes.get(provider)
+            if adapter is None:
+                continue
+            remote = adapter.status()
+            out["providers"][provider] = remote
             if remote.get("authenticated"):
                 try:
-                    out["models"].extend(self._describe(m) for m in self.codex.list_models())
+                    out["models"].extend(self._describe(m) for m in adapter.list_models())
                     out["reachable"] = True
                     out.setdefault("version", "")
                 except Exception:
-                    out["providers"]["codex"]["error"] = "ChatGPT models could not be loaded. Refresh to try again."
+                    out["providers"][provider]["error"] = f"{label} models could not be loaded. Refresh to try again."
         return out
 
     def _describe(self, m: ModelInfo) -> dict:
@@ -109,8 +124,9 @@ class ModelRouter:
                     raise
                 except Exception:
                     return m
-        if name.startswith("codex/"):
-            raise ModelNotInstalled("That model is not in the current ChatGPT catalog. Refresh the model list.")
+        for prefix, (_provider, label) in self.REMOTES.items():
+            if name.startswith(prefix):
+                raise ModelNotInstalled(f"That model is not in the current {label} catalog. Refresh the model list.")
         raise ModelNotInstalled(
             f"The model {name!r} is not installed in Ollama. Pick an installed model, "
             f"or install it with `ollama pull {name}`. Umbrous will not switch to another model for you.")
@@ -147,5 +163,6 @@ class ModelRouter:
         return {name: self.resolve(name) for name in self.list_names()}
 
     def close(self) -> None:
-        if self.codex is not None and hasattr(self.codex, "close"):
-            self.codex.close()
+        for adapter in self.remotes.values():
+            if adapter is not None and hasattr(adapter, "close"):
+                adapter.close()
