@@ -417,6 +417,23 @@ class CodexTests(unittest.TestCase):
         a.close()
         self.assertTrue(later.closed)
 
+    def test_close_exactly_between_a_step_and_parking_closes_the_conversation(self):
+        # Force the race deterministically: close() runs after the step ended and
+        # before the conversation is parked (where cd6502b dropped it from _active).
+        a, _ = self.task_adapter()
+        server = FakeServer(events=[])
+        a.server_factory = lambda: server
+        original = a._release
+        def release_after_close(sess, keep):
+            a.close()
+            return original(sess, keep)
+        a._release = release_after_close
+        with a._session(("k",), [], cancel=CancelToken()) as sess:
+            sess.keep = True
+        self.assertTrue(server.closed)                 # closed, not parked alive
+        self.assertEqual(a._idle, [])
+        self.assertNotIn(server, a._active)
+
     def test_close_stops_live_processes(self):
         a, _ = self.adapter(); s = FakeServer()
         a._active.add(s); a.close(); self.assertTrue(s.closed)
