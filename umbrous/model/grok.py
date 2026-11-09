@@ -129,7 +129,7 @@ def command(binary: str, model: str, effort: Optional[str], system: str, tools, 
 def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float = 30, **kwargs):
     """subprocess.run that Stop and the time limit end at once (the whole process group).
 
-    One thread does everything: it reads both pipes with select (never blocking), and
+    One thread does everything: it reads both pipes with selectors (never blocking), and
     Stop or the deadline are honoured while reading, even when a descendant keeps a
     pipe open. The child is not reaped before reading ends or it was signalled, so the
     group id cannot have been reused when it is signalled; after reaping, it never is.
@@ -149,17 +149,26 @@ def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float =
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
-    if cancel is not None:
-        cancel.on_cancel(kill)
+    def reap() -> bool:
+        """Reap and publish it under the lock, so kill() can never run in between."""
+        with lock:
+            if proc.poll() is not None:
+                state["reaped"] = True
+            return state["reaped"]
+
     fds = {proc.stdout.fileno(): [], proc.stderr.fileno(): []}
-    open_fds = set(fds)
-    # selectors (kqueue/epoll/poll), not select(): any descriptor number works.
-    sel = selectors.DefaultSelector()
-    for fd in fds:
-        sel.register(fd, selectors.EVENT_READ)
     until, killed_at, why = time.monotonic() + timeout, None, None
-    finished = False
+    finished, sel = False, None
+    # Everything after a successful start is inside the guard: whatever fails, the
+    # process this runner owns is ended and reaped before the error goes on.
     try:
+        if cancel is not None:
+            cancel.on_cancel(kill)
+        open_fds = set(fds)
+        # selectors (kqueue/epoll/poll), not select(): any descriptor number works.
+        sel = selectors.DefaultSelector()
+        for fd in fds:
+            sel.register(fd, selectors.EVENT_READ)
         while True:
             now = time.monotonic()
             if killed_at is None and ((cancel is not None and cancel.cancelled) or now >= until):
@@ -178,26 +187,22 @@ def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float =
                     sel.unregister(fd)
         # Reap, still honouring Stop and the deadline.
         while True:
-            with lock:
-                if proc.poll() is not None:
-                    state["reaped"] = True
-                    break
+            if reap():
+                break
             if why is None and ((cancel is not None and cancel.cancelled) or time.monotonic() >= until):
                 why = "cancelled" if cancel is not None and cancel.cancelled else "timeout"
                 kill()
             time.sleep(0.02)
         finished = True
     finally:
-        sel.close()
+        if sel is not None:
+            sel.close()
         if not finished:
             # An unexpected error: the process this runner owns never outlives it.
             kill()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-            with lock:
-                state["reaped"] = proc.returncode is not None
+            end = time.monotonic() + 2
+            while not reap() and time.monotonic() < end:
+                time.sleep(0.02)
         for stream in (proc.stdout, proc.stderr):
             try:
                 stream.close()                 # no other thread uses them: never blocks

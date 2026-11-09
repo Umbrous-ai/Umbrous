@@ -296,6 +296,61 @@ class GrokTests(unittest.TestCase):
                 run_cancellable(["/bin/sh", "-c", "echo x; sleep 30"], timeout=10)
         self.assertIsNotNone(pids[0].returncode)
 
+    def test_a_failed_selector_setup_still_ends_the_child(self):
+        import selectors, subprocess
+        from umbrous.model.grok import run_cancellable
+        procs = []
+        real = subprocess.Popen
+        def popen(*a, **k):
+            procs.append(real(*a, **k))
+            return procs[-1]
+        def no_selector():
+            raise OSError(24, "Too many open files")                         # EMFILE on setup
+        with unittest.mock.patch("umbrous.model.grok.subprocess.Popen", popen), \
+                unittest.mock.patch("selectors.DefaultSelector", no_selector):
+            with self.assertRaises(OSError):
+                run_cancellable(["/bin/sh", "-c", "sleep 30"], timeout=10)
+        self.assertIsNotNone(procs[0].returncode)
+
+    def test_cancel_during_the_error_cleanup_never_signals_after_reaping(self):
+        import selectors, threading, time
+        from umbrous.model.grok import run_cancellable
+        token, signals, reaped = CancelToken(), [], threading.Event()
+        import subprocess
+        def on_reaped():
+            if not reaped.is_set():
+                reaped.set()                                                 # the child is reaped now:
+                threading.Thread(target=token.cancel).start()               # Stop lands at this moment
+                time.sleep(0.1)
+        real_poll, real_try = subprocess.Popen._internal_poll, subprocess.Popen._try_wait
+        def internal_poll(self, *a, **k):
+            rc = real_poll(self, *a, **k)
+            if rc is not None:
+                on_reaped()
+            return rc
+        def try_wait(self, *a, **k):
+            got = real_try(self, *a, **k)
+            if got[0]:
+                on_reaped()
+            return got
+        class Broken(selectors.DefaultSelector):
+            def select(self, timeout=None):
+                raise RuntimeError("boom")
+        real_killpg = os.killpg
+        def killpg(pid, sig):
+            signals.append(reaped.is_set())
+            if not reaped.is_set():
+                real_killpg(pid, sig)
+        with unittest.mock.patch.object(subprocess.Popen, "_internal_poll", internal_poll), \
+                unittest.mock.patch.object(subprocess.Popen, "_try_wait", try_wait), \
+                unittest.mock.patch("selectors.DefaultSelector", Broken), \
+                unittest.mock.patch("umbrous.model.grok.os.killpg", killpg):
+            with self.assertRaises(RuntimeError):
+                run_cancellable(["/bin/sh", "-c", "sleep 30"], cancel=token, timeout=10)
+            time.sleep(0.3)
+        self.assertTrue(reaped.is_set())
+        self.assertNotIn(True, signals)                                      # never after reaping
+
     def test_the_check_runner_never_signals_a_reaped_child(self):
         import time
         from umbrous.model.base import Cancelled
