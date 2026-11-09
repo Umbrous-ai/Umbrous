@@ -134,6 +134,8 @@ About 5,000 tokens of every new Grok session are Grok Build's own prompt.
 
 Configuration that runs outside any tool list is kept out: the Claude and Cursor hooks, MCP
 servers, agents, rules and skills Grok Build would borrow are switched off by environment,
-and before each step `grok inspect --json` (same folder and environment) must report no
-hooks, plugins, MCP or LSP servers and no project instructions, or nothing is sent. A step's
+and before each step `grok inspect --json` (same environment) must report no hooks,
+plugins, MCP or LSP servers and no project instructions, or nothing is sent. It runs in
+your home folder (always trusted, so it shows the personal hooks a headless step would
+run) and in the step's own folder; Stop during the check means Grok is never started. A step's
 whole process group is ended afterwards, even when Grok Build itself already exited.

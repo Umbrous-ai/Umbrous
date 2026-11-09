@@ -24,11 +24,12 @@ def turn(reply, calls=(), session="s1", tools=()):
              "usage": {"input_tokens": 400, "cache_read_input_tokens": 6000, "output_tokens": 30}}]
 
 
-CLEAN = {"hooks": [], "plugins": [], "mcpServers": [], "lspServers": [], "projectInstructions": [], "skills": []}
+CLEAN = {"hooks": [], "plugins": [], "mcpServers": [], "lspServers": [], "projectInstructions": [], "skills": [],
+         "projectTrusted": True}
 
 
 class GrokTests(unittest.TestCase):
-    def adapter(self, *turns, models=MODELS, resume=True, inspect=None):
+    def adapter(self, *turns, models=MODELS, resume=True, inspect=None, home_inspect=None, on_inspect=None):
         script, steps = list(turns), []
         def step(conv, argv):
             steps.append((conv, argv, open(argv[argv.index("--prompt-file") + 1]).read()))
@@ -37,9 +38,12 @@ class GrokTests(unittest.TestCase):
                 q.put(ev)
             q.put(None)
             return q
-        def runner(argv, **k):
+        def runner(argv, cancel=None, cwd=None, **k):
             if argv[1] == "inspect":
-                return SimpleNamespace(stdout=json.dumps(inspect or CLEAN), stderr="")
+                if on_inspect:
+                    on_inspect(cancel)
+                at_home = cwd == str(Path.home())
+                return SimpleNamespace(stdout=json.dumps((home_inspect if at_home else inspect) or CLEAN), stderr="")
             return SimpleNamespace(stdout=models, stderr="")
         return GrokAdapter(Path("/tmp"), step=step, binary="/bin/grok", runner=runner, resume=resume), steps
 
@@ -137,6 +141,51 @@ class GrokTests(unittest.TestCase):
         env = _environment()
         for name in ("GROK_CLAUDE_HOOKS_ENABLED", "GROK_CURSOR_HOOKS_ENABLED", "GROK_CLAUDE_MCPS_ENABLED"):
             self.assertEqual(env[name], "0")
+
+    def test_personal_hooks_are_checked_where_grok_trusts_them(self):
+        # In an untrusted folder Grok hides personal hooks; a headless step still runs them.
+        a, steps = self.adapter(turn("x"), home_inspect=dict(CLEAN, hooks=[{"event": "SessionStart"}]))
+        with self.assertRaises(ProviderError):
+            list(a.chat_stream("grok/grok-4.7", [{"role": "user", "content": "hi"}], tools=[TOOL]))
+        self.assertEqual(steps, [])
+        a, steps = self.adapter(turn("x"), home_inspect=dict(CLEAN, projectTrusted=False))
+        with self.assertRaises(ProviderError):                               # cannot see the trusted view: refuse
+            list(a.chat_stream("grok/grok-4.7", [{"role": "user", "content": "hi"}], tools=[TOOL]))
+        self.assertEqual(steps, [])
+
+    def test_stop_during_the_check_never_starts_grok(self):
+        from umbrous.model.base import Cancelled
+        token = CancelToken()
+        a, steps = self.adapter(turn("x"), on_inspect=lambda cancel: token.cancel())
+        with self.assertRaises(Cancelled):
+            list(a.chat_stream("grok/grok-4.7", [{"role": "user", "content": "hi"}], tools=[TOOL], cancel=token))
+        self.assertEqual(steps, [])
+
+    def test_concurrent_cleanup_never_signals_a_reaped_group(self):
+        import threading, time
+        conv = Conversation()
+        state = {"reaped": False, "late": 0}
+        class Proc:
+            pid = 999999
+            def wait(self, timeout=None):
+                state["reaped"] = True          # reaped, but not yet cleared by its caller
+                time.sleep(0.3)
+                return 0
+        conv.process = Proc()
+        def killpg(pid, sig):
+            if state["reaped"]:
+                state["late"] += 1
+        with unittest.mock.patch("umbrous.model.grok.os.killpg", killpg):
+            callers = [threading.Thread(target=conv.stop_process) for _ in range(3)]
+            for t in callers:                   # the later callers arrive while the first is reaping
+                t.start()
+                time.sleep(0.1)
+            for t in callers:
+                t.join(5)
+        self.assertEqual(state["late"], 0)
+        self.assertIsNone(conv.process)
+        conv.process = None
+        conv.close()
 
     def test_cleanup_ends_processes_left_after_grok_exits(self):
         import subprocess, time

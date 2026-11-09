@@ -126,6 +126,30 @@ def command(binary: str, model: str, effort: Optional[str], system: str, tools, 
     return argv
 
 
+def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float = 30, **kwargs):
+    """subprocess.run that Stop ends at once (the whole process group)."""
+    kwargs.pop("capture_output", None)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, **kwargs)
+    def kill():
+        if proc.returncode is not None:          # reaped: its group id may be reused
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if cancel is not None:
+        cancel.on_cancel(kill)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill()
+        proc.communicate()
+        raise
+    if cancel is not None and cancel.cancelled:
+        raise Cancelled("Stopped.")
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 class Conversation:
     """One task's Grok session: its private working folder and the session id."""
 
@@ -135,13 +159,18 @@ class Conversation:
         self.process: Optional[subprocess.Popen] = None
         self.closed = False
         self.lock = threading.Lock()
+        self.cleanup_lock = threading.Lock()
 
     def stop_process(self) -> None:
         """End the step's whole process group, even when Grok Build itself already exited
         (anything it started stays in the group and must not outlive the step)."""
-        with self.lock:
-            proc = self.process
-        if proc is not None:
+        # One caller at a time owns the cleanup; the others wait for it to finish and then
+        # find nothing left to signal (a reaped leader's group id may be reused).
+        with self.cleanup_lock:
+            with self.lock:
+                proc = self.process
+            if proc is None:
+                return
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
                     os.killpg(proc.pid, sig)
@@ -154,7 +183,6 @@ class Conversation:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=2)
-            # Reaped: its group id may be reused from now on, so never signal it again.
             with self.lock:
                 if self.process is proc:
                     self.process = None
@@ -210,13 +238,13 @@ class GrokAdapter:
     base_url = "grok-build://local"
 
     def __init__(self, home: Path, deadlines: Deadlines = Deadlines(), step=run_step,
-                 binary: Optional[str] = None, runner=subprocess.run, resume: bool = False) -> None:
+                 binary: Optional[str] = None, runner=None, resume: bool = False) -> None:
         self.resume = resume                # see the module docstring: off for safety
         self.home = Path(home)
         self.deadlines = deadlines
         self.step = step
         self._binary = binary
-        self._run = runner
+        self._run = runner or run_cancellable
         self.pool = SessionPool()
         self._catalog: dict = {}
         self._catalog_at = 0.0
@@ -225,16 +253,32 @@ class GrokAdapter:
     def binary(self) -> str:
         return self._binary or executable()
 
-    def _inspect(self, cwd: str) -> dict:
+    def _inspect(self, cwd: str, cancel: Optional[CancelToken] = None, timeout: float = 30) -> dict:
         try:
-            out = self._run([self.binary(), "inspect", "--json"], capture_output=True, text=True, timeout=30,
-                            env=_environment(), stdin=subprocess.DEVNULL, cwd=cwd)
+            out = self._run([self.binary(), "inspect", "--json"], capture_output=True, text=True,
+                            timeout=max(0.001, min(30, timeout)), env=_environment(), stdin=subprocess.DEVNULL,
+                            cwd=cwd, cancel=cancel)
             data = json.loads(out.stdout or "")
+        except Cancelled:
+            raise
         except (OSError, ValueError, subprocess.SubprocessError):
+            if cancel is not None and cancel.cancelled:
+                raise Cancelled("Stopped.") from None
             raise ProviderError("Could not check Grok Build's configuration; nothing was sent.") from None
         if not isinstance(data, dict):
             raise ProviderError("Could not check Grok Build's configuration; nothing was sent.")
         return data
+
+    def preflight(self, cwd: str, cancel: CancelToken, until: float) -> None:
+        """What a headless step could load must be empty. Grok shows your personal hooks
+        only for a trusted folder, and a headless run trusts them wherever it runs, so the
+        check runs in your home folder too (always trusted, and it loads no project hooks),
+        as well as in the step's own folder."""
+        home = self._inspect(str(Path.home()), cancel, until - time.monotonic())
+        if home.get("projectTrusted") is not True:
+            raise ProviderError("Grok Build did not show its trusted configuration; nothing was sent.")
+        check_inspect(home)
+        check_inspect(self._inspect(cwd, cancel, until - time.monotonic()))
 
     # ---------------------------------------------------------------- account and catalog
     def _models(self) -> dict:
@@ -338,7 +382,12 @@ class GrokAdapter:
         try:
             # Before every step, in this step's folder and environment: no hooks, plugins,
             # MCP or LSP servers or project instructions would load (no model call).
-            check_inspect(self._inspect(conv.directory))
+            self.preflight(conv.directory, cancel, started + min(d.first_token, d.total))
+            # Stopped or out of time while checking: Grok Build is never started.
+            if cancel.cancelled:
+                raise Cancelled("Stopped.")
+            if time.monotonic() - started >= min(d.first_token, d.total):
+                raise ModelTimeout("Grok did not start within the configured deadline.")
             events = self.step(conv, argv)
             timer.start()
             cancel.on_cancel(conv.stop_process)
