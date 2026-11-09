@@ -137,5 +137,9 @@ servers, agents, rules and skills Grok Build would borrow are switched off by en
 and before each step `grok inspect --json` (same environment) must report no hooks,
 plugins, MCP or LSP servers and no project instructions, or nothing is sent. It runs in
 your home folder (always trusted, so it shows the personal hooks a headless step would
-run) and in the step's own folder; Stop during the check means Grok is never started. A step's
+run) and in the step's own folder; Stop during the check means Grok is never started.
+Grok's settings files (~/.grok and /etc/grok: config, managed_config, requirements) are
+read too, and any setting that can run a program (sign-in helpers, hooks, notification
+hooks, status line, MCP servers, feedback command), or anything that looks like one,
+means Grok is not started: `grok inspect` does not report all of them. A step's
 whole process group is ended afterwards, even when Grok Build itself already exited.

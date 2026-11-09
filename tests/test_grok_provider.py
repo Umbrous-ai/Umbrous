@@ -45,7 +45,15 @@ class GrokTests(unittest.TestCase):
                 at_home = cwd == str(Path.home())
                 return SimpleNamespace(stdout=json.dumps((home_inspect if at_home else inspect) or CLEAN), stderr="")
             return SimpleNamespace(stdout=models, stderr="")
-        return GrokAdapter(Path("/tmp"), step=step, binary="/bin/grok", runner=runner, resume=resume), steps
+        a = GrokAdapter(Path("/tmp"), step=step, binary="/bin/grok", runner=runner, resume=resume)
+        a.grok_home = Path(self.empty_home())              # never the real ~/.grok in tests
+        return a, steps
+
+    def empty_home(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="grok-home-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return d
 
     def test_every_tool_denied_and_no_api_key(self):
         argv = command("/bin/grok", "grok-4.7", None, "policy", [TOOL], "/tmp/request.txt", None)
@@ -186,6 +194,54 @@ class GrokTests(unittest.TestCase):
         self.assertIsNone(conv.process)
         conv.process = None
         conv.close()
+
+    def test_settings_that_run_programs_send_nothing(self):
+        from umbrous.model.grok import check_config
+        bad = ['[auth]\nauth_provider_command = "/usr/local/bin/x"\n',
+               '[grok_com_config]\nauth_provider_command = "/x"\n',
+               '[auth_provider.corp]\nprogram = "/x"\n',
+               '[[hooks.SessionStart]]\nmatcher = ""\n',
+               '[[ui.notifications.hooks]]\nevents = ["done"]\n',
+               '[mcp_servers.x]\nargs = []\n',
+               'auth = { auth_provider_command = "/x" }\n']
+        for text in bad:
+            home = Path(self.empty_home())
+            (home / "config.toml").write_text(text)
+            with self.assertRaises(ProviderError):
+                check_config(home, Path(self.empty_home()))
+        home = Path(self.empty_home())
+        (home / "config.toml").write_text('# hooks are documented here\n[cli]\ninstaller = "curl"\n')
+        check_config(home, Path(self.empty_home()))                          # comments and plain settings pass
+        system = Path(self.empty_home())
+        (system / "managed_config.toml").write_text('[auth]\nauth_provider_command = "/x"\n')
+        with self.assertRaises(ProviderError):                               # /etc/grok counts too
+            check_config(home, system)
+        a, steps = self.adapter(turn("x"))
+        (a.grok_home / "config.toml").write_text(bad[0])
+        with self.assertRaises(ProviderError):
+            list(a.chat_stream("grok/grok-4.7", [{"role": "user", "content": "hi"}], tools=[TOOL]))
+        self.assertEqual(steps, [])
+
+    def test_the_check_runner_never_signals_a_reaped_child(self):
+        import time
+        from umbrous.model.base import Cancelled
+        from umbrous.model.grok import run_cancellable
+        calls = []
+        real = os.killpg
+        token = CancelToken()
+        with unittest.mock.patch("umbrous.model.grok.os.killpg", lambda pid, sig: calls.append(pid) or real(pid, sig)):
+            done = run_cancellable(["/bin/sh", "-c", "echo ok"], cancel=token, timeout=10, text=True)
+            self.assertEqual(done.stdout.strip(), "ok")
+            token.cancel()                                                   # after reaping: no signal
+            self.assertEqual(calls, [])
+            slow = CancelToken()
+            threading = __import__("threading")
+            threading.Timer(0.3, slow.cancel).start()
+            started = time.monotonic()
+            with self.assertRaises(Cancelled):
+                run_cancellable(["/bin/sh", "-c", "sleep 30"], cancel=slow, timeout=60)
+            self.assertLess(time.monotonic() - started, 5)                  # Stop ended it
+            self.assertEqual(len(calls), 1)
 
     def test_cleanup_ends_processes_left_after_grok_exits(self):
         import subprocess, time

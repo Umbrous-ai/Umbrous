@@ -127,27 +127,95 @@ def command(binary: str, model: str, effort: Optional[str], system: str, tools, 
 
 
 def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float = 30, **kwargs):
-    """subprocess.run that Stop ends at once (the whole process group)."""
+    """subprocess.run that Stop ends at once (the whole process group).
+
+    Signalling and reaping share one lock: the child is reaped only by poll() under
+    the lock, and the group is signalled only under the lock while not yet reaped, so
+    a group id that may already be reused is never signalled."""
     kwargs.pop("capture_output", None)
+    text = kwargs.pop("text", False)
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, **kwargs)
-    def kill():
-        if proc.returncode is not None:          # reaped: its group id may be reused
-            return
+    lock, state = threading.Lock(), {"reaped": False}
+    chunks = {"out": [], "err": []}
+
+    def drain(stream, into):
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+            for data in iter(lambda: stream.read(65536), b""):
+                into.append(data)
+        except (OSError, ValueError):
             pass
+    readers = [threading.Thread(target=drain, args=(proc.stdout, chunks["out"]), daemon=True),
+               threading.Thread(target=drain, args=(proc.stderr, chunks["err"]), daemon=True)]
+    for r in readers:
+        r.start()
+
+    def kill():
+        with lock:
+            if state["reaped"]:
+                return
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
     if cancel is not None:
         cancel.on_cancel(kill)
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        kill()
-        proc.communicate()
-        raise
+    until, timed_out = time.monotonic() + timeout, False
+    while True:
+        with lock:
+            if proc.poll() is not None:
+                state["reaped"] = True
+                break
+        if not timed_out and time.monotonic() >= until:
+            timed_out = True
+            kill()
+        time.sleep(0.02)
+    for r in readers:
+        r.join(2)
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
     if cancel is not None and cancel.cancelled:
         raise Cancelled("Stopped.")
+    if timed_out:
+        raise subprocess.TimeoutExpired(argv, timeout)
+    out, err = b"".join(chunks["out"]), b"".join(chunks["err"])
+    if text:
+        out, err = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+# Grok Build settings that run a program (configuration reference, Grok Build 1.0.70):
+# auth.auth_provider_command, grok_com_config.auth_provider_command, [auth_provider.<name>]
+# helpers, feedback.user.command, [hooks], [[ui.notifications.hooks]], ui.status_line.command,
+# mcp_servers.<name>.command. `grok inspect` does not report all of them, so the files are
+# read (they hold settings, not credentials) and any such setting, or anything that looks
+# like one, stops Umbrous from starting Grok. Deliberately broad: a false alarm only means
+# Grok is not used from Umbrous; a miss would run a program outside the gate.
+CONFIG_FILES = ("config.toml", "managed_config.toml", "requirements.toml")
+SYSTEM_CONFIG = Path("/etc/grok")
+EXECUTABLE_MARKERS = ("command", "cmd", "hook", "auth_provider", "mcp_servers", "status_line", "notifications",
+                      "helper", "exec", "script")
+
+
+def check_config(grok_home: Optional[Path] = None, system: Path = SYSTEM_CONFIG) -> None:
+    home = grok_home or Path.home() / ".grok"
+    for folder in (home, system):
+        for name in CONFIG_FILES:
+            path = folder / name
+            try:
+                if not path.exists():
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                raise ProviderError(f"Could not read Grok Build's settings ({path}); nothing was sent.") from None
+            body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#")).lower()
+            found = sorted({m for m in EXECUTABLE_MARKERS if m in body})
+            if found:
+                raise ProviderError(f"Grok Build's settings in {path} can run programs ({', '.join(found)}); "
+                                    "Umbrous cannot keep those inside its gate, so nothing was sent. Remove those "
+                                    "settings to use Grok here.")
 
 
 class Conversation:
@@ -245,6 +313,7 @@ class GrokAdapter:
         self.step = step
         self._binary = binary
         self._run = runner or run_cancellable
+        self.grok_home = None              # ~/.grok (tests point it elsewhere)
         self.pool = SessionPool()
         self._catalog: dict = {}
         self._catalog_at = 0.0
@@ -274,6 +343,7 @@ class GrokAdapter:
         only for a trusted folder, and a headless run trusts them wherever it runs, so the
         check runs in your home folder too (always trusted, and it loads no project hooks),
         as well as in the step's own folder."""
+        check_config(self.grok_home)
         home = self._inspect(str(Path.home()), cancel, until - time.monotonic())
         if home.get("projectTrusted") is not True:
             raise ProviderError("Grok Build did not show its trusted configuration; nothing was sent.")
