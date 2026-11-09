@@ -68,7 +68,9 @@ step sends only `transcript_continues` (the messages after the model's previous
 answer) and the tools only when they change. A step whose request does not
 exactly continue the conversation (an earlier message was rewritten, the model's
 answer differs, a failure, Stop or time limit) starts a new conversation from the
-full transcript, as before. Idle conversations close after 120 s; at most 4 wait.
+full transcript, as before. A conversation belongs to the task that started it (its
+stop token), so no other task or chat can continue it whatever its content. Idle
+conversations close after 120 s; at most 4 wait; shutdown closes every one.
 
 Real runs, same task (add multiply to calc.py and make the tests pass), model
 gpt-6-astra at medium effort through the same ChatGPT sign-in; token counts are

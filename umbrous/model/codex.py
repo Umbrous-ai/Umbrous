@@ -338,12 +338,20 @@ class _Session:
     `stable` is what the thread already holds of Umbrous's transcript (system notes
     at the end of a request are not kept: the run loop replaces them each step), and
     `expect` the answer the model gave last, which the next request must begin with.
-    A request that does not continue it exactly starts a new conversation instead."""
-    def __init__(self, server, key):
-        self.server, self.key = server, key
+    A request that does not continue it exactly starts a new conversation instead.
+
+    `owner` is the task's CancelToken (one per run of the run loop): only requests
+    of that same task may continue the conversation, whatever their content.
+    `generation` changes whenever the session is parked or claimed, so a stale idle
+    timer can tell it no longer owns it. `epoch` is the adapter's shutdown count
+    when the session was created: a session created before a close() is never parked."""
+    def __init__(self, server, key, owner, epoch):
+        self.server, self.key, self.owner, self.epoch = server, key, owner, epoch
         self.thread_id = None
         self.stable, self.expect, self.tools = [], None, None
         self.timer = None
+        self.generation = 0
+        self.keep = False
 
 
 def _split(messages):
@@ -381,6 +389,7 @@ class CodexAdapter:
         self._active_lock = threading.Lock()
         self._active = set()
         self._idle = []            # _Session objects waiting for their task's next step
+        self._epoch = 0            # incremented by close(): sessions from before it are never parked
 
     @contextmanager
     def _server(self, timeout=None, cancel=None):
@@ -413,37 +422,57 @@ class CodexAdapter:
             with self._active_lock:
                 self._active.discard(server)
 
-    def _claim(self, key, stable):
-        """The idle conversation this request continues, removed from the pool, or None."""
+    def _claim(self, key, stable, owner):
+        """The idle conversation this request continues, removed from the pool, or None.
+        It must belong to the same task (`owner`) and continue its transcript exactly."""
         with self._active_lock:
             for sess in list(self._idle):
                 n = len(sess.stable)
-                if (sess.key == key and not sess.server.closed and stable[:n] == sess.stable
-                        and len(stable) > n and _answer_matches(stable[n], sess.expect)):
+                if (sess.owner is owner and sess.key == key and not sess.server.closed
+                        and stable[:n] == sess.stable and len(stable) > n
+                        and _answer_matches(stable[n], sess.expect)):
                     self._idle.remove(sess)
+                    sess.generation += 1          # a running idle timer no longer owns it
                     if sess.timer is not None:
                         sess.timer.cancel()
                     return sess
         return None
 
-    def _park(self, sess):
-        """Keep a conversation for its task's next step; the oldest beyond the pool size is closed."""
-        def expire():
-            with self._active_lock:
-                if sess in self._idle:
-                    self._idle.remove(sess)
-                    self._active.discard(sess.server)
-            sess.server.close()
-        sess.timer = threading.Timer(SESSION_IDLE_S, expire)
-        sess.timer.daemon = True
+    def _expire(self, sess, generation):
+        """Idle timer: close the session only if it is still the same idle session."""
         with self._active_lock:
-            self._idle.append(sess)
-            self._active.add(sess.server)
-            extra = self._idle[:-SESSION_POOL] if len(self._idle) > SESSION_POOL else []
-            for old in extra:
-                self._idle.remove(old)
-                self._active.discard(old.server)
-        sess.timer.start()
+            if sess.generation != generation or sess not in self._idle:
+                return
+            self._idle.remove(sess)
+            self._active.discard(sess.server)
+        sess.server.close()
+
+    def _release(self, sess, keep):
+        """After a step: park the session for its task's next step, or close it.
+
+        Done under the lock that close() takes, so close() either sees the session
+        (parked, or still active) or the session sees the newer epoch and is closed."""
+        extra, timer = [], None
+        with self._active_lock:
+            park = keep and sess.epoch == self._epoch
+            if park:
+                sess.generation += 1
+                timer = threading.Timer(SESSION_IDLE_S, self._expire, (sess, sess.generation))
+                timer.daemon = True
+                sess.timer = timer
+                self._idle.append(sess)
+                if len(self._idle) > SESSION_POOL:
+                    extra = self._idle[:-SESSION_POOL]
+                    for old in extra:
+                        self._idle.remove(old)
+                        old.generation += 1
+                        self._active.discard(old.server)
+            else:
+                self._active.discard(sess.server)
+        if timer is not None:
+            timer.start()
+        else:
+            sess.server.close()
         for old in extra:
             if old.timer is not None:
                 old.timer.cancel()
@@ -454,26 +483,30 @@ class CodexAdapter:
         """A task conversation for one step: continued when it matches, else new.
 
         Closed after any failure, stop or time limit (the next step then starts a new
-        one from the full transcript); kept only when the step asked for tools."""
-        sess = self._claim(key, stable)
-        if sess is None:
-            sess = _Session(self.server_factory(), key)
-            fresh = True
-        else:
-            fresh = False
+        one from the full transcript); kept only when the step asked for tools.
+        `cancel` is the task's token and its identity."""
+        sess = self._claim(key, stable, cancel) if cancel is not None else None
+        fresh = sess is None
+        if fresh:
+            with self._active_lock:
+                epoch = self._epoch
+            sess = _Session(self.server_factory(), key, cancel, epoch)
         server = sess.server
         expired = threading.Event()
         def expire():
             expired.set()
             server.close()
         timer = threading.Timer(timeout, expire) if timeout is not None else None
+        with self._active_lock:
+            self._active.add(server)
+            stale = sess.epoch != self._epoch        # close() ran after this session was made
+        if stale:
+            server.close()
         if cancel is not None:
             cancel.on_cancel(server.close)
         if timer is not None:
             timer.daemon = True
             timer.start()
-        with self._active_lock:
-            self._active.add(server)
         sess.keep = False
         try:
             if fresh:
@@ -488,17 +521,13 @@ class CodexAdapter:
         finally:
             if timer is not None:
                 timer.cancel()
-            keep = sess.keep and not server.closed and not (cancel is not None and cancel.cancelled)
-            with self._active_lock:
-                self._active.discard(server)
-            if keep:
-                self._park(sess)
-            else:
-                server.close()
+            self._release(sess, sess.keep and not server.closed and not (cancel is not None and cancel.cancelled))
 
     def close(self):
         with self._active_lock:
+            self._epoch += 1                  # sessions in use now are closed when their step ends
             for sess in self._idle:
+                sess.generation += 1
                 if sess.timer is not None:
                     sess.timer.cancel()
                 self._active.add(sess.server)

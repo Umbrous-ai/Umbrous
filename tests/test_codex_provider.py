@@ -307,7 +307,8 @@ class CodexTests(unittest.TestCase):
     def test_a_task_continues_one_conversation_and_sends_only_new_messages(self):
         a, servers = self.task_adapter()
         first = [{"role": "system", "content": "policy"}, {"role": "user", "content": "read x"}]
-        step = lambda msgs, tools=[TOOL]: list(a.chat_stream('codex/test-model', msgs, tools=tools))
+        token = CancelToken()                     # one task: its token is its identity
+        step = lambda msgs, tools=[TOOL]: list(a.chat_stream('codex/test-model', msgs, tools=tools, cancel=token))
         # step 1: a new conversation with the whole transcript
         task = FakeServer(events=[]); self.turn(task, "Reading.", [("read_file", {"path": "x"})])
         a.server_factory = lambda: task
@@ -335,13 +336,14 @@ class CodexTests(unittest.TestCase):
         first = [{"role": "system", "content": "policy"}, {"role": "user", "content": "read x"}]
         one = FakeServer(events=[]); self.turn(one, "", [("read_file", {"path": "x"})])
         a.server_factory = lambda: one
-        list(a.chat_stream('codex/test-model', first, tools=[TOOL]))
+        token = CancelToken()
+        list(a.chat_stream('codex/test-model', first, tools=[TOOL], cancel=token))
         answer = {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "x"}}}]}
         result = {"role": "tool", "content": "UNTRUSTED data", "tool_name": "read_file"}
         two = FakeServer(events=[]); self.turn(two, "done")
         a.server_factory = lambda: two
         changed = [first[0], {"role": "user", "content": "read y"}, answer, result]     # an earlier message differs
-        list(a.chat_stream('codex/test-model', changed, tools=[TOOL]))
+        list(a.chat_stream('codex/test-model', changed, tools=[TOOL], cancel=token))
         self.assertEqual(self.inputs(two)[0]["transcript"], changed[1:])               # full transcript, new thread
         self.assertFalse(one.closed)                                                   # still waiting for its own task
         a.close()
@@ -356,6 +358,64 @@ class CodexTests(unittest.TestCase):
             list(a.chat_stream('codex/test-model', first, tools=[TOOL]))
         self.assertTrue(one.closed)
         self.assertEqual(a._idle, [])
+
+    def started_task(self, a, reply="", calls=(("read_file", {"path": "x"}),)):
+        first = [{"role": "system", "content": "policy"}, {"role": "user", "content": "read x"}]
+        server = FakeServer(events=[]); self.turn(server, reply, calls)
+        a.server_factory = lambda: server
+        token = CancelToken()
+        list(a.chat_stream('codex/test-model', first, tools=[TOOL], cancel=token))
+        answer = {"role": "assistant", "content": reply,
+                  "tool_calls": [{"function": {"name": n, "arguments": x}} for n, x in calls]}
+        return server, token, first + [answer, {"role": "tool", "content": "UNTRUSTED data", "tool_name": "read_file"}]
+
+    def test_another_task_never_continues_a_conversation_even_with_the_same_content(self):
+        a, _ = self.task_adapter()
+        one, token_a, next_messages = self.started_task(a)
+        two = FakeServer(events=[]); self.turn(two, "done")
+        a.server_factory = lambda: two
+        other_task = CancelToken()
+        list(a.chat_stream('codex/test-model', next_messages, tools=[TOOL], cancel=other_task))
+        self.assertEqual([m for m, _ in two.calls].count("thread/start"), 1)   # its own conversation
+        self.assertEqual([m for m, _ in one.calls].count("turn/start"), 1)     # A's was not used
+        other_task.cancel()
+        self.assertFalse(one.closed)                                           # B's stop cannot close A's
+        token_a.cancel()
+        self.assertTrue(one.closed)
+        a.close()
+
+    def test_a_stale_idle_timer_cannot_close_a_conversation_in_use(self):
+        a, _ = self.task_adapter()
+        one, token, next_messages = self.started_task(a)
+        sess = a._idle[0]
+        stale = sess.generation
+        claimed = a._claim(sess.key, [m for m in next_messages if m["role"] != "system"], token)
+        self.assertIs(claimed, sess)
+        a._expire(sess, stale)                     # the timer's callback was already running
+        self.assertFalse(one.closed)
+        a._expire(sess, sess.generation)           # not idle any more: still not closed
+        self.assertFalse(one.closed)
+        a._release(sess, False)
+        self.assertTrue(one.closed)
+
+    def test_close_during_a_step_is_never_missed(self):
+        a, _ = self.task_adapter()
+        server = FakeServer(events=[])
+        a.server_factory = lambda: server
+        token = CancelToken()
+        with a._session(("k",), [], cancel=token) as sess:
+            sess.keep = True                       # the step would keep its conversation...
+            a.close()                              # ...but the adapter is shutting down meanwhile
+        self.assertTrue(server.closed)
+        self.assertEqual(a._idle, [])
+        later = FakeServer(events=[])
+        a.server_factory = lambda: later
+        with a._session(("k",), [], cancel=token) as sess:   # after close, new sessions work as before
+            sess.keep = True
+        self.assertFalse(later.closed)
+        self.assertEqual(len(a._idle), 1)
+        a.close()
+        self.assertTrue(later.closed)
 
     def test_close_stops_live_processes(self):
         a, _ = self.adapter(); s = FakeServer()
