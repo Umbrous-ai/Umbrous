@@ -135,7 +135,7 @@ def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float =
     group id cannot have been reused when it is signalled; after reaping, it never is.
     If a process that left the group still holds a pipe, reading gives up shortly after
     the kill and the pipes are closed (they belong to this thread alone)."""
-    import select
+    import selectors
     kwargs.pop("capture_output", None)
     text = kwargs.pop("text", False)
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, **kwargs)
@@ -153,7 +153,12 @@ def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float =
         cancel.on_cancel(kill)
     fds = {proc.stdout.fileno(): [], proc.stderr.fileno(): []}
     open_fds = set(fds)
+    # selectors (kqueue/epoll/poll), not select(): any descriptor number works.
+    sel = selectors.DefaultSelector()
+    for fd in fds:
+        sel.register(fd, selectors.EVENT_READ)
     until, killed_at, why = time.monotonic() + timeout, None, None
+    finished = False
     try:
         while True:
             now = time.monotonic()
@@ -163,13 +168,14 @@ def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float =
                 killed_at = now
             if not open_fds or (killed_at is not None and now - killed_at > 2):
                 break
-            ready, _, _ = select.select(list(open_fds), [], [], 0.05)
-            for fd in ready:
+            for key, _ in sel.select(0.05):
+                fd = key.fd
                 data = os.read(fd, 65536)
                 if data:
                     fds[fd].append(data)
                 else:
                     open_fds.discard(fd)
+                    sel.unregister(fd)
         # Reap, still honouring Stop and the deadline.
         while True:
             with lock:
@@ -180,7 +186,18 @@ def run_cancellable(argv, cancel: Optional[CancelToken] = None, timeout: float =
                 why = "cancelled" if cancel is not None and cancel.cancelled else "timeout"
                 kill()
             time.sleep(0.02)
+        finished = True
     finally:
+        sel.close()
+        if not finished:
+            # An unexpected error: the process this runner owns never outlives it.
+            kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            with lock:
+                state["reaped"] = proc.returncode is not None
         for stream in (proc.stdout, proc.stderr):
             try:
                 stream.close()                 # no other thread uses them: never blocks

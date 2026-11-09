@@ -258,13 +258,43 @@ class GrokTests(unittest.TestCase):
             run_cancellable(["/bin/sh", "-c", "sleep 30 & echo started"], cancel=token, timeout=60)
         self.assertLess(time.monotonic() - started, 4)
         # A descendant that left the process group: reading gives up instead of hanging.
-        escaped = ("import os, sys, time\nif os.fork() == 0:\n    os.setsid()\n    print(os.getpid(), flush=True)\n"
-                   "    time.sleep(30)\n")
+        pid_file = Path(self.empty_home()) / "pid"
+        escaped = ("import os, sys, time\nif os.fork() == 0:\n    os.setsid()\n"
+                   f"    open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n    time.sleep(30)\n")
         started = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired):
             run_cancellable([sys.executable, "-c", escaped], timeout=0.3)
         self.assertLess(time.monotonic() - started, 5)
-        subprocess.run(["pkill", "-f", "time.sleep\\(30\\)"], check=False)
+        os.kill(int(pid_file.read_text()), 9)                                # only the fixture's own process
+
+    def test_high_descriptor_numbers_work_and_errors_never_leak_the_child(self):
+        import resource, subprocess
+        from umbrous.model.grok import run_cancellable
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard != resource.RLIM_INFINITY and hard < 1100:
+            self.skipTest("cannot open enough descriptors here")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 1100), hard))
+        self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
+        held = [os.open("/dev/null", os.O_RDONLY) for _ in range(1030)]     # pipes land above 1024
+        self.addCleanup(lambda: [os.close(fd) for fd in held])
+        done = run_cancellable(["/bin/sh", "-c", "echo ok"], timeout=10, text=True)
+        self.assertEqual(done.stdout.strip(), "ok")
+        # An unexpected error while reading: the child is ended and reaped, not left running.
+        pids = []
+        real = subprocess.Popen
+        def popen(*a, **k):
+            p = real(*a, **k)
+            pids.append(p)
+            return p
+        import selectors
+        class Broken(selectors.DefaultSelector):
+            def select(self, timeout=None):
+                raise RuntimeError("boom")
+        with unittest.mock.patch("umbrous.model.grok.subprocess.Popen", popen), \
+                unittest.mock.patch("selectors.DefaultSelector", Broken):
+            with self.assertRaises(RuntimeError):
+                run_cancellable(["/bin/sh", "-c", "echo x; sleep 30"], timeout=10)
+        self.assertIsNotNone(pids[0].returncode)
 
     def test_the_check_runner_never_signals_a_reaped_child(self):
         import time
