@@ -48,7 +48,7 @@ class FakeProcess:
                                    "output_tokens": 20}}]
 
 
-class ClaudeTests(unittest.TestCase):
+class ClaudeBase(unittest.TestCase):
     def adapter(self, *processes):
         queue, made, catalog = list(processes), [], FakeProcess()
         def factory(argv):
@@ -59,6 +59,9 @@ class ClaudeTests(unittest.TestCase):
             made.append(p)
             return p
         return ClaudeAdapter(Path("/tmp"), process_factory=factory, binary="/bin/claude"), made
+
+
+class ClaudeTests(ClaudeBase):
 
     def test_isolating_flags_and_no_api_key(self):
         argv = command("/bin/claude", MODEL, "high", "policy", [TOOL])
@@ -156,6 +159,66 @@ class ClaudeTests(unittest.TestCase):
         with self.assertRaises(ProviderError):
             list(a.chat_stream("claude/" + MODEL, [{"role": "user", "content": "hi"}], options={"reasoning_effort": "max"}))
         self.assertEqual(made, [])
+
+
+class ClaudeChecksTests(ClaudeBase):
+    def test_a_direct_tool_call_without_a_refusal_is_not_accepted(self):
+        start = {"type": "stream_event", "event": {"type": "content_block_start",
+                 "content_block": {"type": "tool_use", "id": "u1", "name": "read_file", "input": {}}}}
+        p = FakeProcess(); p.turn("fine", [("read_file", {"path": "x"})], extra=(start,))   # never answered
+        a, _ = self.adapter(p)
+        out = []
+        with self.assertRaises(ProviderError):
+            for piece in a.chat_stream("claude/" + MODEL, [{"role": "user", "content": "hi"}], tools=[TOOL],
+                                       cancel=CancelToken()):
+                out.append(piece)
+        self.assertEqual(out, [])                       # nothing was passed on
+        self.assertTrue(p.closed)                       # and nothing kept
+        self.assertEqual(a.pool._idle, [])
+
+    def test_every_turn_needs_its_own_start_up_report(self):
+        p = FakeProcess(); p.turn("Reading.", [("read_file", {"path": "x"})])
+        a, _ = self.adapter(p)
+        token = CancelToken()
+        first = [{"role": "user", "content": "read x"}]
+        list(a.chat_stream("claude/" + MODEL, first, tools=[TOOL], cancel=token))
+        p.turn("done", init={"type": "system", "subtype": "status"})    # second turn: no init event
+        answer = {"role": "assistant", "content": "Reading.",
+                  "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "x"}}}]}
+        out = []
+        with self.assertRaises(ProviderError):
+            for piece in a.chat_stream("claude/" + MODEL, first + [answer, {"role": "tool", "content": "UNTRUSTED"}],
+                                       tools=[TOOL], cancel=token):
+                out.append(piece)
+        self.assertEqual(out, [])
+        self.assertTrue(p.closed)
+
+    def test_a_missing_report_on_a_proposal_never_keeps_the_session(self):
+        p = FakeProcess(); p.turn("Reading.", [("read_file", {"path": "x"})], init={"type": "system", "subtype": "status"})
+        a, _ = self.adapter(p)
+        out = []
+        with self.assertRaises(ProviderError):
+            for piece in a.chat_stream("claude/" + MODEL, [{"role": "user", "content": "hi"}], tools=[TOOL],
+                                       cancel=CancelToken()):
+                out.append(piece)
+        self.assertEqual(out, [])
+        self.assertEqual(a.pool._idle, [])
+        self.assertTrue(p.closed)
+
+    def test_stop_ends_a_process_that_stopped_reading_mid_write(self):
+        import threading, time
+        from umbrous.model.claude import Process
+        # A child that never reads its stdin: a 1 MB message blocks the write.
+        proc = Process(["/bin/sh", "-c", "sleep 30"])
+        writer = threading.Thread(target=lambda: self.assertRaises(Exception, proc.send, "x" * 1_000_000), daemon=True)
+        writer.start()
+        time.sleep(0.3)
+        done = threading.Event()
+        threading.Thread(target=lambda: (proc.close(), done.set()), daemon=True).start()
+        self.assertTrue(done.wait(5), "close() waited for the blocked write")
+        writer.join(5)
+        self.assertFalse(writer.is_alive())
+        self.assertIsNotNone(proc.proc.poll())
 
 
 class Handle:

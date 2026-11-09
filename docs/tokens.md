@@ -131,3 +131,9 @@ Same task, grok-4.7, same subscription; Grok Build's own usage and cost reports
 
 Umbrous sends 45 % fewer tokens but, without the cache, costs about 45 % more.
 About 5,000 tokens of every new Grok session are Grok Build's own prompt.
+
+Configuration that runs outside any tool list is kept out: the Claude and Cursor hooks, MCP
+servers, agents, rules and skills Grok Build would borrow are switched off by environment,
+and before each step `grok inspect --json` (same folder and environment) must report no
+hooks, plugins, MCP or LSP servers and no project instructions, or nothing is sent. A step's
+whole process group is ended afterwards, even when Grok Build itself already exited.

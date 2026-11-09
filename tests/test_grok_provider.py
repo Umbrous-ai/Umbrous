@@ -24,8 +24,11 @@ def turn(reply, calls=(), session="s1", tools=()):
              "usage": {"input_tokens": 400, "cache_read_input_tokens": 6000, "output_tokens": 30}}]
 
 
+CLEAN = {"hooks": [], "plugins": [], "mcpServers": [], "lspServers": [], "projectInstructions": [], "skills": []}
+
+
 class GrokTests(unittest.TestCase):
-    def adapter(self, *turns, models=MODELS, resume=True):
+    def adapter(self, *turns, models=MODELS, resume=True, inspect=None):
         script, steps = list(turns), []
         def step(conv, argv):
             steps.append((conv, argv, open(argv[argv.index("--prompt-file") + 1]).read()))
@@ -34,7 +37,10 @@ class GrokTests(unittest.TestCase):
                 q.put(ev)
             q.put(None)
             return q
-        runner = lambda *a, **k: SimpleNamespace(stdout=models, stderr="")
+        def runner(argv, **k):
+            if argv[1] == "inspect":
+                return SimpleNamespace(stdout=json.dumps(inspect or CLEAN), stderr="")
+            return SimpleNamespace(stdout=models, stderr="")
         return GrokAdapter(Path("/tmp"), step=step, binary="/bin/grok", runner=runner, resume=resume), steps
 
     def test_every_tool_denied_and_no_api_key(self):
@@ -119,6 +125,32 @@ class GrokTests(unittest.TestCase):
                            tools=[TOOL], cancel=token))
         self.assertNotIn("--resume", steps[1][1])
         self.assertIn('"transcript"', steps[1][2])
+
+    def test_hooks_plugins_or_servers_in_the_configuration_send_nothing(self):
+        for key in ("hooks", "plugins", "mcpServers", "lspServers", "projectInstructions"):
+            a, steps = self.adapter(turn("x"), inspect=dict(CLEAN, **{key: [{"name": "x"}]}))
+            with self.assertRaises(ProviderError) as caught:
+                list(a.chat_stream("grok/grok-4.7", [{"role": "user", "content": "hi"}], tools=[TOOL]))
+            self.assertIn(key, caught.exception.message)
+            self.assertEqual(steps, [])                                      # Grok Build was never started
+        from umbrous.model.grok import _environment
+        env = _environment()
+        for name in ("GROK_CLAUDE_HOOKS_ENABLED", "GROK_CURSOR_HOOKS_ENABLED", "GROK_CLAUDE_MCPS_ENABLED"):
+            self.assertEqual(env[name], "0")
+
+    def test_cleanup_ends_processes_left_after_grok_exits(self):
+        import subprocess, time
+        conv = Conversation()
+        # The leader exits at once; its child (same process group) keeps running.
+        conv.process = subprocess.Popen(["/bin/sh", "-c", "sleep 30 & echo $!"], stdout=subprocess.PIPE,
+                                        start_new_session=True)
+        child = int(conv.process.stdout.readline())
+        time.sleep(0.2)
+        conv.close()
+        time.sleep(0.1)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)
+        conv.stop_process()                                                  # again: no signal to a reused id
 
     def test_closing_removes_the_saved_sessions_of_its_folder(self):
         conv = Conversation()

@@ -91,7 +91,26 @@ def executable() -> str:
 def _environment() -> dict:
     # No application tokens and no XAI_API_KEY: Grok Build must use your own sign-in.
     allowed = ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "SHELL")
-    return {k: os.environ[k] for k in allowed if k in os.environ}
+    env = {k: os.environ[k] for k in allowed if k in os.environ}
+    # Grok Build also loads Claude Code's and Cursor's hooks, MCP servers, agents, rules and
+    # skills from your home folder. Hooks run commands outside any tool list: all off.
+    for vendor in ("CLAUDE", "CURSOR"):
+        for surface in ("HOOKS", "MCPS", "AGENTS", "RULES", "SKILLS"):
+            env[f"GROK_{vendor}_{surface}_ENABLED"] = "0"
+    return env
+
+
+# What `grok inspect` must report empty before a step may start: anything here can run
+# code or reach the network outside Umbrous's gate (hooks), or add tools and instructions.
+MUST_BE_EMPTY = ("hooks", "plugins", "mcpServers", "lspServers", "projectInstructions")
+
+
+def check_inspect(data: dict) -> None:
+    present = [k for k in MUST_BE_EMPTY if not isinstance(data.get(k), list) or data.get(k)]
+    if present:
+        raise ProviderError("Grok Build would load " + ", ".join(present) + " (from your Grok configuration); "
+                            "Umbrous cannot keep those inside its gate, so nothing was sent. Remove them from "
+                            "~/.grok (hooks, plugins, MCP or LSP servers) to use Grok here.")
 
 
 def command(binary: str, model: str, effort: Optional[str], system: str, tools, prompt_file: str,
@@ -118,9 +137,11 @@ class Conversation:
         self.lock = threading.Lock()
 
     def stop_process(self) -> None:
+        """End the step's whole process group, even when Grok Build itself already exited
+        (anything it started stays in the group and must not outlive the step)."""
         with self.lock:
             proc = self.process
-        if proc is not None and proc.poll() is None:
+        if proc is not None:
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
                     os.killpg(proc.pid, sig)
@@ -132,6 +153,11 @@ class Conversation:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait(timeout=2)
+            # Reaped: its group id may be reused from now on, so never signal it again.
+            with self.lock:
+                if self.process is proc:
+                    self.process = None
 
     def close(self) -> None:
         with self.lock:
@@ -198,6 +224,17 @@ class GrokAdapter:
 
     def binary(self) -> str:
         return self._binary or executable()
+
+    def _inspect(self, cwd: str) -> dict:
+        try:
+            out = self._run([self.binary(), "inspect", "--json"], capture_output=True, text=True, timeout=30,
+                            env=_environment(), stdin=subprocess.DEVNULL, cwd=cwd)
+            data = json.loads(out.stdout or "")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise ProviderError("Could not check Grok Build's configuration; nothing was sent.") from None
+        if not isinstance(data, dict):
+            raise ProviderError("Could not check Grok Build's configuration; nothing was sent.")
+        return data
 
     # ---------------------------------------------------------------- account and catalog
     def _models(self) -> dict:
@@ -299,6 +336,9 @@ class GrokAdapter:
         timer = threading.Timer(max(0.001, d.total), conv.stop_process)
         timer.daemon = True
         try:
+            # Before every step, in this step's folder and environment: no hooks, plugins,
+            # MCP or LSP servers or project instructions would load (no model call).
+            check_inspect(self._inspect(conv.directory))
             events = self.step(conv, argv)
             timer.start()
             cancel.on_cancel(conv.stop_process)

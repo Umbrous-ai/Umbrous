@@ -112,9 +112,12 @@ class Process:
         self.directory = tempfile.TemporaryDirectory(prefix="umbrous-claude-")
         self.events: "queue.Queue" = queue.Queue(maxsize=4096)
         self.closed = False
-        self.lock = threading.Lock()
+        # Two locks: writes may block on a full pipe, and close() must never wait for them
+        # (it ends the process, which makes a blocked write fail at once).
+        self.state_lock = threading.Lock()
+        self.write_lock = threading.Lock()
         try:
-            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0,
                                          stderr=subprocess.DEVNULL, cwd=self.directory.name,
                                          env=_environment(), start_new_session=True)
         except OSError:
@@ -159,12 +162,14 @@ class Process:
 
     def _write(self, item: dict) -> None:
         line = json.dumps(item, ensure_ascii=False) + "\n"
+        data = memoryview(line.encode("utf-8"))
         try:
-            with self.lock:
-                if self.closed:
-                    raise StreamInterrupted("The Claude Code process closed.")
-                self.proc.stdin.write(line.encode("utf-8"))
-                self.proc.stdin.flush()
+            with self.write_lock:
+                while data:
+                    if self.closed:
+                        raise StreamInterrupted("The Claude Code process closed.")
+                    written = os.write(self.proc.stdin.fileno(), data)
+                    data = data[written:]
         except (OSError, ValueError):
             raise StreamInterrupted("The Claude Code process closed.") from None
 
@@ -187,7 +192,7 @@ class Process:
             return item
 
     def close(self) -> None:
-        with self.lock:
+        with self.state_lock:
             if self.closed:
                 return
             self.closed = True
@@ -202,7 +207,13 @@ class Process:
             self.proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             self.proc.kill()
-        for stream in (self.proc.stdin, self.proc.stdout):
+        # stdin is closed only when no write is in progress (a blocked write fails now
+        # that the process is gone, and the writer's next attempt sees `closed`).
+        streams = [self.proc.stdout]
+        if self.write_lock.acquire(blocking=False):
+            streams.append(self.proc.stdin)
+            self.write_lock.release()
+        for stream in streams:
             try:
                 stream.close()
             except (OSError, ValueError):
@@ -364,9 +375,10 @@ class ClaudeAdapter:
             if not sess.started:
                 # Before the first message: sign-in, permission mode and commands (no model call).
                 check_handshake(proc.handshake(max(0.001, first_deadline - time.monotonic()), cancel))
+            proc.init = None                  # every turn must report its own set-up
             proc.send(json.dumps(prompt, ensure_ascii=False))
             sess.started = True
-            partial, first, refused = "", True, set()
+            partial, first, refused, refusals = "", True, set(), set()
             idle_deadline = time.monotonic() + d.idle
             while True:
                 remaining = d.total - (time.monotonic() - started)
@@ -417,12 +429,19 @@ class ClaudeAdapter:
                     # answer tool must have been refused, or something ran outside the gate.
                     content = (ev.get("message") or {}).get("content")
                     for block in content if isinstance(content, list) else []:
-                        if block.get("type") == "tool_result" and block.get("tool_use_id") in refused \
-                                and not block.get("is_error"):
-                            raise ProviderError("Claude Code ran a tool outside Umbrous's gate; the turn was stopped.")
+                        if block.get("type") == "tool_result" and block.get("tool_use_id") in refused:
+                            if not block.get("is_error"):
+                                raise ProviderError("Claude Code ran a tool outside Umbrous's gate; the turn was stopped.")
+                            refusals.add(block.get("tool_use_id"))
                     continue
                 if kind != "result":
                     continue
+                # Everything is checked before anything is passed on or the session is kept:
+                # this turn's own set-up report, and a refusal for every direct tool call.
+                if proc.init is None:
+                    raise ProviderError("Claude Code did not report its set-up; nothing was executed.")
+                if refused - refusals:
+                    raise ProviderError("Claude Code did not refuse a direct tool call; nothing was executed.")
                 if ev.get("subtype") != "success" or ev.get("is_error"):
                     raise ProviderError("The Claude request failed. Check your plan's usage limits and the selected model.")
                 answer = ev.get("structured_output")
@@ -441,8 +460,6 @@ class ClaudeAdapter:
                     sess.done_step(stable, reply, calls)
                     keep = True
                     yield ChatToolCalls(calls)
-                if proc.init is None:
-                    raise ProviderError("Claude Code did not report its set-up; nothing was executed.")
                 yield ChatDone(model, prompt_tokens=prompt_tokens or None,
                                reply_tokens=usage.get("output_tokens"), done_reason="stop")
                 return
