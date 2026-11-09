@@ -1,7 +1,7 @@
 """Model Router: picks the adapter and model for a request, and nothing else.
 
 The router selects local Ollama or an explicitly namespaced subscription model
-(codex/ for ChatGPT, claude/ for Claude, through each vendor's official CLI):
+(codex/ for ChatGPT, claude/ for Claude, grok/ for Grok, through each vendor's official CLI):
   - only models in the selected provider's current catalog can be used;
   - the model you picked is the model that is called. If it is missing or
     broken, the request fails with a clear error. There is no fallback to
@@ -26,20 +26,21 @@ from umbrous.persistence.session import open_connection
 
 class ModelRouter:
     # prefix -> (provider name, what the person calls it)
-    REMOTES = {"codex/": ("codex", "ChatGPT"), "claude/": ("claude", "Claude")}
+    REMOTES = {"codex/": ("codex", "ChatGPT"), "claude/": ("claude", "Claude"), "grok/": ("grok", "Grok")}
 
     def __init__(self, adapter: ModelAdapter, db_path: Path, codex: Optional[ModelAdapter] = None,
-                 claude: Optional[ModelAdapter] = None) -> None:
+                 claude: Optional[ModelAdapter] = None, grok: Optional[ModelAdapter] = None) -> None:
         self.adapter = adapter
         self.codex = codex
         self.claude = claude
+        self.grok = grok
         self.db_path = db_path
         self._lock = threading.Lock()
         self._probe_lock = threading.Lock()
 
     @property
     def remotes(self) -> dict:
-        return {"codex": self.codex, "claude": self.claude}
+        return {"codex": self.codex, "claude": self.claude, "grok": self.grok}
 
     def _db(self) -> sqlite3.Connection:
         return open_connection(self.db_path)

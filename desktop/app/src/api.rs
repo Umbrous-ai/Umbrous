@@ -705,7 +705,8 @@ pub struct ModelInfo {
 
 impl ModelInfo {
     pub fn is_cloud(&self) -> bool {
-        matches!(self.provider.as_str(), "codex" | "claude") || self.name.starts_with("codex/") || self.name.starts_with("claude/")
+        matches!(self.provider.as_str(), "codex" | "claude" | "grok")
+            || ["codex/", "claude/", "grok/"].iter().any(|p| self.name.starts_with(p))
     }
     pub fn label(&self) -> &str { if self.display_name.is_empty() { &self.name } else { &self.display_name } }
 }

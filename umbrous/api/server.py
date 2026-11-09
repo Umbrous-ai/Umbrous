@@ -271,7 +271,8 @@ class Handler(HistoryRoutes, AccessRoutes, MemoryRoutes, TaskRoutes, ModelRoutes
             status["exposure"] = rt.refresh_exposure().as_dict()
             self._send_json(200, status)
             return 200, "models"
-        if path in ("/api/providers/codex", "/api/providers/codex/login", "/api/providers/claude"):
+        if path in ("/api/providers/codex", "/api/providers/codex/login", "/api/providers/claude",
+                    "/api/providers/grok"):
             return self._provider(path)
         if self.command == "POST" and path in ("/api/models/probe", "/api/models/probe/start", "/api/models/probe/status", "/api/models/probe/cancel", "/api/chat", "/api/chat/cancel"):
             body = self._read_json()

@@ -106,3 +106,28 @@ writes at 2x (1-hour cache), as Anthropic prices them.
 | --- | --- | --- | --- | --- |
 | Claude Code (default setup) | 6–7 | 168,750–212,911 | 89–91 % | 50,600–55,700 |
 | Umbrous | 5 | 23,493–23,528 | 67–74 % | 13,700–17,000 |
+
+## Grok provider (new): Grok Build with its own tools off
+
+`grok/` models run through the official Grok Build CLI with your grok.com
+subscription (umbrous/model/grok.py; never XAI_API_KEY). Grok Build ignores an
+empty `--tools` list, so every known tool is denied by name and the tool list it
+reports must be empty, else the step stops (this caught a quirk in testing: with
+GROK_WORKFLOWS=0 an `update_goal` tool appeared). Any tool event stops the step.
+
+Resuming a Grok session would let later steps hit xAI's prompt cache, but in
+Grok Build 1.0.70 a resumed session ran the server-side X search although it was
+denied: Umbrous stopped the step, but the search had started on xAI's side. So
+every step starts a new session with the whole transcript (`resume=False`), and
+that costs the cache.
+
+Same task, grok-4.7, same subscription; Grok Build's own usage and cost reports
+(2 runs each, all tests passed):
+
+| | Requests | Input tokens | From cache | xAI-reported cost |
+| --- | --- | --- | --- | --- |
+| Grok Build | 5 turns | 90,966–91,056 | 82–90 % | $0.062–0.073 |
+| Umbrous (new session per step) | 6 | 49,658–49,689 | 14 % | $0.098–0.099 |
+
+Umbrous sends 45 % fewer tokens but, without the cache, costs about 45 % more.
+About 5,000 tokens of every new Grok session are Grok Build's own prompt.

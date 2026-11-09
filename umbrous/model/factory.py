@@ -16,4 +16,9 @@ def create_router(config: Config) -> ModelRouter:
     if config.claude_enabled:
         from umbrous.model.claude import ClaudeAdapter
         claude = ClaudeAdapter(config.home, deadlines=deadlines)
-    return ModelRouter(OllamaAdapter(config.ollama_url, deadlines), config.db_path, codex=codex, claude=claude)
+    grok = None
+    if config.grok_enabled:
+        from umbrous.model.grok import GrokAdapter
+        grok = GrokAdapter(config.home, deadlines=deadlines)
+    return ModelRouter(OllamaAdapter(config.ollama_url, deadlines), config.db_path, codex=codex, claude=claude,
+                       grok=grok)

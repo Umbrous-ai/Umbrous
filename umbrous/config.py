@@ -30,7 +30,7 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 _ALLOWED_KEYS = {
     "host", "port", "log_level", "open_browser",
-    "codex_enabled", "claude_enabled",
+    "codex_enabled", "claude_enabled", "grok_enabled",
     # M1: local model chat
     "ollama_url", "system_prompt", "recent_turns", "context_tokens", "reply_tokens",
     "first_token_timeout_s", "idle_timeout_s", "total_timeout_s",
@@ -79,6 +79,7 @@ class Config:
     open_browser: bool = True
     codex_enabled: bool = True   # discovery only; cloud inference requires selecting a codex/ model
     claude_enabled: bool = True  # discovery only; Claude inference requires selecting a claude/ model
+    grok_enabled: bool = True    # discovery only; Grok inference requires selecting a grok/ model
     # M1: local model chat. See docs/m1-chat.md.
     ollama_url: str = DEFAULT_OLLAMA_URL   # must be loopback; Umbrous never sends chats elsewhere
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -200,7 +201,7 @@ def _validate(values: Mapping[str, Any]) -> dict:
         raise ConfigError("open_browser must be true or false")
     if "memory_suggestions" in out and not isinstance(out["memory_suggestions"], bool):
         raise ConfigError("memory_suggestions must be true or false")
-    for flag in ("codex_enabled", "claude_enabled"):
+    for flag in ("codex_enabled", "claude_enabled", "grok_enabled"):
         if flag in out and not isinstance(out[flag], bool):
             raise ConfigError(f"{flag} must be true or false")
     return out
